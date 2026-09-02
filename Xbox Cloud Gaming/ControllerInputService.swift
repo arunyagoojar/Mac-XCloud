@@ -20,6 +20,9 @@ final class ControllerInputService: ObservableObject {
     var onSwitchCategory: ((Int) -> Void)?   // -1 left bumper / +1 right bumper
     /// Fires when a controller connects/disconnects (true = connected).
     var onPresenceChange: ((Bool) -> Void)?
+    /// When nil or false, UI navigation/activation input is ignored (e.g. the
+    /// settings window is closed) — only the Home double-press stays active.
+    var isUIInputEnabled: (() -> Bool)?
 
     @Published private(set) var controllerName: String?
     @Published private(set) var supportsLED = false
@@ -108,23 +111,25 @@ final class ControllerInputService: ObservableObject {
             }
         }
 
-        // Overlay navigation, one step per press.
+        // Overlay navigation, one step per press — only while UI is visible.
         let stick = pad.leftThumbstick.xAxis.value
         let stickY = pad.leftThumbstick.yAxis.value
-
         let up = pad.dpad.up.isPressed || stickY > 0.55
         let down = pad.dpad.down.isPressed || stickY < -0.55
         let left = pad.dpad.left.isPressed || stick < -0.55
         let right = pad.dpad.right.isPressed || stick > 0.55
 
-        if up, !previous.dpadUp, !previous.stickUp { onNavigate?(-1) }
-        if down, !previous.dpadDown, !previous.stickDown { onNavigate?(1) }
-        if left, !previous.dpadLeft, !previous.stickLeft { onAdjust?(-1) }
-        if right, !previous.dpadRight, !previous.stickRight { onAdjust?(1) }
-        if pad.buttonA.isPressed, !previous.a { onActivate?() }
-        if pad.buttonB.isPressed, !previous.b { onCancel?() }
-        if pad.leftShoulder.isPressed, !previous.lb { onSwitchCategory?(-1) }
-        if pad.rightShoulder.isPressed, !previous.rb { onSwitchCategory?(1) }
+        let uiActive = isUIInputEnabled?() ?? false
+        if uiActive {
+            if up, !previous.dpadUp, !previous.stickUp { onNavigate?(-1) }
+            if down, !previous.dpadDown, !previous.stickDown { onNavigate?(1) }
+            if left, !previous.dpadLeft, !previous.stickLeft { onAdjust?(-1) }
+            if right, !previous.dpadRight, !previous.stickRight { onAdjust?(1) }
+            if pad.buttonA.isPressed, !previous.a { onActivate?() }
+            if pad.buttonB.isPressed, !previous.b { onCancel?() }
+            if pad.leftShoulder.isPressed, !previous.lb { onSwitchCategory?(-1) }
+            if pad.rightShoulder.isPressed, !previous.rb { onSwitchCategory?(1) }
+        }
 
         previous = ButtonState(home: homePressed,
                                dpadUp: up, dpadDown: down, dpadLeft: left, dpadRight: right,

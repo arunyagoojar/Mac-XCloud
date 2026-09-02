@@ -41,6 +41,10 @@ final class BrowserModel: ObservableObject {
         controllerInput.onToggleOverlay = { [weak self] in
             self?.openSettingsWindow()
         }
+        // UI controller input is live only while the settings window is open.
+        controllerInput.isUIInputEnabled = { [weak self] in
+            self?.settingsWindow?.isVisible == true
+        }
         // Auto-hide the mouse cursor while a controller is connected.
         controllerInput.onPresenceChange = { [weak self] connected in
             self?.evaluateJS("window.postMessage({ type: 'xcg-cursor-hide', enabled: \(connected) }, '*')")
