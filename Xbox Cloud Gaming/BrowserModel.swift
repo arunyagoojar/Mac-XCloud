@@ -64,6 +64,7 @@ final class BrowserModel: ObservableObject {
     // MARK: - Settings window
 
     private var settingsWindow: NSWindow?
+    private var profileWindows: [ProfileKind: NSWindow] = [:]
 
     /// Opens the settings as a real, separate NSWindow that we fully control
     /// (the SwiftUI Settings scene's responder action proved unreliable).
@@ -95,6 +96,24 @@ final class BrowserModel: ObservableObject {
 
     func closeSettingsWindow() {
         settingsWindow?.performClose(nil)
+    }
+
+    func openProfileEditor(_ kind: ProfileKind) {
+        if profileWindows[kind] == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 600),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.title = kind.title
+            window.titlebarAppearsTransparent = true
+            window.isReleasedWhenClosed = false
+            window.center()
+            window.contentView = NSHostingView(rootView:
+                ProfileEditorView(model: ProfileEditorModel(kind: kind, browser: self))
+            )
+            profileWindows[kind] = window
+        }
+        profileWindows[kind]?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: false)
     }
 
     // MARK: - Actions
@@ -129,8 +148,13 @@ final class BrowserModel: ObservableObject {
         loadHome()
     }
 
-    func evaluateJS(_ script: String, completion: ((Any?, (any Error)?) -> Void)? = nil) {
+    func evaluateJS(_ script: String, completion: (@Sendable (Any?, (any Error)?) -> Void)? = nil) {
         webView?.evaluateJavaScript(script, completionHandler: completion)
+    }
+
+    func callAsyncJS(_ functionBody: String, arguments: [String: Any] = [:]) async throws -> Any? {
+        guard let webView else { throw CocoaError(.coderInvalidValue) }
+        return try await webView.callAsyncJavaScript(functionBody, arguments: arguments, contentWorld: .page)
     }
 
     // MARK: - State updates (called by WebView.Coordinator)

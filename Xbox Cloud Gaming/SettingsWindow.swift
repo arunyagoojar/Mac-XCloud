@@ -91,8 +91,19 @@ struct SettingsRootView: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 18)
                     .padding(.horizontal, 16)
+
+                if let message = model.saveMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                        .padding(.top, 4)
+                        .padding(.horizontal, 16)
+                }
             }
             .padding(.vertical, 12)
+        }
+        .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
+            ForcedMKBPicker(model: model)
         }
     }
 
@@ -236,6 +247,26 @@ struct SettingsRootView: View {
 
         case .ledColor:
             ledControl(model)
+
+        case .profileLauncher(let kind):
+            ProfileLaunchButton(kind: kind,
+                                title: kind.title,
+                                note: "Opens the native \(kind.title.lowercased()) manager")
+
+        case .forcedMKBGames:
+            Button {
+                model.showForcedMKBPicker = true
+            } label: {
+                HStack(spacing: 6) {
+                    Text("\(model.forcedNativeMKBGames.count) selected")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
 
         case .info(let text):
             Text(text)

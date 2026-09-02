@@ -8,7 +8,43 @@
 //  live settings.
 //
 
+import Foundation
 import WebKit
+
+enum SettingsScopeKey {
+    case global
+    case stream
+}
+
+enum NativeSettingsMirror {
+    private static let globalKey = "nativeBetterXcloudGlobal"
+    private static let streamKey = "nativeBetterXcloudStream"
+
+    static func values(for scope: SettingsScopeKey) -> [String: Any] {
+        let key = scope == .global ? globalKey : streamKey
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return object
+    }
+
+    static func save(_ value: Any, for setting: String, scope: SettingsScopeKey) {
+        let key = scope == .global ? globalKey : streamKey
+        var values = self.values(for: scope)
+        values[setting] = value
+        if JSONSerialization.isValidJSONObject(values),
+           let data = try? JSONSerialization.data(withJSONObject: values) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    static func javascriptObject(for scope: SettingsScopeKey) -> String {
+        let values = self.values(for: scope)
+        guard JSONSerialization.isValidJSONObject(values),
+              let data = try? JSONSerialization.data(withJSONObject: values),
+              let text = String(data: data, encoding: .utf8) else { return "{}" }
+        return text
+    }
+}
 
 enum BetterXCloud {
 
@@ -18,18 +54,71 @@ enum BetterXCloud {
     static func userScripts() -> [WKUserScript] {
         var scripts: [WKUserScript] = []
 
-        // 1. Sensible app defaults for BxC settings, before the script reads
-        //    them. systemMenu.handle is forced off — the native app owns the UI.
+        // 1. Restore the native settings mirror, then seed M1-optimized values
+        //    only where neither side has a saved user choice. The app never
+        //    overwrites a later user preference on launch.
+        let mirroredGlobal = NativeSettingsMirror.javascriptObject(for: .global)
+        let mirroredStream = NativeSettingsMirror.javascriptObject(for: .stream)
         let defaults = """
         (function () {
           try {
-            var s = JSON.parse(localStorage.getItem("BetterXcloud") || "{}");
-            var appDefaults = { "ui.splashVideo.skip": true, "ui.feedbackDialog.disabled": true };
-            var changed = false;
-            for (var k in appDefaults) { if (!(k in s)) { s[k] = appDefaults[k]; changed = true; } }
-            if (s["ui.systemMenu.hideHandle"] !== true) { s["ui.systemMenu.hideHandle"] = true; changed = true; }
-            if (changed) localStorage.setItem("BetterXcloud", JSON.stringify(s));
-          } catch (e) {}
+            var global = JSON.parse(localStorage.getItem("BetterXcloud") || "{}");
+            var stream = JSON.parse(localStorage.getItem("BetterXcloud.Stream") || "{}");
+            var mirrorGlobal = \(mirroredGlobal);
+            var mirrorStream = \(mirroredStream);
+            Object.assign(global, mirrorGlobal);
+            Object.assign(stream, mirrorStream);
+
+            var optimizedGlobal = {
+              "server.region": "default",
+              "stream.video.resolution": "1080p-hq",
+              "stream.video.codecProfile": "high",
+              "stream.video.maxBitrate": 0,
+              "stream.video.preventResolutionDrops": false,
+              "server.ipv6.prefer": true,
+              "ui.splashVideo.skip": true,
+              "ui.feedbackDialog.disabled": true,
+              "ui.reduceAnimations": false,
+              "ui.controllerFriendly": true,
+              "ui.systemMenu.hideHandle": true,
+              "loadingScreen.gameArt.show": true,
+              "loadingScreen.waitTime.show": true,
+              "block.tracking": true
+            };
+            var optimizedStream = {
+              "video.player.type": "webgl2",
+              "video.player.powerPreference": "high-performance",
+              "video.processing": "cas",
+              "video.processing.mode": "quality",
+              "video.processing.sharpness": 2,
+              "video.maxFps": 60,
+              "video.brightness": 100,
+              "video.contrast": 100,
+              "video.saturation": 100,
+              "audio.volume": 100,
+              "stats.showWhenPlaying": true,
+              "stats.items": ["ping", "fps", "btr", "dt", "pl", "fl"],
+              "stats.position": "top-right",
+              "stats.opacity.all": 90,
+              "stats.opacity.background": 65,
+              "stats.colors": true,
+              "controller.pollingRate": 4
+            };
+            var defaultsVersion = parseInt(localStorage.getItem("XCG.NativeDefaultsVersion") || "0", 10);
+            if (defaultsVersion < 2) {
+              /* One corrective migration for the earlier low/off native UI.
+                 Once v2 is recorded, user choices always win. */
+              Object.assign(global, optimizedGlobal);
+              Object.assign(stream, optimizedStream);
+              localStorage.setItem("XCG.NativeDefaultsVersion", "2");
+            } else {
+              for (var k in optimizedGlobal) if (!(k in global)) global[k] = optimizedGlobal[k];
+              for (var s in optimizedStream) if (!(s in stream)) stream[s] = optimizedStream[s];
+            }
+            global["ui.systemMenu.hideHandle"] = true;
+            localStorage.setItem("BetterXcloud", JSON.stringify(global));
+            localStorage.setItem("BetterXcloud.Stream", JSON.stringify(stream));
+          } catch (e) { console.error("[XCG] settings bootstrap failed", e); }
         })();
         """
         scripts.append(WKUserScript(source: defaults, injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -73,10 +162,75 @@ enum BetterXCloud {
         let bridge = """
         window.BxCBridge = {
           regions: function () { try { return STATES.serverRegions || {}; } catch (e) { return {}; } },
+          selectedRegion: function () { try { return STATES.selectedRegion || {}; } catch (e) { return {}; } },
           getGlobal: function (k) { return getGlobalPref(k); },
-          setGlobal: function (k, v) { setGlobalPref(k, v, "ui"); },
+          setGlobal: function (k, v) { setGlobalPref(k, v, "ui"); return getGlobalPref(k); },
           getStream: function (k) { return getStreamPref(k); },
-          setStream: function (k, v) { setStreamPref(k, v, "ui"); }
+          setStream: function (k, v) { setStreamPref(k, v, "ui"); return getStreamPref(k); },
+          rawGlobal: function () { try { return JSON.parse(localStorage.getItem("BetterXcloud") || "{}"); } catch (e) { return {}; } },
+          rawStream: function () { try { return JSON.parse(localStorage.getItem("BetterXcloud.Stream") || "{}"); } catch (e) { return {}; } },
+          profileTable: function (kind) {
+            if (kind === "mkb") return MkbMappingPresetsTable.getInstance();
+            if (kind === "keyboard") return KeyboardShortcutsTable.getInstance();
+            if (kind === "controller-shortcuts") return ControllerShortcutsTable.getInstance();
+            if (kind === "controller-customization") return ControllerCustomizationsTable.getInstance();
+            throw new Error("Unknown profile type: " + kind);
+          },
+          listProfiles: async function (kind) {
+            return await this.profileTable(kind).getPresets();
+          },
+          createProfile: async function (kind, name, data) {
+            return await this.profileTable(kind).newPreset(name.trim(), data);
+          },
+          saveProfile: async function (kind, preset) {
+            if (!preset || preset.id <= 0) throw new Error("Default profiles are read-only");
+            return await this.profileTable(kind).updatePreset(preset);
+          },
+          deleteProfile: async function (kind, id) {
+            if (id <= 0) throw new Error("Default profiles are read-only");
+            return await this.profileTable(kind).deletePreset(id);
+          },
+          refreshProfiles: async function (kind) {
+            if (kind === "mkb") return await StreamSettings.refreshMkbSettings();
+            if (kind === "keyboard") return await StreamSettings.refreshKeyboardShortcuts();
+            return await StreamSettings.refreshControllerSettings();
+          },
+          profileSelections: function () {
+            var raw = this.rawStream();
+            var gamepad = null;
+            try { gamepad = Array.from(navigator.getGamepads()).filter(Boolean)[0] || null; } catch (e) {}
+            var cs = gamepad && raw["controller.settings"] ? raw["controller.settings"][gamepad.id] : null;
+            return {
+              mkb: raw["mkb.p1.preset.mappingId"] ?? -1,
+              keyboard: raw["keyboardShortcuts.preset.inGameId"] ?? -1,
+              controllerShortcuts: cs ? cs.shortcutPresetId : -1,
+              controllerCustomization: cs ? cs.customizationPresetId : 0,
+              gamepadId: gamepad ? gamepad.id : null
+            };
+          },
+          selectProfile: async function (kind, id) {
+            if (kind === "mkb") {
+              setStreamPref("mkb.p1.preset.mappingId", id, "ui");
+              await StreamSettings.refreshMkbSettings();
+              return id;
+            }
+            if (kind === "keyboard") {
+              setStreamPref("keyboardShortcuts.preset.inGameId", id, "ui");
+              await StreamSettings.refreshKeyboardShortcuts();
+              return id;
+            }
+            var gamepad = null;
+            try { gamepad = Array.from(navigator.getGamepads()).filter(Boolean)[0] || null; } catch (e) {}
+            if (!gamepad) throw new Error("Connect a controller first");
+            var settings = getStreamPref("controller.settings") || {};
+            var record = settings[gamepad.id] || {shortcutPresetId:-1, customizationPresetId:0};
+            if (kind === "controller-shortcuts") record.shortcutPresetId = id;
+            if (kind === "controller-customization") record.customizationPresetId = id;
+            settings[gamepad.id] = record;
+            setStreamPref("controller.settings", settings, "ui");
+            await StreamSettings.refreshControllerSettings();
+            return id;
+          }
         };
         """
 
@@ -141,6 +295,7 @@ enum BetterXCloud {
       var css = [
         /* Better xCloud UI chrome — fully replaced by the native settings window */
         '.bx-top-buttons { display: none !important; }',
+        '.bx-header-settings-button { display: none !important; }',
         '.bx-centered-dialog { display: none !important; }',
         '.bx-navigation-dialog { display: none !important; }',
         '.bx-guide-home-buttons { display: none !important; }',
