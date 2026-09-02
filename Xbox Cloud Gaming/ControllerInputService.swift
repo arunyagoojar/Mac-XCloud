@@ -17,6 +17,7 @@ final class ControllerInputService: ObservableObject {
     var onAdjust: ((Int) -> Void)?      // -1 left / +1 right
     var onActivate: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onSwitchCategory: ((Int) -> Void)?   // -1 left bumper / +1 right bumper
 
     @Published private(set) var controllerName: String?
     @Published private(set) var supportsLED = false
@@ -37,6 +38,8 @@ final class ControllerInputService: ObservableObject {
         var stickRight = false
         var a = false
         var b = false
+        var lb = false
+        var rb = false
     }
 
     func start() {
@@ -106,12 +109,15 @@ final class ControllerInputService: ObservableObject {
         if right, !previous.dpadRight, !previous.stickRight { onAdjust?(1) }
         if pad.buttonA.isPressed, !previous.a { onActivate?() }
         if pad.buttonB.isPressed, !previous.b { onCancel?() }
+        if pad.leftShoulder.isPressed, !previous.lb { onSwitchCategory?(-1) }
+        if pad.rightShoulder.isPressed, !previous.rb { onSwitchCategory?(1) }
 
         previous = ButtonState(home: homePressed,
                                dpadUp: up, dpadDown: down, dpadLeft: left, dpadRight: right,
                                stickUp: stickY > 0.55, stickDown: stickY < -0.55,
                                stickLeft: stick < -0.55, stickRight: stick > 0.55,
-                               a: pad.buttonA.isPressed, b: pad.buttonB.isPressed)
+                               a: pad.buttonA.isPressed, b: pad.buttonB.isPressed,
+                               lb: pad.leftShoulder.isPressed, rb: pad.rightShoulder.isPressed)
     }
 }
 

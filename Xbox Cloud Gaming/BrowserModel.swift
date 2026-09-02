@@ -28,19 +28,17 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     @Published var showReport = false
-    @Published var showSettingsOverlay = false
+    @Published var isSettingsWindowOpen = false
     @Published private(set) var report = SpikeReport()
 
     let controllerInput = ControllerInputService()
-    lazy var overlayModel = OverlayModel(browser: self)
+    var settingsModel: SettingsModel?
 
     weak var webView: WKWebView?
 
     init() {
         controllerInput.onToggleOverlay = { [weak self] in
-            guard let self else { return }
-            self.showSettingsOverlay.toggle()
-            if self.showSettingsOverlay { self.overlayModel.load() }
+            self?.openSettingsWindow()
         }
         controllerInput.start()
 
@@ -52,6 +50,29 @@ final class BrowserModel: ObservableObject {
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
         }
         refreshNativeControllers()
+    }
+
+    // MARK: - Settings window
+
+    func openSettingsWindow() {
+        // SwiftUI's Settings scene responder; falls back to the 14.x selector.
+        let selectors = ["showSettingsWindow:", "showSettings:"]
+        for selector in selectors {
+            if NSApp.sendAction(Selector(selector), to: nil, from: nil) { return }
+        }
+        NSLog("XCG could not open settings window")
+    }
+
+    func closeSettingsWindow() {
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue.contains("settings") == true || $0.title == "Settings" }) {
+            window.performClose(nil)
+        } else if let keyWindow = NSApp.keyWindow, keyWindow != mainContentWindow() {
+            keyWindow.performClose(nil)
+        }
+    }
+
+    private func mainContentWindow() -> NSWindow? {
+        webView?.window
     }
 
     // MARK: - Actions
@@ -76,17 +97,6 @@ final class BrowserModel: ObservableObject {
         (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
     }
 
-    func toggleSettingsOverlay() {
-        showSettingsOverlay.toggle()
-        if showSettingsOverlay {
-            overlayModel.load()
-        }
-    }
-
-    func evaluateJS(_ script: String, completion: ((Any?, (any Error)?) -> Void)? = nil) {
-        webView?.evaluateJavaScript(script, completionHandler: completion)
-    }
-
     /// Wipes the persistent session cookies, signing the user out of the site.
     func signOut() {
         WKWebsiteDataStore.default().removeData(
@@ -95,6 +105,10 @@ final class BrowserModel: ObservableObject {
             completionHandler: {}
         )
         loadHome()
+    }
+
+    func evaluateJS(_ script: String, completion: ((Any?, (any Error)?) -> Void)? = nil) {
+        webView?.evaluateJavaScript(script, completionHandler: completion)
     }
 
     // MARK: - State updates (called by WebView.Coordinator)

@@ -54,6 +54,10 @@ enum BetterXCloud {
         //    controller is connected (WKWebView exposes gamepads late).
         scripts.append(WKUserScript(source: autoContinueScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
 
+        // 5. Hide Better xCloud's injected UI (the native app owns the
+        //    interface) and restyle the stats bar to match macOS.
+        scripts.append(WKUserScript(source: nativeStyleScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+
         return scripts
     }
 
@@ -124,6 +128,52 @@ enum BetterXCloud {
         } catch (e) {}
       }
       if (document.body) { start(); } else { document.addEventListener('DOMContentLoaded', start); }
+    })();
+    """#
+
+    /// Hides every piece of UI Better xCloud injects (buttons, dialogs, menus) —
+    /// the native app provides the interface — and restyles the stats bar to
+    /// look like a macOS control instead of a browser widget.
+    static let nativeStyleScript = #"""
+    (function () {
+      var css = [
+        /* Better xCloud UI chrome — fully replaced by the native settings window */
+        '.bx-top-buttons { display: none !important; }',
+        '.bx-centered-dialog { display: none !important; }',
+        '.bx-navigation-dialog { display: none !important; }',
+        '.bx-guide-home-buttons { display: none !important; }',
+        '.bx-controller-shortcuts-manager-container { display: none !important; }',
+        '.bx-keyboard-shortcuts-manager-container { display: none !important; }',
+        '#bx-game-bar { display: none !important; }',
+        /* Stats bar — macOS look: SF font, frosted rounded capsule */
+        '.bx-stats-bar {',
+        '  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif !important;',
+        '  font-size: 12px !important;',
+        '  font-weight: 500 !important;',
+        '  letter-spacing: 0.02em;',
+        '  border-radius: 10px !important;',
+        '  border: 1px solid rgba(255, 255, 255, 0.10) !important;',
+        '  backdrop-filter: blur(20px) saturate(1.5) !important;',
+        '  -webkit-backdrop-filter: blur(20px) saturate(1.5) !important;',
+        '  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35) !important;',
+        '  padding: 7px 14px !important;',
+        '}',
+        '.bx-stats-bar * { font-family: inherit !important; letter-spacing: inherit !important; }'
+      ].join('\n');
+
+      function addStyle() {
+        try {
+          if (document.getElementById('xcg-native-style')) return;
+          var style = document.createElement('style');
+          style.id = 'xcg-native-style';
+          style.textContent = css;
+          (document.head || document.documentElement).appendChild(style);
+        } catch (e) {}
+      }
+      addStyle();
+      try {
+        new MutationObserver(addStyle).observe(document.documentElement, { childList: true, subtree: true });
+      } catch (e) {}
     })();
     """#
 
