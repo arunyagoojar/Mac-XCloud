@@ -15,6 +15,7 @@ struct ContentView: View {
         case .landing, .signingIn:
             LandingView(mode: browser.authStage == .signingIn ? .signingIn : .choose,
                         profiles: browser.profiles,
+                        currentProfileID: browser.lastUsedProfileID,
                         onPickProfile: { browser.pickProfile($0) },
                         onAddNew: { browser.startSignIn() },
                         onSkip: { browser.skipSignIn() },
@@ -40,7 +41,9 @@ struct ContentView: View {
 
     private var playerView: some View {
         ZStack(alignment: .top) {
+            // Re-created per profile: each has its own cookie store.
             WebView(browser: browser)
+                .id(browser.selectedProfileID?.uuidString ?? "guest")
 
             if browser.isLoading {
                 ProgressView()

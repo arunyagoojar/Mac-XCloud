@@ -38,6 +38,9 @@ struct PlayerProfile: Codable, Identifiable, Equatable {
 @MainActor
 final class BrowserModel: ObservableObject {
     static let homeURL = URL(string: "https://www.xbox.com/play")!
+    /// Microsoft's real sign-in page, posting the authenticated session back to
+    /// xbox.com/play — so the window opens on a login form, never the Xbox site.
+    static let microsoftLoginURL = URL(string: "https://login.live.com/login.srf?wa=wsignin1.0&wreply=https%3A%2F%2Fwww.xbox.com%2Fplay")!
 
     private static let profilesKey = "playerProfiles"
     private static let selectedProfileKey = "selectedProfileID"
@@ -58,6 +61,7 @@ final class BrowserModel: ObservableObject {
     weak var webView: WKWebView?
     private var authWindow: NSWindow?
     private var authCoordinator: AuthFlowCoordinator?
+    private var consecutiveSignedOutChecks = 0
 
     init() {
         var decodedProfiles: [PlayerProfile] = []
@@ -92,6 +96,11 @@ final class BrowserModel: ObservableObject {
         profiles.first { $0.id == selectedProfileID }
     }
 
+    /// The profile used most recently — shown larger on the picker.
+    var lastUsedProfileID: UUID? {
+        UserDefaults.standard.string(forKey: Self.selectedProfileKey).flatMap(UUID.init(uuidString:))
+    }
+
     /// Each profile has its own persistent cookie jar; guest browsing (skip
     /// sign-in) uses a throwaway store so it can't touch any account.
     var activeDataStore: WKWebsiteDataStore {
@@ -103,13 +112,15 @@ final class BrowserModel: ObservableObject {
 
     // MARK: - Sign-in flow
 
-    /// Opens a small separate window that goes straight to the Microsoft login
-    /// page (it auto-clicks through xbox.com's "Sign in" button). Success is
-    /// verified: the page must be back on the player, signed in, on consecutive
-    /// checks — then the window closes itself and the profile is saved.
+    /// Opens a small separate window straight on Microsoft's login page. Success
+    /// is verified — the page must be back on the player, signed in, on
+    /// consecutive checks — then the window closes itself and the profile is
+    /// saved. The auto-sign-in script stays as a fallback in case the post-back
+    /// lands on xbox.com's public homepage.
     func startSignIn(for profile: PlayerProfile? = nil) {
         guard authWindow == nil else { return }
         authStage = .signingIn
+        consecutiveSignedOutChecks = 0
 
         let coordinator = AuthFlowCoordinator(browser: self,
                                               storeID: profile?.id ?? UUID(),
@@ -140,7 +151,7 @@ final class BrowserModel: ObservableObject {
         webView.navigationDelegate = coordinator
         coordinator.attach(webView)
         window.contentView = webView
-        webView.load(URLRequest(url: Self.homeURL))
+        webView.load(URLRequest(url: Self.microsoftLoginURL))
 
         window.makeKeyAndOrderFront(nil)
         authWindow = window
@@ -285,18 +296,24 @@ final class BrowserModel: ObservableObject {
 
     private func handleAuthCheck(signedOut: Bool) {
         // Guests browse signed-out by design; nothing to verify.
-        guard authStage == .authenticated, selectedProfileID != nil else { return }
+        guard authStage == .authenticated, selectedProfileID != nil else {
+            consecutiveSignedOutChecks = 0
+            return
+        }
 
         if signedOut {
-            // Session died: go back to the picker and immediately offer
-            // re-authentication for this account.
-            isSessionValidated = false
-            authStage = .landing
-            note("Session expired — sign in again")
-            if let profile = selectedProfile {
-                startSignIn(for: profile)
+            // A single miss means nothing — the page may still be hydrating.
+            // Only a sustained signed-out state counts, and even then we stop
+            // at the picker instead of reopening sign-in (that looped badly).
+            consecutiveSignedOutChecks += 1
+            if consecutiveSignedOutChecks >= 3 {
+                consecutiveSignedOutChecks = 0
+                isSessionValidated = false
+                authStage = .landing
+                note("Session expired — choose a profile to sign in again")
             }
         } else {
+            consecutiveSignedOutChecks = 0
             isSessionValidated = true
         }
     }

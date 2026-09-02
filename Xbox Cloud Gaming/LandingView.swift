@@ -5,6 +5,8 @@
 //  Created by Arunya on 02/09/26.
 //
 
+import Combine
+import GameController
 import SwiftUI
 
 enum LandingMode {
@@ -13,16 +15,69 @@ enum LandingMode {
     case validating    // silently verifying a restored session
 }
 
+/// Drives focus on the profile picker from a game controller: left/right on
+/// the d-pad or stick moves focus, A activates. Polled (rather than handlers)
+/// so any controller works without per-controller setup.
+@MainActor
+final class LandingFocusController: ObservableObject {
+    @Published var focusIndex = 0
+
+    private var actions: [() -> Void] = []
+    private var timer: Timer?
+    private var heldDirection = 0
+    private var wasAPressed = false
+
+    func bind(actions: [() -> Void], initialFocus: Int) {
+        self.actions = actions
+        focusIndex = min(max(initialFocus, 0), max(actions.count - 1, 0))
+    }
+
+    func start() {
+        stop()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollControllers() }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        heldDirection = 0
+        wasAPressed = false
+    }
+
+    private func pollControllers() {
+        for controller in GCController.controllers() {
+            guard let pad = controller.extendedGamepad else { continue }
+
+            var direction = 0
+            if pad.dpad.left.isPressed || pad.leftThumbstick.xAxis.value < -0.55 { direction = -1 }
+            if pad.dpad.right.isPressed || pad.leftThumbstick.xAxis.value > 0.55 { direction = 1 }
+
+            // Only step once per push, not continuously while held.
+            if direction != 0, heldDirection == 0 {
+                focusIndex = min(max(focusIndex + direction, 0), actions.count - 1)
+            }
+            heldDirection = direction
+
+            if pad.buttonA.isPressed, !wasAPressed, actions.indices.contains(focusIndex) {
+                actions[focusIndex]()
+            }
+            wasAPressed = pad.buttonA.isPressed
+        }
+    }
+}
+
 struct LandingView: View {
     let mode: LandingMode
     let profiles: [PlayerProfile]
+    var currentProfileID: UUID? = nil
     let onPickProfile: (PlayerProfile) -> Void
     let onAddNew: () -> Void
     let onSkip: () -> Void
     var onRemoveProfile: ((PlayerProfile) -> Void)? = nil
 
-    @State private var hoveredProfileID: UUID?
-    @State private var hoveredAction: String?
+    @StateObject private var focus = LandingFocusController()
 
     var body: some View {
         ZStack {
@@ -32,24 +87,26 @@ struct LandingView: View {
                 Text(mode == .validating ? "Restoring your session…" : "Who's playing today?")
                     .font(.system(size: 42, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white)
-                    .padding(.top, 64)
+                    .padding(.top, 56)
 
-                Spacer()
-
+                Spacer(minLength: 24)
                 content
-                    .padding(.bottom, 90)
+                Spacer(minLength: 24)
             }
             .padding(.horizontal, 60)
         }
+        .onAppear(perform: bindFocus)
+        .onDisappear { focus.stop() }
     }
+
+    // MARK: - Content
 
     @ViewBuilder
     private var content: some View {
         switch mode {
         case .validating:
             VStack(spacing: 18) {
-                ProgressView()
-                    .controlSize(.large)
+                ProgressView().controlSize(.large)
                 Text("Checking your Xbox session")
                     .font(.system(size: 15))
                     .foregroundStyle(.white.opacity(0.6))
@@ -57,137 +114,146 @@ struct LandingView: View {
 
         case .signingIn:
             VStack(spacing: 18) {
-                ProgressView()
-                    .controlSize(.large)
+                ProgressView().controlSize(.large)
                 Text("Complete the sign-in in the window that just opened")
                     .font(.system(size: 15))
                     .foregroundStyle(.white.opacity(0.6))
             }
 
         case .choose:
-            HStack(alignment: .center, spacing: 64) {
-                ForEach(profiles) { profile in
-                    profileCircle(profile)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .center, spacing: 56) {
+                    ForEach(Array(profiles.enumerated()), id: \.element.id) { index, profile in
+                        profileCircle(profile, index: index)
+                    }
+                    actionCircle(id: "add-new", index: profiles.count,
+                                 icon: "plus", label: "Add new", action: onAddNew)
+                    actionCircle(id: "skip", index: profiles.count + 1,
+                                 icon: "person.crop.circle.badge.xmark", label: "Skip sign in", action: onSkip)
                 }
-
-                actionCircle(id: "add-new",
-                             ringColor: Color(red: 0.30, green: 0.85, blue: 0.35),
-                             background: Color.white.opacity(0.08)) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 44, weight: .light))
-                        .foregroundStyle(.white)
-                } label: {
-                    Text("Add new")
-                } action: {
-                    onAddNew()
-                }
-
-                actionCircle(id: "skip",
-                             ringColor: .clear,
-                             background: Color.white.opacity(0.16)) {
-                    Image(systemName: "person.crop.circle.badge.xmark")
-                        .font(.system(size: 42, weight: .medium))
-                        .foregroundStyle(.white)
-                } label: {
-                    Text("Skip sign in")
-                } action: {
-                    onSkip()
-                }
+                .frame(maxWidth: .infinity)
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func profileCircle(_ profile: PlayerProfile) -> some View {
-        let isHovered = hoveredProfileID == profile.id
-        return VStack(spacing: 14) {
+    // MARK: - Circles
+
+    private func profileCircle(_ profile: PlayerProfile, index: Int) -> some View {
+        let isCurrent = profile.id == currentProfileID
+        let isFocused = focus.focusIndex == index
+
+        return VStack(spacing: 16) {
             Button {
                 onPickProfile(profile)
             } label: {
-                circleShape(size: 150)
-                    .background(circleFill(color: Color.white.opacity(0.16)))
-                    .overlay {
-                        if let urlString = profile.avatarURL, let url = URL(string: urlString) {
-                            AsyncImage(url: url) { image in
-                                image.resizable().scaledToFill()
-                            } placeholder: {
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 52))
-                                    .foregroundStyle(.white.opacity(0.8))
-                            }
-                            .frame(width: 138, height: 138)
-                            .clipShape(Circle())
-                        } else {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 52))
-                                .foregroundStyle(.white.opacity(0.85))
-                        }
-                    }
+                avatarContent(for: profile)
+                    .frame(width: avatarBase, height: avatarBase)
+                    .scaleEffect(avatarScale(isCurrent: isCurrent, isFocused: isFocused))
+                    .animation(.easeInOut(duration: 0.18), value: focus.focusIndex)
                     .overlay(
-                        Circle().strokeBorder(
-                            isHovered ? Color(red: 0.30, green: 0.85, blue: 0.35) : .clear,
-                            lineWidth: 3
-                        )
+                        Circle()
+                            .strokeBorder(focusRingColor(isFocused: isFocused), lineWidth: 3)
+                            .frame(width: avatarBase, height: avatarBase)
+                            .scaleEffect(avatarScale(isCurrent: isCurrent, isFocused: isFocused))
                     )
-                    .scaleEffect(isHovered ? 1.05 : 1)
-                    .animation(.easeInOut(duration: 0.15), value: isHovered)
             }
             .buttonStyle(.plain)
-            .onHover { hoveredProfileID = $0 ? profile.id : nil }
-            .contextMenu {
-                Button("Remove from this Mac", role: .destructive) {
-                    onRemoveProfile?(profile)
-                }
-            }
 
             Text(profile.gamertag)
                 .font(.system(size: 17, weight: .medium, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(isFocused ? .white : .white.opacity(0.7))
                 .lineLimit(1)
-                .frame(maxWidth: 170)
+                .frame(maxWidth: 180)
+        }
+        .contextMenu {
+            Button("Remove from this Mac", role: .destructive) {
+                onRemoveProfile?(profile)
+            }
         }
     }
 
-    private func actionCircle(id: String,
-                              ringColor: Color,
-                              background: Color,
-                              @ViewBuilder icon: () -> some View,
-                              @ViewBuilder label: () -> some View,
+    private func actionCircle(id: String, index: Int,
+                              icon: String, label: String,
                               action: @escaping () -> Void) -> some View {
-        let isHovered = hoveredAction == id
-        return VStack(spacing: 14) {
+        let isPrimary = id == "add-new"   // Sign-in entry sits bigger, like the current profile.
+        let isFocused = focus.focusIndex == index
+
+        return VStack(spacing: 16) {
             Button(action: action) {
-                circleShape(size: 150)
-                    .background(circleFill(color: background))
-                    .overlay(Circle().strokeBorder(ringColor, lineWidth: 3).opacity(id == "add-new" ? 1 : 0))
-                    .overlay(
-                        Circle().strokeBorder(
-                            isHovered ? Color.white.opacity(0.7) : .clear,
-                            lineWidth: 3
-                        )
-                    )
-                    .overlay { icon() }
-                    .scaleEffect(isHovered ? 1.05 : 1)
-                    .animation(.easeInOut(duration: 0.15), value: isHovered)
+                ZStack {
+                    Circle()
+                        .fill(.white.opacity(isFocused ? 0.09 : 0.05))
+                    Circle()
+                        .strokeBorder(id == "add-new"
+                                      ? Color(red: 0.30, green: 0.85, blue: 0.35).opacity(isFocused ? 1 : 0.45)
+                                      : .white.opacity(0.15),
+                                      lineWidth: id == "add-new" ? 3 : 1.5)
+                    Image(systemName: icon)
+                        .font(.system(size: 44, weight: .light))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                .frame(width: avatarBase, height: avatarBase)
+                .scaleEffect(avatarScale(isCurrent: isPrimary, isFocused: isFocused))
+                .animation(.easeInOut(duration: 0.18), value: focus.focusIndex)
             }
             .buttonStyle(.plain)
-            .onHover { hoveredAction = $0 ? id : nil }
 
-            label()
+            Text(label)
                 .font(.system(size: 17, weight: .medium, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(isFocused ? .white : .white.opacity(0.7))
         }
     }
 
-    private func circleShape(size: CGFloat) -> some View {
-        Circle()
-            .frame(width: size, height: size)
+    private func avatarContent(for profile: PlayerProfile) -> some View {
+        ZStack {
+            Circle().fill(.white.opacity(0.05))
+            if let urlString = profile.avatarURL, let url = URL(string: urlString) {
+                AsyncImage(url: url) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 50))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                .frame(width: 132, height: 132)
+                .clipShape(Circle())
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.system(size: 50))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+        }
     }
 
-    private func circleFill(color: Color) -> some View {
-        Circle()
-            .fill(color)
-            .frame(width: 138, height: 138)
+    // MARK: - Sizing
+
+    private let avatarBase: CGFloat = 148
+
+    /// The focused circle grows (Xbox-style), and the current profile / sign-in
+    /// start from a slightly larger base than the rest.
+    private func avatarScale(isCurrent: Bool, isFocused: Bool) -> CGFloat {
+        (isCurrent ? 1.08 : 1.0) * (isFocused ? 1.14 : 1.0)
     }
+
+    private func focusRingColor(isFocused: Bool) -> Color {
+        isFocused ? Color(red: 0.30, green: 0.85, blue: 0.35) : .clear
+    }
+
+    // MARK: - Focus wiring
+
+    private func bindFocus() {
+        guard mode == .choose else { return }
+        var actions: [() -> Void] = profiles.map { profile in { onPickProfile(profile) } }
+        actions.append(onAddNew)
+        actions.append(onSkip)
+
+        let initialFocus = profiles.firstIndex { $0.id == currentProfileID } ?? 0
+        focus.bind(actions: actions, initialFocus: initialFocus)
+        focus.start()
+    }
+
+    // MARK: - Background
 
     private var backgroundGlow: some View {
         ZStack {
