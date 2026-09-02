@@ -19,12 +19,12 @@ struct Xbox_Cloud_GamingApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
-            CommandGroup(replacing: .appSettings) {
-                Button("Settings…") { browser.openSettingsWindow() }
-                    .keyboardShortcut(",", modifiers: .command)
-            }
             CommandGroup(after: .appInfo) {
                 Button("Sign Out") { browser.signOut() }
+            }
+            CommandMenu("Settings") {
+                Button("Open Settings…") { browser.openSettingsWindow() }
+                    .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }

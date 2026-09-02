@@ -3,7 +3,8 @@
 //  Xbox Cloud Gaming
 //
 //  The native macOS settings window: categories on the left, settings on the
-//  right, frosted-transparent background, fully controller-navigable.
+//  right, frosted-transparent background. Mouse/keyboard first; controller
+//  navigation layered on top.
 //
 
 import SwiftUI
@@ -23,7 +24,7 @@ struct SettingsRootView: View {
                 browser.isSettingsWindowOpen = false
                 unbindController()
             }
-            .frame(minWidth: 740, minHeight: 520)
+            .frame(minWidth: 760, minHeight: 540)
             .background(.ultraThinMaterial)
     }
 
@@ -75,6 +76,8 @@ struct SettingsRootView: View {
                     warningBox("Open xbox.com/play at least once, then reopen this window to load your cloud settings.")
                 }
 
+                suggestedButton
+
                 let rows = model.rows
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, def in
                     settingRow(model, def: def, index: index)
@@ -91,6 +94,18 @@ struct SettingsRootView: View {
             }
             .padding(.vertical, 12)
         }
+    }
+
+    private var suggestedButton: some View {
+        Button {
+            model.applySuggested()
+        } label: {
+            Label("Apply suggested settings for this Mac", systemImage: "wand.and.stars")
+                .font(.system(size: 13, weight: .medium))
+        }
+        .buttonStyle(.bordered)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
     }
 
     private func warningBox(_ text: String) -> some View {
@@ -112,6 +127,8 @@ struct SettingsRootView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(def.label)
                     .font(.system(size: 13, weight: isFocused ? .semibold : .regular))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let note = def.note {
                     Text(note)
                         .font(.caption)
@@ -141,16 +158,9 @@ struct SettingsRootView: View {
                 model.rowFocus = index
             }
         }
-        .onTapGesture {
-            model.pane = .rows
-            model.rowFocus = index
-            switch def.kind {
-            case .toggle: model.toggle(def)
-            case .option, .steps, .serverRegion: model.adjust(def, delta: 1)
-            case .ledColor: break
-            }
-        }
     }
+
+    // MARK: - Controls
 
     @ViewBuilder
     private func control(_ model: SettingsModel, def: SettingDef) -> some View {
@@ -163,59 +173,158 @@ struct SettingsRootView: View {
             .toggleStyle(.switch)
             .labelsHidden()
 
-        case .option, .steps, .serverRegion:
-            HStack(spacing: 10) {
-                Button {
-                    model.adjust(def, delta: -1)
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-
-                Text(controlValueText(model, def: def))
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(minWidth: 120)
-
-                Button {
-                    model.adjust(def, delta: 1)
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+        case .option(let values, let labels, _):
+            optionMenu(model: model, def: def, count: values.count) { index in
+                Text(pickerLabel(model, def: def, index: index))
+            } select: { index in
+                model.setOption(def, index: index)
             }
+
+        case .numberOption(let values, let labels, _):
+            optionMenu(model: model, def: def, count: values.count) { index in
+                Text(labels.indices.contains(index) ? labels[index] : "?")
+            } select: { index in
+                model.setOption(def, index: index)
+            }
+
+        case .serverRegion:
+            optionMenu(model: model, def: def, count: model.regions.count) { index in
+                Text(model.regions.indices.contains(index) ? model.regions[index].label : "?")
+            } select: { index in
+                model.setOption(def, index: index)
+            }
+
+        case .range(let min, let max, let step, _, let format):
+            HStack(spacing: 10) {
+                if let value = model.rangeValue(def) {
+                    Text(format(value))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(minWidth: 64, alignment: .trailing)
+                        .lineLimit(1)
+                }
+                Slider(
+                    value: Binding(
+                        get: { model.rangeValue(def) ?? min },
+                        set: { model.setRange(def, value: $0) }
+                    ),
+                    in: min...max,
+                    step: step
+                )
+                .frame(width: 170)
+            }
+
+        case .multi(let options):
+            Menu {
+                ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                    Button {
+                        model.toggleMulti(def, value: option.value)
+                    } label: {
+                        if model.multiSelection(def).contains(option.value) {
+                            Label(option.label, systemImage: "checkmark")
+                        } else {
+                            Text(option.label)
+                        }
+                    }
+                }
+            } label: {
+                Text(multiSummary(model, def: def))
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+            }
+            .fixedSize()
 
         case .ledColor:
-            HStack(spacing: 8) {
-                ForEach(Array(LEDColor.all.enumerated()), id: \.offset) { index, color in
-                    Circle()
-                        .fill(Color(red: color.red, green: color.green, blue: color.blue))
-                        .frame(width: 20, height: 20)
-                        .overlay(
-                            Circle().strokeBorder(
-                                model.ledColorIndex == index ? Color.primary : Color.primary.opacity(0.25),
-                                lineWidth: model.ledColorIndex == index ? 2 : 1
-                            )
-                            .padding(-3)
-                        )
-                        .onTapGesture {
-                            model.ledColorIndex = index
-                        }
-                        .help(color.label)
-                }
-            }
+            ledControl(model)
+
+        case .info(let text):
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
         }
     }
 
-    private func controlValueText(_ model: SettingsModel, def: SettingDef) -> String {
-        if let index = model.optionIndex(def) {
-            return model.optionLabel(def, index: index)
+    private func optionMenu(model: SettingsModel, def: SettingDef, count: Int,
+                            @ViewBuilder label: @escaping (Int) -> some View,
+                            select: @escaping (Int) -> Void) -> some View {
+        Menu {
+            ForEach(0..<count, id: \.self) { index in
+                Button {
+                    select(index)
+                } label: {
+                    HStack {
+                        label(index)
+                        Spacer()
+                        if model.optionIndex(def) == index {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if let index = model.optionIndex(def) {
+                    label(index)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                } else {
+                    Text(model.defaultValueLabel(def))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
         }
-        return model.defaultValueLabel(def)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private func pickerLabel(_ model: SettingsModel, def: SettingDef, index: Int) -> String {
+        model.optionLabel(def, index: index)
+    }
+
+    private func multiSummary(_ model: SettingsModel, def: SettingDef) -> String {
+        let selection = model.multiSelection(def)
+        if selection.isEmpty { return "None" }
+        if let options = def.multiOptions() {
+            let labels = options.filter { selection.contains($0.value) }.map(\.label)
+            return labels.joined(separator: ", ")
+        }
+        return "\(selection.count) selected"
+    }
+
+    private func ledControl(_ model: SettingsModel) -> some View {
+        HStack(spacing: 8) {
+            ForEach(Array(LEDColor.all.enumerated()), id: \.offset) { index, color in
+                Circle()
+                    .fill(Color(red: color.red, green: color.green, blue: color.blue))
+                    .frame(width: 20, height: 20)
+                    .overlay(
+                        Circle().strokeBorder(
+                            model.ledColorIndex == index ? Color.primary : Color.primary.opacity(0.25),
+                            lineWidth: model.ledColorIndex == index ? 2 : 1
+                        )
+                        .padding(-3)
+                    )
+                    .onTapGesture {
+                        model.ledColorIndex = index
+                    }
+                    .help(color.label)
+            }
+
+            ColorPicker("", selection: Binding(
+                get: { model.customLEDColor },
+                set: { model.customLEDColor = $0 }
+            ), supportsOpacity: false)
+            .labelsHidden()
+            .fixedSize()
+            .help("Custom color")
+        }
     }
 
     // MARK: - Controller wiring
@@ -239,5 +348,12 @@ struct SettingsRootView: View {
         browser.controllerInput.onActivate = nil
         browser.controllerInput.onCancel = nil
         browser.controllerInput.onSwitchCategory = nil
+    }
+}
+
+extension SettingDef {
+    func multiOptions() -> [(value: String, label: String)]? {
+        if case .multi(let options) = kind { return options }
+        return nil
     }
 }

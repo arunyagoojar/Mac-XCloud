@@ -58,8 +58,12 @@ final class ControllerInputService: ObservableObject {
     // MARK: - LED
 
     func setLED(_ preset: LEDColor) {
+        setLED(r: preset.red, g: preset.green, b: preset.blue)
+    }
+
+    func setLED(r: Double, g: Double, b: Double) {
         guard let controller = GCController.controllers().first, let light = controller.light else { return }
-        light.color = GCColor(red: Float(preset.red), green: Float(preset.green), blue: Float(preset.blue))
+        light.color = GCColor(red: Float(r), green: Float(g), blue: Float(b))
     }
 
     private func refreshControllerInfo() {
