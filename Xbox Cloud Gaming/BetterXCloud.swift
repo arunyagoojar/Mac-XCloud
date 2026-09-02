@@ -156,8 +156,43 @@ enum BetterXCloud {
         //    why Xbox hides its fullscreen button).
         scripts.append(WKUserScript(source: fullscreenBridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
+        // 7. Auto-hide the mouse cursor while a controller is connected and
+        //    the mouse is idle (native side enables/disables this).
+        scripts.append(WKUserScript(source: cursorHideScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+
         return scripts
     }
+
+    /// The native side enables this when a controller is connected. After 2.5s
+    /// of no mouse movement the cursor hides; any movement brings it back.
+    static let cursorHideScript = #"""
+    (function () {
+      var enabled = false;
+      var idleTimer = null;
+
+      function show() {
+        try { document.documentElement.classList.remove("xcg-hide-cursor"); } catch (e) {}
+      }
+      function hideSoon() {
+        if (!enabled) { show(); return; }
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(function () {
+          try { document.documentElement.classList.add("xcg-hide-cursor"); } catch (e) {}
+        }, 2500);
+      }
+
+      ["mousemove", "mousedown", "wheel"].forEach(function (name) {
+        window.addEventListener(name, function () { show(); hideSoon(); }, { passive: true });
+      });
+      window.addEventListener("message", function (event) {
+        var data = event.data;
+        if (data && data.type === "xcg-cursor-hide") {
+          enabled = !!data.enabled;
+          if (!enabled) { if (idleTimer) clearTimeout(idleTimer); show(); } else { hideSoon(); }
+        }
+      });
+    })();
+    """#
 
     /// Spoofs Fullscreen API support so Xbox keeps its fullscreen button, and
     /// forwards requests to the native window's fullscreen toggle.
@@ -369,10 +404,14 @@ enum BetterXCloud {
         '  backdrop-filter: blur(24px) saturate(1.6) !important;',
         '  -webkit-backdrop-filter: blur(24px) saturate(1.6) !important;',
         '  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35) !important;',
-        '  margin-top: 10px !important;',
+        '  margin-top: 4px !important;',
+        '  margin-right: 10px !important;',
         '  padding: 7px 14px !important;',
         '}',
-        '.bx-stats-bar * { font-family: inherit !important; letter-spacing: inherit !important; }'
+        '.bx-stats-bar * { font-family: inherit !important; letter-spacing: inherit !important; }',
+        /* Auto-hiding mouse cursor: the page adds this class after idle time
+           while a controller is connected (see cursorHideScript). */
+        'html.xcg-hide-cursor, html.xcg-hide-cursor * { cursor: none !important; }'
       ].join('\n');
 
       function addStyle() {

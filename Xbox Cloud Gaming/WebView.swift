@@ -93,6 +93,9 @@ extension WebView.Coordinator: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         browser.setLoading(false)
         browser.syncNavState()
+        // Re-sync cursor auto-hide state with every fresh page load.
+        let connected = !browser.report.nativeControllerIDs.isEmpty
+        webView.evaluateJavaScript("window.postMessage({ type: 'xcg-cursor-hide', enabled: \(connected) }, '*')", completionHandler: nil)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

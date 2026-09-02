@@ -41,6 +41,10 @@ final class BrowserModel: ObservableObject {
         controllerInput.onToggleOverlay = { [weak self] in
             self?.openSettingsWindow()
         }
+        // Auto-hide the mouse cursor while a controller is connected.
+        controllerInput.onPresenceChange = { [weak self] connected in
+            self?.evaluateJS("window.postMessage({ type: 'xcg-cursor-hide', enabled: \(connected) }, '*')")
+        }
         controllerInput.start()
 
         // This app drives a website, not documents: File and Edit menus add

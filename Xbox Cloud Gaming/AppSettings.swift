@@ -201,7 +201,7 @@ struct SettingsCategory: Identifiable {
                        note: "Changes the video's shape — useful for ultrawide displays.",
                        scope: .stream, kind: .option(
                             values: ["16:9", "16:10", "18:9", "20:9", "21:9", "3:2", "4:3", "5:4", "fill"],
-                            labels: ["16:9 (default)", "16:10", "18:9", "20:9", "21:9", "3:2", "4:3", "5:4", "Stretch"],
+                            labels: ["16:9 (default)", "16:10", "18:9", "20:9", "21:9", "3:2", "4:3", "5:4", "Fill (stretch)"],
                             defaultValue: "16:9")),
             SettingDef(id: "video.position", label: "Position",
                        note: "Where the video sits inside the window.",

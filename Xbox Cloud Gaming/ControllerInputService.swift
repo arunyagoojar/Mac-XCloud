@@ -18,6 +18,8 @@ final class ControllerInputService: ObservableObject {
     var onActivate: (() -> Void)?
     var onCancel: (() -> Void)?
     var onSwitchCategory: ((Int) -> Void)?   // -1 left bumper / +1 right bumper
+    /// Fires when a controller connects/disconnects (true = connected).
+    var onPresenceChange: ((Bool) -> Void)?
 
     @Published private(set) var controllerName: String?
     @Published private(set) var supportsLED = false
@@ -67,14 +69,22 @@ final class ControllerInputService: ObservableObject {
     }
 
     private func refreshControllerInfo() {
-        if let controller = GCController.controllers().first {
+        let controllers = GCController.controllers()
+        if let controller = controllers.first {
             controllerName = controller.vendorName ?? "Game Controller"
             supportsLED = controller.light != nil
         } else {
             controllerName = nil
             supportsLED = false
         }
+        let hasController = !controllers.isEmpty
+        if hasController != lastPresenceState {
+            lastPresenceState = hasController
+            onPresenceChange?(hasController)
+        }
     }
+
+    private var lastPresenceState = false
 
     // MARK: - Polling
 
