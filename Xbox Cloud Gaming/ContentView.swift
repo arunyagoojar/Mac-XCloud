@@ -30,6 +30,30 @@ struct MainWindowLauncher: View {
     }
 }
 
+/// Invisible replacement for the removed title bar: drag to move the window,
+/// double-click to zoom (maximize into available space). Traffic lights stay
+/// clickable because they're window-level buttons layered above this strip.
+final class WindowDragStripView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            window?.performZoom(nil)
+        }
+        // Single press: do nothing here; dragging is handled in mouseDragged
+        // so double-clicks aren't swallowed by the drag tracking loop.
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if event.clickCount < 2 {
+            window?.performDrag(with: event)
+        }
+    }
+}
+
+struct WindowDragStrip: NSViewRepresentable {
+    func makeNSView(context: Context) -> WindowDragStripView { WindowDragStripView() }
+    func updateNSView(_ view: WindowDragStripView, context: Context) {}
+}
+
 struct ContentView: View {
     @EnvironmentObject private var browser: BrowserModel
 
@@ -52,6 +76,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
+        .overlay(alignment: .top) { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
         .overlay(alignment: .topTrailing) { spikePanel }
     }
 
