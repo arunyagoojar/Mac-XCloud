@@ -18,6 +18,11 @@ struct WebView: NSViewRepresentable {
         config.websiteDataStore = .default()
 
         let contentController = WKUserContentController()
+        // Better xCloud injection (stats, region, quality, splash skip, …)
+        // plus the app's own capability/gamepad polling script.
+        for script in BetterXCloud.userScripts() {
+            contentController.addUserScript(script)
+        }
         contentController.addUserScript(
             WKUserScript(source: Coordinator.capabilitiesScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )

@@ -28,11 +28,22 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     @Published var showReport = false
+    @Published var showSettingsOverlay = false
     @Published private(set) var report = SpikeReport()
+
+    let controllerInput = ControllerInputService()
+    lazy var overlayModel = OverlayModel(browser: self)
 
     weak var webView: WKWebView?
 
     init() {
+        controllerInput.onToggleOverlay = { [weak self] in
+            guard let self else { return }
+            self.showSettingsOverlay.toggle()
+            if self.showSettingsOverlay { self.overlayModel.load() }
+        }
+        controllerInput.start()
+
         let center = NotificationCenter.default
         center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
@@ -63,6 +74,17 @@ final class BrowserModel: ObservableObject {
 
     func toggleFullscreen() {
         (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+    }
+
+    func toggleSettingsOverlay() {
+        showSettingsOverlay.toggle()
+        if showSettingsOverlay {
+            overlayModel.load()
+        }
+    }
+
+    func evaluateJS(_ script: String, completion: ((Any?, (any Error)?) -> Void)? = nil) {
+        webView?.evaluateJavaScript(script, completionHandler: completion)
     }
 
     /// Wipes the persistent session cookies, signing the user out of the site.

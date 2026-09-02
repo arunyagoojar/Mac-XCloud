@@ -23,7 +23,66 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
-        .overlay(alignment: .topTrailing) { spikePanel }
+        .overlay(alignment: .topTrailing) { toolsButton }
+        .overlay {
+            if browser.showSettingsOverlay {
+                Color.black.opacity(0.25)
+                    .ignoresSafeArea()
+                    .onTapGesture { browser.showSettingsOverlay = false }
+                SettingsOverlayView(browser: browser, model: browser.overlayModel)
+                    .onAppear(perform: bindOverlayControls)
+                    .onDisappear(perform: unbindOverlayControls)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: browser.showSettingsOverlay)
+    }
+
+    // MARK: - Controller wiring for the overlay
+
+    private func bindOverlayControls() {
+        browser.controllerInput.onNavigate = { browser.overlayModel.navigate($0) }
+        browser.controllerInput.onAdjust = { browser.overlayModel.adjust($0) }
+        browser.controllerInput.onActivate = { browser.overlayModel.activate() }
+        browser.controllerInput.onCancel = { browser.showSettingsOverlay = false }
+    }
+
+    private func unbindOverlayControls() {
+        browser.controllerInput.onNavigate = nil
+        browser.controllerInput.onAdjust = nil
+        browser.controllerInput.onActivate = nil
+        browser.controllerInput.onCancel = nil
+    }
+
+    // MARK: - Chrome
+
+    private var toolsButton: some View {
+        HStack(spacing: 8) {
+            Button {
+                browser.showSettingsOverlay.toggle()
+                if browser.showSettingsOverlay { browser.overlayModel.load() }
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 30, height: 30)
+                    .background(.thinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Settings (⌘K) — or double-press the Home/PS button")
+
+            Button {
+                browser.showReport.toggle()
+            } label: {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 30, height: 30)
+                    .background(.thinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Diagnostics (⌘⇧D)")
+        }
+        .padding(12)
     }
 
     private var controllerBadge: some View {

@@ -33,6 +33,11 @@ struct Xbox_Cloud_GamingApp: App {
                 Button("Go to xbox.com/play") { browser.loadHome() }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 Divider()
+                Button(browser.showSettingsOverlay ? "Close Settings" : "Settings") {
+                    browser.toggleSettingsOverlay()
+                }
+                .keyboardShortcut("k", modifiers: .command)
+                Divider()
                 Button(browser.showReport ? "Hide Diagnostics" : "Show Diagnostics") {
                     browser.showReport.toggle()
                 }
