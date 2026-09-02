@@ -19,7 +19,6 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .top) {
             WebView(browser: browser)
-                .overlay(alignment: .top) { titleBarHider.allowsHitTesting(false) }
 
             if browser.isLoading {
                 ProgressView()
@@ -31,27 +30,24 @@ struct ContentView: View {
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
         .overlay(alignment: .topTrailing) { spikePanel }
+        .ignoresSafeArea(.all)
         .onAppear { styleMainWindow() }
     }
 
-    /// Removes the visible title bar: traffic lights float over the content,
-    /// no title text, no gray bar.
+    /// Removes the visible title bar completely: the game runs top-to-bottom
+    /// edge-to-edge and only the traffic lights float at the top-left.
     private func styleMainWindow() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            for window in NSApp.windows where window.title == "Xbox Cloud Gaming" {
-                window.styleMask.insert(.fullSizeContentView)
-                window.titleVisibility = .hidden
-                window.titlebarAppearsTransparent = true
-                window.isMovableByWindowBackground = true
+        for delay in [0.2, 1.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                for window in NSApp.windows where window.title == "Xbox Cloud Gaming" {
+                    window.styleMask.insert(.fullSizeContentView)
+                    window.titleVisibility = .hidden
+                    window.titlebarAppearsTransparent = true
+                    window.backgroundColor = .black
+                    window.isMovableByWindowBackground = true
+                }
             }
         }
-    }
-
-    private var titleBarHider: some View {
-        // Invisible strip so the (transparent) titlebar area stays draggable.
-        Color.clear
-            .frame(height: 28)
-            .frame(maxWidth: .infinity)
     }
 
     private var controllerBadge: some View {
