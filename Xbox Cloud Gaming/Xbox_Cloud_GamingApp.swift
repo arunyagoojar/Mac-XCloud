@@ -19,6 +19,10 @@ struct Xbox_Cloud_GamingApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { browser.openSettingsWindow() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(after: .appInfo) {
                 Button("Sign Out") { browser.signOut() }
             }
@@ -41,11 +45,6 @@ struct Xbox_Cloud_GamingApp: App {
                 Button("Toggle Full Screen") { browser.toggleFullscreen() }
                     .keyboardShortcut("f", modifiers: [.command, .control])
             }
-        }
-
-        Settings {
-            SettingsRootView()
-                .environmentObject(browser)
         }
     }
 }

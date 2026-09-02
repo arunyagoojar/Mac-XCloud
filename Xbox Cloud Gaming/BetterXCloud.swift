@@ -18,7 +18,8 @@ enum BetterXCloud {
     static func userScripts() -> [WKUserScript] {
         var scripts: [WKUserScript] = []
 
-        // 1. Sensible app defaults for BxC settings, before the script reads them.
+        // 1. Sensible app defaults for BxC settings, before the script reads
+        //    them. systemMenu.handle is forced off — the native app owns the UI.
         let defaults = """
         (function () {
           try {
@@ -26,6 +27,7 @@ enum BetterXCloud {
             var appDefaults = { "ui.splashVideo.skip": true, "ui.feedbackDialog.disabled": true };
             var changed = false;
             for (var k in appDefaults) { if (!(k in s)) { s[k] = appDefaults[k]; changed = true; } }
+            if (s["ui.systemMenu.hideHandle"] !== true) { s["ui.systemMenu.hideHandle"] = true; changed = true; }
             if (changed) localStorage.setItem("BetterXcloud", JSON.stringify(s));
           } catch (e) {}
         })();

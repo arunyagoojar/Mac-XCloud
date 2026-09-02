@@ -8,6 +8,7 @@
 import AppKit
 import Combine
 import GameController
+import SwiftUI
 import WebKit
 
 struct SpikeReport: Equatable {
@@ -54,25 +55,31 @@ final class BrowserModel: ObservableObject {
 
     // MARK: - Settings window
 
+    private var settingsWindow: NSWindow?
+
+    /// Opens the settings as a real, separate NSWindow that we fully control
+    /// (the SwiftUI Settings scene's responder action proved unreliable).
     func openSettingsWindow() {
-        // SwiftUI's Settings scene responder; falls back to the 14.x selector.
-        let selectors = ["showSettingsWindow:", "showSettings:"]
-        for selector in selectors {
-            if NSApp.sendAction(Selector(selector), to: nil, from: nil) { return }
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.title = "Settings"
+            window.titlebarAppearsTransparent = true
+            window.isReleasedWhenClosed = false
+            window.center()
+            window.contentView = NSHostingView(rootView:
+                SettingsRootView()
+                    .environmentObject(self)
+            )
+            settingsWindow = window
         }
-        NSLog("XCG could not open settings window")
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: false)
     }
 
     func closeSettingsWindow() {
-        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue.contains("settings") == true || $0.title == "Settings" }) {
-            window.performClose(nil)
-        } else if let keyWindow = NSApp.keyWindow, keyWindow != mainContentWindow() {
-            keyWindow.performClose(nil)
-        }
-    }
-
-    private func mainContentWindow() -> NSWindow? {
-        webView?.window
+        settingsWindow?.performClose(nil)
     }
 
     // MARK: - Actions
