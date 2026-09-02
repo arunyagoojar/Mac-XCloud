@@ -13,9 +13,8 @@ struct Xbox_Cloud_GamingApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MainWindowLauncher()
                 .environmentObject(browser)
-                .frame(minWidth: 1024, minHeight: 576)
         }
         .windowResizability(.contentMinSize)
         .commands {

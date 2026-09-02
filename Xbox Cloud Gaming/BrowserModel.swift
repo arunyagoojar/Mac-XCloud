@@ -61,6 +61,38 @@ final class BrowserModel: ObservableObject {
         refreshNativeControllers()
     }
 
+    // MARK: - Main window
+
+    private(set) var mainWindow: NSWindow?
+
+    /// The main window is created in AppKit with its final chrome-less style
+    /// mask from the start, so the game content runs edge-to-edge under the
+    /// floating traffic lights (no titlebar strip).
+    func openMainWindow() {
+        if let mainWindow {
+            mainWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.title = "Xbox Cloud Gaming"
+        window.identifier = NSUserInterfaceItemIdentifier("xcg-main")
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = .black
+        window.isMovableByWindowBackground = true
+        window.minSize = NSSize(width: 1024, height: 576)
+        window.center()
+        window.contentView = NSHostingView(rootView:
+            ContentView()
+                .environmentObject(self)
+                .ignoresSafeArea()
+        )
+        mainWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Settings window
 
     private var settingsWindow: NSWindow?

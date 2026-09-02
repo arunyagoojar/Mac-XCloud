@@ -7,6 +7,29 @@
 
 import SwiftUI
 
+/// Invisible bootstrap view: SwiftUI's WindowGroup window keeps a titlebar
+/// strip no matter what, so it immediately hands off to our own AppKit main
+/// window (created chrome-less) and closes itself.
+struct MainWindowLauncher: View {
+    @EnvironmentObject private var browser: BrowserModel
+
+    var body: some View {
+        Color.black
+            .ignoresSafeArea()
+            .onAppear {
+                browser.openMainWindow()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    for window in NSApp.windows where window.identifier?.rawValue != "xcg-main" && window.isVisible {
+                        // Only close SwiftUI's empty launcher window.
+                        if window.frame.width >= 800, window.title == "Xbox Cloud Gaming" || window.title.isEmpty {
+                            window.close()
+                        }
+                    }
+                }
+            }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var browser: BrowserModel
 
@@ -30,24 +53,6 @@ struct ContentView: View {
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
         .overlay(alignment: .topTrailing) { spikePanel }
-        .ignoresSafeArea(.all)
-        .onAppear { styleMainWindow() }
-    }
-
-    /// Removes the visible title bar completely: the game runs top-to-bottom
-    /// edge-to-edge and only the traffic lights float at the top-left.
-    private func styleMainWindow() {
-        for delay in [0.2, 1.5] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                for window in NSApp.windows where window.title == "Xbox Cloud Gaming" {
-                    window.styleMask.insert(.fullSizeContentView)
-                    window.titleVisibility = .hidden
-                    window.titlebarAppearsTransparent = true
-                    window.backgroundColor = .black
-                    window.isMovableByWindowBackground = true
-                }
-            }
-        }
     }
 
     private var controllerBadge: some View {
