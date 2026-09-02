@@ -30,9 +30,7 @@ enum AuthStage {
 final class BrowserModel: ObservableObject {
     static let homeURL = URL(string: "https://www.xbox.com/play")!
 
-    @Published private(set) var authStage: AuthStage = {
-        UserDefaults.standard.bool(forKey: "hasCompletedSignIn") ? .authenticated : .landing
-    }()
+    @Published private(set) var authStage: AuthStage
     @Published private(set) var isLoading = false
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
@@ -46,6 +44,8 @@ final class BrowserModel: ObservableObject {
     private static let signedInKey = "hasCompletedSignIn"
 
     init() {
+        authStage = UserDefaults.standard.bool(forKey: Self.signedInKey) ? .authenticated : .landing
+
         let center = NotificationCenter.default
         center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
@@ -110,6 +110,14 @@ final class BrowserModel: ObservableObject {
             report.webControllerIDs = ids
         case "gamepad-error":
             note("Gamepad polling error: \(body["detail"] as? String ?? "unknown")")
+        case "authcheck":
+            // The player page is showing a public signed-out homepage: the saved
+            // session is gone, so fall back to the landing page.
+            if (body["signedOut"] as? Bool) == true, authStage == .authenticated {
+                UserDefaults.standard.removeObject(forKey: Self.signedInKey)
+                authStage = .landing
+                note("Session expired — sign-in required")
+            }
         default:
             note("\(type): \(body["detail"] as? String ?? "")")
         }
@@ -117,16 +125,23 @@ final class BrowserModel: ObservableObject {
 
     // MARK: - Sign-in flow
 
-    /// Opens a small separate window with the Xbox sign-in page. When the login
-    /// flow eventually lands back on xbox.com/.../play, the window closes itself
-    /// and the app proceeds — the session cookie lives in the app's shared,
-    /// persistent website data store.
+    /// Opens a small separate window with the Xbox sign-in flow. Success is
+    /// verified, not assumed: the page must be back on xbox.com's player AND no
+    /// longer show a "Sign in" button in its header, on consecutive checks.
     func startSignIn() {
         guard authWindow == nil else { return }
         authStage = .signingIn
 
         let coordinator = AuthFlowCoordinator(browser: self)
         authCoordinator = coordinator
+
+        let contentController = WKUserContentController()
+        contentController.addUserScript(
+            WKUserScript(source: AuthFlowCoordinator.authCheckScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
+        contentController.add(coordinator, name: "authHandler")
+        let config = WKWebViewConfiguration()
+        config.userContentController = contentController
 
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 700),
                               styleMask: [.titled, .closable],
@@ -136,7 +151,7 @@ final class BrowserModel: ObservableObject {
         window.isReleasedWhenClosed = false
         window.delegate = coordinator
 
-        let webView = WKWebView(frame: .zero)
+        let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = coordinator
         window.contentView = webView
         webView.load(URLRequest(url: Self.homeURL))
@@ -187,28 +202,60 @@ final class BrowserModel: ObservableObject {
     }
 }
 
-/// Watches the sign-in window: any navigation that lands back on xbox.com's
-/// player page means the Microsoft login succeeded and set the session cookie.
+/// Watches the sign-in window. "Signed in" means: on an xbox.com player URL and
+/// the page header no longer offers a Sign in action, twice in a row. This
+/// matters because xbox.com shows a public homepage at /play when signed out
+/// instead of redirecting to the login flow.
 @MainActor
-final class AuthFlowCoordinator: NSObject, WKNavigationDelegate, NSWindowDelegate {
+final class AuthFlowCoordinator: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScriptMessageHandler {
     private weak var browser: BrowserModel?
+    private var cleanChecks = 0
 
     init(browser: BrowserModel) {
         self.browser = browser
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard let url = webView.url, isSignedInPlayerURL(url) else { return }
-        browser?.finishSignIn()
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        let signedOut = (body["signedOut"] as? Bool) ?? true
+        let urlString = body["url"] as? String ?? ""
+        let onPlayerPage = isPlayerURL(urlString)
+
+        if !signedOut && onPlayerPage {
+            cleanChecks += 1
+            if cleanChecks >= 2 {
+                browser?.finishSignIn()
+            }
+        } else {
+            cleanChecks = 0
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
         browser?.signInCancelled()
     }
 
-    private func isSignedInPlayerURL(_ url: URL) -> Bool {
-        guard let host = url.host, host.hasSuffix("xbox.com") else { return false }
+    private func isPlayerURL(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString), let host = url.host, host.hasSuffix("xbox.com") else { return false }
         // The player lives at /play but xbox.com may localize the path (e.g. /en-US/play).
         return url.path.split(separator: "/").contains("play")
     }
+
+    /// Reports whether the page still offers a "Sign in" action (checked in the
+    /// first chunk of the page text, where the site header lives).
+    static let authCheckScript = #"""
+    (function () {
+      function send() {
+        try {
+          var text = document.body ? document.body.innerText.slice(0, 1500).toLowerCase() : '';
+          window.webkit.messageHandlers.authHandler.postMessage({
+            signedOut: text.indexOf('sign in') !== -1,
+            url: location.href
+          });
+        } catch (e) {}
+      }
+      setInterval(send, 900);
+      send();
+    })();
+    """#
 }

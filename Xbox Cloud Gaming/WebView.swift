@@ -60,6 +60,7 @@ struct WebView: NSViewRepresentable {
             ua: navigator.userAgent
           });
           var last = 'init';
+          var lastSignedOut = null;
           setInterval(function () {
             try {
               if (typeof navigator.getGamepads !== 'function') { return; }
@@ -69,6 +70,12 @@ struct WebView: NSViewRepresentable {
               if (state !== last) {
                 last = state;
                 send('gamepads', { count: ids.length, ids: ids });
+              }
+              var text = document.body ? document.body.innerText.slice(0, 1500).toLowerCase() : '';
+              var signedOut = text.indexOf('sign in') !== -1;
+              if (signedOut !== lastSignedOut) {
+                lastSignedOut = signedOut;
+                send('authcheck', { signedOut: signedOut, url: location.href });
               }
             } catch (e) {
               send('gamepad-error', { detail: String(e) });
