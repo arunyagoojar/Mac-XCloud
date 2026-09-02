@@ -10,32 +10,21 @@ import SwiftUI
 
 struct SettingsRootView: View {
     @EnvironmentObject private var browser: BrowserModel
-    @State private var model: SettingsModel?
+    @ObservedObject var model: SettingsModel
 
     var body: some View {
-        Group {
-            if let model {
-                content(model)
-            } else {
-                EmptyView()
-            }
-        }
-        .onAppear {
-            if model == nil {
-                let newModel = SettingsModel(browser: browser)
-                model = newModel
-                browser.settingsModel = newModel
+        content(model)
+            .onAppear {
                 browser.isSettingsWindowOpen = true
-                newModel.load()
+                model.load()
                 bindController()
             }
-        }
-        .onDisappear {
-            browser.isSettingsWindowOpen = false
-            unbindController()
-        }
-        .frame(minWidth: 740, minHeight: 520)
-        .background(.ultraThinMaterial)
+            .onDisappear {
+                browser.isSettingsWindowOpen = false
+                unbindController()
+            }
+            .frame(minWidth: 740, minHeight: 520)
+            .background(.ultraThinMaterial)
     }
 
     private func content(_ model: SettingsModel) -> some View {
@@ -155,7 +144,11 @@ struct SettingsRootView: View {
         .onTapGesture {
             model.pane = .rows
             model.rowFocus = index
-            if case .toggle = def.kind { model.toggle(def) }
+            switch def.kind {
+            case .toggle: model.toggle(def)
+            case .option, .steps, .serverRegion: model.adjust(def, delta: 1)
+            case .ledColor: break
+            }
         }
     }
 
@@ -171,19 +164,29 @@ struct SettingsRootView: View {
             .labelsHidden()
 
         case .option, .steps, .serverRegion:
-            HStack(spacing: 8) {
-                if let index = model.optionIndex(def) {
-                    Text(model.optionLabel(def, index: index))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary)
-                } else {
-                    Text(model.defaultValueLabel(def))
-                        .font(.system(size: 13))
+            HStack(spacing: 10) {
+                Button {
+                    model.adjust(def, delta: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
                 }
-                Image(systemName: "chevron.left.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+
+                Text(controlValueText(model, def: def))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(minWidth: 120)
+
+                Button {
+                    model.adjust(def, delta: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
 
         case .ledColor:
@@ -208,15 +211,21 @@ struct SettingsRootView: View {
         }
     }
 
+    private func controlValueText(_ model: SettingsModel, def: SettingDef) -> String {
+        if let index = model.optionIndex(def) {
+            return model.optionLabel(def, index: index)
+        }
+        return model.defaultValueLabel(def)
+    }
+
     // MARK: - Controller wiring
 
     private func bindController() {
-        browser.controllerInput.onNavigate = { model?.moveFocus($0) }
-        browser.controllerInput.onAdjust = { model?.adjustFocused($0) }
-        browser.controllerInput.onActivate = { model?.activateFocused() }
-        browser.controllerInput.onCancel = { model?.closeWindow() }
+        browser.controllerInput.onNavigate = { model.moveFocus($0) }
+        browser.controllerInput.onAdjust = { model.adjustFocused($0) }
+        browser.controllerInput.onActivate = { model.activateFocused() }
+        browser.controllerInput.onCancel = { model.closeWindow() }
         browser.controllerInput.onSwitchCategory = { delta in
-            guard let model else { return }
             let count = SettingsCategory.all.count
             let currentIndex = SettingsCategory.all.firstIndex { $0.id == model.selectedCategoryId } ?? 0
             let newIndex = ((currentIndex + delta) % count + count) % count

@@ -23,8 +23,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
-        .overlay(alignment: .topTrailing) { toolsButton }
-        .overlay(alignment: .topTrailing) { spikePanel.padding(.top, 56) }
+        .overlay(alignment: .topTrailing) { spikePanel }
     }
 
     private var controllerBadge: some View {
@@ -41,35 +40,6 @@ struct ContentView: View {
         .padding(12)
         .opacity(0.85)
         .allowsHitTesting(false)
-    }
-
-    private var toolsButton: some View {
-        HStack(spacing: 8) {
-            Button {
-                browser.openSettingsWindow()
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 30, height: 30)
-                    .background(.thinMaterial, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .help("Settings (⌘,) — or double-press the Home/PS button")
-
-            Button {
-                browser.showReport.toggle()
-            } label: {
-                Image(systemName: "waveform.path.ecg")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 30, height: 30)
-                    .background(.thinMaterial, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .help("Diagnostics (⌘⇧D)")
-        }
-        .padding(12)
     }
 
     private var spikePanel: some View {

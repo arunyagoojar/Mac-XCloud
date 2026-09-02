@@ -172,9 +172,32 @@ enum BetterXCloud {
           (document.head || document.documentElement).appendChild(style);
         } catch (e) {}
       }
+
+      /* Better xCloud clones the site's HUD buttons for its stream shortcuts
+         (they carry title attributes) — remove the clones; the native app owns
+         settings and the menu bar owns navigation. */
+      var bxButtonTitles = ['Better xCloud', 'Stream stats', 'Reload page', 'Back to home', 'Take screenshot'];
+      function removeBxButtons() {
+        try {
+          var hud = document.getElementById('StreamHud');
+          if (!hud) return;
+          var buttons = hud.querySelectorAll('button[title]');
+          for (var i = 0; i < buttons.length; i++) {
+            var title = buttons[i].getAttribute('title') || '';
+            if (bxButtonTitles.indexOf(title) !== -1) {
+              var container = buttons[i].closest('div[class^="HUDButton"]') || buttons[i];
+              container.remove();
+            }
+          }
+        } catch (e) {}
+      }
+
       addStyle();
+      removeBxButtons();
       try {
-        new MutationObserver(addStyle).observe(document.documentElement, { childList: true, subtree: true });
+        var observer = new MutationObserver(function () { addStyle(); removeBxButtons(); });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        setInterval(removeBxButtons, 1500);
       } catch (e) {}
     })();
     """#

@@ -33,7 +33,7 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var report = SpikeReport()
 
     let controllerInput = ControllerInputService()
-    var settingsModel: SettingsModel?
+    lazy var settingsModel = SettingsModel(browser: self)
 
     weak var webView: WKWebView?
 
@@ -42,6 +42,14 @@ final class BrowserModel: ObservableObject {
             self?.openSettingsWindow()
         }
         controllerInput.start()
+
+        // This app drives a website, not documents: File and Edit menus add
+        // noise. Remove them once the (SwiftUI-built) main menu exists.
+        for delay in [0.5, 2.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.pruneFileAndEditMenus()
+            }
+        }
 
         let center = NotificationCenter.default
         center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
@@ -69,13 +77,20 @@ final class BrowserModel: ObservableObject {
             window.isReleasedWhenClosed = false
             window.center()
             window.contentView = NSHostingView(rootView:
-                SettingsRootView()
+                SettingsRootView(model: settingsModel)
                     .environmentObject(self)
             )
             settingsWindow = window
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: false)
+    }
+
+    private func pruneFileAndEditMenus() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        for item in mainMenu.items where ["File", "Edit"].contains(item.title) {
+            mainMenu.removeItem(item)
+        }
     }
 
     func closeSettingsWindow() {
