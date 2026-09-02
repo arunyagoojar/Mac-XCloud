@@ -13,10 +13,28 @@ struct ContentView: View {
     var body: some View {
         switch browser.authStage {
         case .landing, .signingIn:
-            LandingView(isSigningIn: browser.authStage == .signingIn,
-                        onSignIn: { browser.startSignIn() })
+            LandingView(mode: browser.authStage == .signingIn ? .signingIn : .choose,
+                        profiles: browser.profiles,
+                        onPickProfile: { browser.pickProfile($0) },
+                        onAddNew: { browser.startSignIn() },
+                        onSkip: { browser.skipSignIn() },
+                        onRemoveProfile: { browser.removeProfile($0) })
         case .authenticated:
-            playerView
+            ZStack {
+                playerView
+
+                // A saved session is verified quietly underneath; until then
+                // the landing page stays up so no signed-out page flashes.
+                if !browser.isSessionValidated {
+                    LandingView(mode: .validating,
+                                profiles: [],
+                                onPickProfile: { _ in },
+                                onAddNew: {},
+                                onSkip: {})
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.25), value: browser.isSessionValidated)
+                }
+            }
         }
     }
 

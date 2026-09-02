@@ -13,8 +13,9 @@ struct WebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        // Persistent store keeps the Microsoft sign-in across app relaunches.
-        config.websiteDataStore = .default()
+        // Per-profile persistent store keeps the Microsoft sign-in (and each
+        // profile's session) across app relaunches.
+        config.websiteDataStore = browser.activeDataStore
 
         let contentController = WKUserContentController()
         contentController.addUserScript(

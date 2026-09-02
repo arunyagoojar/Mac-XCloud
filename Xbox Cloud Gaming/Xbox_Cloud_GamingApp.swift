@@ -20,8 +20,10 @@ struct Xbox_Cloud_GamingApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Sign Out") { browser.signOut() }
-                    .disabled(browser.authStage != .authenticated)
+                Button(browser.selectedProfile.map { "Sign Out \($0.gamertag)" } ?? "Sign Out") {
+                    browser.signOutSelectedProfile()
+                }
+                .disabled(browser.selectedProfile == nil)
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }

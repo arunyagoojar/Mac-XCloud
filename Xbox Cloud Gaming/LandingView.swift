@@ -7,67 +7,186 @@
 
 import SwiftUI
 
+enum LandingMode {
+    case choose        // profile picker ("Who's playing today?")
+    case signingIn     // auth window is open
+    case validating    // silently verifying a restored session
+}
+
 struct LandingView: View {
-    let isSigningIn: Bool
-    let onSignIn: () -> Void
+    let mode: LandingMode
+    let profiles: [PlayerProfile]
+    let onPickProfile: (PlayerProfile) -> Void
+    let onAddNew: () -> Void
+    let onSkip: () -> Void
+    var onRemoveProfile: ((PlayerProfile) -> Void)? = nil
+
+    @State private var hoveredProfileID: UUID?
+    @State private var hoveredAction: String?
 
     var body: some View {
         ZStack {
             backgroundGlow
 
-            VStack(spacing: 24) {
+            VStack(spacing: 0) {
+                Text(mode == .validating ? "Restoring your session…" : "Who's playing today?")
+                    .font(.system(size: 42, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.top, 64)
+
                 Spacer()
 
-                xboxMark
+                content
+                    .padding(.bottom, 90)
+            }
+            .padding(.horizontal, 60)
+        }
+    }
 
-                VStack(spacing: 8) {
-                    Text("Xbox Cloud Gaming")
-                        .font(.system(size: 40, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
+    @ViewBuilder
+    private var content: some View {
+        switch mode {
+        case .validating:
+            VStack(spacing: 18) {
+                ProgressView()
+                    .controlSize(.large)
+                Text("Checking your Xbox session")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
 
-                    Text("Hundreds of console games, streamed straight to your Mac — no downloads, no installs.")
-                        .font(.system(size: 15))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 430)
-                        .fixedSize(horizontal: false, vertical: true)
+        case .signingIn:
+            VStack(spacing: 18) {
+                ProgressView()
+                    .controlSize(.large)
+                Text("Complete the sign-in in the window that just opened")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+
+        case .choose:
+            HStack(alignment: .center, spacing: 64) {
+                ForEach(profiles) { profile in
+                    profileCircle(profile)
                 }
 
-                Button(action: onSignIn) {
-                    HStack(spacing: 8) {
-                        if isSigningIn {
-                            ProgressView()
-                                .controlSize(.small)
+                actionCircle(id: "add-new",
+                             ringColor: Color(red: 0.30, green: 0.85, blue: 0.35),
+                             background: Color.white.opacity(0.08)) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 44, weight: .light))
+                        .foregroundStyle(.white)
+                } label: {
+                    Text("Add new")
+                } action: {
+                    onAddNew()
+                }
+
+                actionCircle(id: "skip",
+                             ringColor: .clear,
+                             background: Color.white.opacity(0.16)) {
+                    Image(systemName: "person.crop.circle.badge.xmark")
+                        .font(.system(size: 42, weight: .medium))
+                        .foregroundStyle(.white)
+                } label: {
+                    Text("Skip sign in")
+                } action: {
+                    onSkip()
+                }
+            }
+        }
+    }
+
+    private func profileCircle(_ profile: PlayerProfile) -> some View {
+        let isHovered = hoveredProfileID == profile.id
+        return VStack(spacing: 14) {
+            Button {
+                onPickProfile(profile)
+            } label: {
+                circleShape(size: 150)
+                    .background(circleFill(color: Color.white.opacity(0.16)))
+                    .overlay {
+                        if let urlString = profile.avatarURL, let url = URL(string: urlString) {
+                            AsyncImage(url: url) { image in
+                                image.resizable().scaledToFill()
+                            } placeholder: {
+                                Image(systemName: "person.fill")
+                                    .font(.system(size: 52))
+                                    .foregroundStyle(.white.opacity(0.8))
+                            }
+                            .frame(width: 138, height: 138)
+                            .clipShape(Circle())
                         } else {
-                            Image(systemName: "person.crop.circle.fill")
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 52))
+                                .foregroundStyle(.white.opacity(0.85))
                         }
-                        Text(isSigningIn ? "Waiting for sign-in…" : "Sign in with Microsoft")
-                            .font(.system(size: 15, weight: .semibold))
                     }
-                    .foregroundStyle(.white)
-                    .frame(width: 260, height: 46)
-                    .background(
-                        Capsule().fill(
-                            LinearGradient(colors: [Color(red: 0.11, green: 0.60, blue: 0.24),
-                                                    Color(red: 0.05, green: 0.40, blue: 0.16)],
-                                           startPoint: .top, endPoint: .bottom)
+                    .overlay(
+                        Circle().strokeBorder(
+                            isHovered ? Color(red: 0.30, green: 0.85, blue: 0.35) : .clear,
+                            lineWidth: 3
                         )
                     )
-                    .shadow(color: Color(red: 0.1, green: 0.6, blue: 0.25).opacity(0.45), radius: 18, y: 6)
-                }
-                .buttonStyle(.plain)
-                .disabled(isSigningIn)
-                .keyboardShortcut(.defaultAction)
-
-                Text("A separate sign-in window will open.\nYour session stays on this Mac.")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.4))
-                    .multilineTextAlignment(.center)
-
-                Spacer()
+                    .scaleEffect(isHovered ? 1.05 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: isHovered)
             }
-            .padding(40)
+            .buttonStyle(.plain)
+            .onHover { hoveredProfileID = $0 ? profile.id : nil }
+            .contextMenu {
+                Button("Remove from this Mac", role: .destructive) {
+                    onRemoveProfile?(profile)
+                }
+            }
+
+            Text(profile.gamertag)
+                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(maxWidth: 170)
         }
+    }
+
+    private func actionCircle(id: String,
+                              ringColor: Color,
+                              background: Color,
+                              @ViewBuilder icon: () -> some View,
+                              @ViewBuilder label: () -> some View,
+                              action: @escaping () -> Void) -> some View {
+        let isHovered = hoveredAction == id
+        return VStack(spacing: 14) {
+            Button(action: action) {
+                circleShape(size: 150)
+                    .background(circleFill(color: background))
+                    .overlay(Circle().strokeBorder(ringColor, lineWidth: 3).opacity(id == "add-new" ? 1 : 0))
+                    .overlay(
+                        Circle().strokeBorder(
+                            isHovered ? Color.white.opacity(0.7) : .clear,
+                            lineWidth: 3
+                        )
+                    )
+                    .overlay { icon() }
+                    .scaleEffect(isHovered ? 1.05 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: isHovered)
+            }
+            .buttonStyle(.plain)
+            .onHover { hoveredAction = $0 ? id : nil }
+
+            label()
+                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func circleShape(size: CGFloat) -> some View {
+        Circle()
+            .frame(width: size, height: size)
+    }
+
+    private func circleFill(color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 138, height: 138)
     }
 
     private var backgroundGlow: some View {
@@ -96,23 +215,13 @@ struct LandingView: View {
         }
         .clipped()
     }
-
-    private var xboxMark: some View {
-        ZStack {
-            Circle()
-                .fill(LinearGradient(colors: [Color(red: 0.13, green: 0.68, blue: 0.27),
-                                              Color(red: 0.06, green: 0.38, blue: 0.16)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: 104, height: 104)
-                .shadow(color: Color(red: 0.1, green: 0.6, blue: 0.25).opacity(0.55), radius: 26, y: 8)
-            Image(systemName: "gamecontroller.fill")
-                .font(.system(size: 46, weight: .medium))
-                .foregroundStyle(.white)
-        }
-    }
 }
 
 #Preview {
-    LandingView(isSigningIn: false, onSignIn: {})
+    LandingView(mode: .choose,
+                profiles: [PlayerProfile(id: UUID(), gamertag: "Arunya", avatarURL: nil)],
+                onPickProfile: { _ in },
+                onAddNew: {},
+                onSkip: {})
         .frame(width: 1024, height: 640)
 }
