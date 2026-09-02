@@ -62,6 +62,11 @@ final class BrowserModel: ObservableObject {
     private var authWindow: NSWindow?
     private var authCoordinator: AuthFlowCoordinator?
     private var consecutiveSignedOutChecks = 0
+    private var validationFailsafe: DispatchWorkItem?
+    /// Set when the user explicitly picks a profile. If its session turns out
+    /// to be dead, we open the sign-in window exactly once — user-initiated,
+    /// so it can never loop.
+    private var pendingReauthProfileID: UUID?
 
     init() {
         var decodedProfiles: [PlayerProfile] = []
@@ -81,6 +86,9 @@ final class BrowserModel: ObservableObject {
             isSessionValidated = true
         }
         profiles = decodedProfiles
+        if authStage == .authenticated {
+            scheduleValidationFailsafe()
+        }
 
         let center = NotificationCenter.default
         center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
@@ -90,6 +98,27 @@ final class BrowserModel: ObservableObject {
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
         }
         refreshNativeControllers()
+    }
+
+    /// Never leave the user on "Restoring your session…" forever: if validation
+    /// can't complete (page won't load, probe never answers), fall back to the
+    /// profile picker where every action is still reachable.
+    private func scheduleValidationFailsafe() {
+        validationFailsafe?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.authStage == .authenticated, !self.isSessionValidated else { return }
+            NSLog("XCG validation FAILED (timeout) — returning to picker")
+            self.pendingReauthProfileID = nil
+            self.authStage = .landing
+            self.note("Session check timed out — pick your profile")
+        }
+        validationFailsafe = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: work)
+    }
+
+    private func cancelValidationFailsafe() {
+        validationFailsafe?.cancel()
+        validationFailsafe = nil
     }
 
     var selectedProfile: PlayerProfile? {
@@ -185,12 +214,15 @@ final class BrowserModel: ObservableObject {
     }
 
     /// Picks an existing profile. The session under it is re-verified first;
-    /// if it has expired, the sign-in window opens for that account.
+    /// if it has expired, the sign-in window opens once for that account.
     func pickProfile(_ profile: PlayerProfile) {
         selectedProfileID = profile.id
+        pendingReauthProfileID = profile.id
         persistSelection()
         authStage = .authenticated
         isSessionValidated = false
+        consecutiveSignedOutChecks = 0
+        scheduleValidationFailsafe()
     }
 
     /// Enter without an account (browse the store; streaming still needs a login).
@@ -294,7 +326,7 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func handleAuthCheck(signedOut: Bool) {
+    func handleAuthCheck(signedOut: Bool) {
         // Guests browse signed-out by design; nothing to verify.
         guard authStage == .authenticated, selectedProfileID != nil else {
             consecutiveSignedOutChecks = 0
@@ -303,18 +335,30 @@ final class BrowserModel: ObservableObject {
 
         if signedOut {
             // A single miss means nothing — the page may still be hydrating.
-            // Only a sustained signed-out state counts, and even then we stop
-            // at the picker instead of reopening sign-in (that looped badly).
+            // Only a sustained signed-out state counts as a dead session.
             consecutiveSignedOutChecks += 1
             if consecutiveSignedOutChecks >= 3 {
                 consecutiveSignedOutChecks = 0
                 isSessionValidated = false
                 authStage = .landing
-                note("Session expired — choose a profile to sign in again")
+                cancelValidationFailsafe()
+
+                // Only when the user explicitly picked this profile do we
+                // offer re-authentication — once. Never auto-reopens.
+                if let id = pendingReauthProfileID,
+                   let profile = profiles.first(where: { $0.id == id }) {
+                    pendingReauthProfileID = nil
+                    note("Session expired — sign in to continue with \(profile.gamertag)")
+                    startSignIn(for: profile)
+                } else {
+                    note("Session expired — pick your profile to sign in again")
+                }
             }
         } else {
             consecutiveSignedOutChecks = 0
+            pendingReauthProfileID = nil
             isSessionValidated = true
+            cancelValidationFailsafe()
         }
     }
 

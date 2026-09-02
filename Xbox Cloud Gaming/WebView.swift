@@ -88,24 +88,56 @@ struct WebView: NSViewRepresentable {
 }
 
 extension WebView.Coordinator: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        NSLog("XCG nav request: %@", navigationAction.request.url?.absoluteString ?? "nil")
+        decisionHandler(.allow)
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        NSLog("XCG nav start")
         browser.setLoading(true)
     }
 
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        NSLog("XCG load FAILED: %@", error.localizedDescription)
+        browser.setLoading(false)
+        browser.note("Load failed: \(error.localizedDescription)")
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        NSLog("XCG nav didFinish: %@", webView.url?.absoluteString ?? "nil")
         browser.setLoading(false)
         browser.syncNavState()
+
+        // Belt-and-braces: probe the signed-in state directly, in addition to
+        // the injected polling script.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, let webView = self.browser.webView else { return }
+            webView.evaluateJavaScript(Self.signedOutProbe) { result, _ in
+                MainActor.assumeIsolated {
+                    if let signedOut = result as? Bool {
+                        NSLog("XCG probe signedOut=%d", signedOut ? 1 : 0)
+                        self.browser.handleAuthCheck(signedOut: signedOut)
+                    }
+                }
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        NSLog("XCG nav FAILED: %@", error.localizedDescription)
         browser.setLoading(false)
         browser.note("Navigation failed: \(error.localizedDescription)")
     }
 
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        browser.setLoading(false)
-        browser.note("Load failed: \(error.localizedDescription)")
-    }
+    static let signedOutProbe = """
+    (function () {
+      try {
+        var t = document.body ? document.body.innerText.slice(0, 1500).toLowerCase() : '';
+        return t.indexOf('sign in') !== -1;
+      } catch (e) { return true; }
+    })();
+    """
 }
 
 extension WebView.Coordinator: WKScriptMessageHandler {
