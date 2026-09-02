@@ -188,6 +188,8 @@ final class BrowserModel: ObservableObject {
             report.webControllerIDs = body["ids"] as? [String] ?? []
         case "gamepad-error":
             note("Gamepad polling error: \(body["detail"] as? String ?? "unknown")")
+        case "app-fullscreen":
+            toggleFullscreen()
         default:
             note("\(type): \(body["detail"] as? String ?? "")")
         }

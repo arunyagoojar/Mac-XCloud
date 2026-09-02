@@ -81,6 +81,7 @@ enum BetterXCloud {
               "ui.reduceAnimations": false,
               "ui.controllerFriendly": true,
               "ui.systemMenu.hideHandle": true,
+              "ui.controllerStatus.show": false,
               "loadingScreen.gameArt.show": true,
               "loadingScreen.waitTime.show": true,
               "block.tracking": true
@@ -116,6 +117,7 @@ enum BetterXCloud {
               for (var s in optimizedStream) if (!(s in stream)) stream[s] = optimizedStream[s];
             }
             global["ui.systemMenu.hideHandle"] = true;
+            global["ui.controllerStatus.show"] = false;
             localStorage.setItem("BetterXcloud", JSON.stringify(global));
             localStorage.setItem("BetterXcloud.Stream", JSON.stringify(stream));
           } catch (e) { console.error("[XCG] settings bootstrap failed", e); }
@@ -149,8 +151,60 @@ enum BetterXCloud {
         //    interface) and restyle the stats bar to match macOS.
         scripts.append(WKUserScript(source: nativeStyleScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
+        // 6. Route the site's fullscreen requests to native window fullscreen
+        //    (WKWebView doesn't implement the browser Fullscreen API, which is
+        //    why Xbox hides its fullscreen button).
+        scripts.append(WKUserScript(source: fullscreenBridgeScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+
         return scripts
     }
+
+    /// Spoofs Fullscreen API support so Xbox keeps its fullscreen button, and
+    /// forwards requests to the native window's fullscreen toggle.
+    static let fullscreenBridgeScript = """
+    (function () {
+      "use strict";
+      try {
+        var __p = location.pathname || "";
+        var __ok = location.hostname === "www.xbox.com" && (__p.indexOf("/play") !== -1 || __p.indexOf("/auth/msa") === 0);
+        if (!__ok) return;
+
+        Object.defineProperty(document, "fullscreenEnabled", {
+          configurable: true,
+          get: function () { return true; }
+        });
+        Object.defineProperty(document, "webkitFullscreenEnabled", {
+          configurable: true,
+          get: function () { return true; }
+        });
+
+        function enterNativeFullscreen() {
+          try { window.webkit.messageHandlers.spikeHandler.postMessage({ type: "app-fullscreen" }); } catch (e) {}
+        }
+
+        Element.prototype.requestFullscreen = function () {
+          enterNativeFullscreen();
+          return Promise.resolve().then(function () {
+            document.dispatchEvent(new Event("fullscreenchange"));
+          });
+        };
+        Element.prototype.webkitRequestFullscreen = function () {
+          enterNativeFullscreen();
+          return Promise.resolve();
+        };
+        document.exitFullscreen = function () {
+          enterNativeFullscreen();
+          return Promise.resolve().then(function () {
+            document.dispatchEvent(new Event("fullscreenchange"));
+          });
+        };
+        document.webkitExitFullscreen = function () {
+          enterNativeFullscreen();
+          return Promise.resolve();
+        };
+      } catch (e) { console.error("[XCG] fullscreen bridge failed", e); }
+    })();
+    """
 
     private static func wrappedScript(source: String) -> String {
         // Strip source-map comments; keep everything else intact.
@@ -301,6 +355,7 @@ enum BetterXCloud {
         '.bx-guide-home-buttons { display: none !important; }',
         '.bx-controller-shortcuts-manager-container { display: none !important; }',
         '.bx-keyboard-shortcuts-manager-container { display: none !important; }',
+        '.bx-toast { display: none !important; }',
         '#bx-game-bar { display: none !important; }',
         /* Stats bar — macOS look: SF font, frosted rounded capsule */
         '.bx-stats-bar {',
@@ -314,6 +369,7 @@ enum BetterXCloud {
         '  backdrop-filter: blur(24px) saturate(1.6) !important;',
         '  -webkit-backdrop-filter: blur(24px) saturate(1.6) !important;',
         '  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35) !important;',
+        '  margin-top: 10px !important;',
         '  padding: 7px 14px !important;',
         '}',
         '.bx-stats-bar * { font-family: inherit !important; letter-spacing: inherit !important; }'

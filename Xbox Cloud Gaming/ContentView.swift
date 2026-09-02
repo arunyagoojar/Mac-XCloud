@@ -10,9 +10,16 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var browser: BrowserModel
 
+    /// A controller counts as connected if either GameController or the page's
+    /// Gamepad API sees one — WebKit and GameController don't always agree.
+    private var isControllerConnected: Bool {
+        !browser.report.nativeControllerIDs.isEmpty || !browser.report.webControllerIDs.isEmpty
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             WebView(browser: browser)
+                .overlay(alignment: .top) { titleBarHider.allowsHitTesting(false) }
 
             if browser.isLoading {
                 ProgressView()
@@ -24,21 +31,46 @@ struct ContentView: View {
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
         .overlay(alignment: .topTrailing) { spikePanel }
+        .onAppear { styleMainWindow() }
+    }
+
+    /// Removes the visible title bar: traffic lights float over the content,
+    /// no title text, no gray bar.
+    private func styleMainWindow() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            for window in NSApp.windows where window.title == "Xbox Cloud Gaming" {
+                window.styleMask.insert(.fullSizeContentView)
+                window.titleVisibility = .hidden
+                window.titlebarAppearsTransparent = true
+                window.isMovableByWindowBackground = true
+            }
+        }
+    }
+
+    private var titleBarHider: some View {
+        // Invisible strip so the (transparent) titlebar area stays draggable.
+        Color.clear
+            .frame(height: 28)
+            .frame(maxWidth: .infinity)
     }
 
     private var controllerBadge: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "gamecontroller")
-            Text(browser.report.nativeControllerIDs.isEmpty
-                 ? "No controller"
-                 : "\(browser.report.nativeControllerIDs.count) controller\(browser.report.nativeControllerIDs.count == 1 ? "" : "s")")
+        Group {
+            if !isControllerConnected {
+                HStack(spacing: 6) {
+                    Image(systemName: "gamecontroller")
+                    Text("No controller")
+                }
+                .font(.callout)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.thinMaterial, in: Capsule())
+                .padding(12)
+                .opacity(0.85)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
-        .font(.callout)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.thinMaterial, in: Capsule())
-        .padding(12)
-        .opacity(0.85)
+        .animation(.easeInOut(duration: 0.35), value: isControllerConnected)
         .allowsHitTesting(false)
     }
 
