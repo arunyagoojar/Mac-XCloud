@@ -19,6 +19,10 @@ struct Xbox_Cloud_GamingApp: App {
         }
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Sign Out") { browser.signOut() }
+                    .disabled(browser.authStage != .authenticated)
+            }
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
                     .keyboardShortcut("r", modifiers: .command)

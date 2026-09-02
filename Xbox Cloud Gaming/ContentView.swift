@@ -11,6 +11,16 @@ struct ContentView: View {
     @EnvironmentObject private var browser: BrowserModel
 
     var body: some View {
+        switch browser.authStage {
+        case .landing, .signingIn:
+            LandingView(isSigningIn: browser.authStage == .signingIn,
+                        onSignIn: { browser.startSignIn() })
+        case .authenticated:
+            playerView
+        }
+    }
+
+    private var playerView: some View {
         ZStack(alignment: .top) {
             WebView(browser: browser)
 

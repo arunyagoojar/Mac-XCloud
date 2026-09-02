@@ -20,10 +20,19 @@ struct SpikeReport: Equatable {
     var messages: [String] = []
 }
 
+enum AuthStage {
+    case landing      // pre-sign-in: show the landing page
+    case signingIn    // sign-in window is open, waiting for it to finish
+    case authenticated
+}
+
 @MainActor
 final class BrowserModel: ObservableObject {
     static let homeURL = URL(string: "https://www.xbox.com/play")!
 
+    @Published private(set) var authStage: AuthStage = {
+        UserDefaults.standard.bool(forKey: "hasCompletedSignIn") ? .authenticated : .landing
+    }()
     @Published private(set) var isLoading = false
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
@@ -31,6 +40,10 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var report = SpikeReport()
 
     weak var webView: WKWebView?
+    private var authWindow: NSWindow?
+    private var authCoordinator: AuthFlowCoordinator?
+
+    private static let signedInKey = "hasCompletedSignIn"
 
     init() {
         let center = NotificationCenter.default
@@ -102,11 +115,100 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    // MARK: - Sign-in flow
+
+    /// Opens a small separate window with the Xbox sign-in page. When the login
+    /// flow eventually lands back on xbox.com/.../play, the window closes itself
+    /// and the app proceeds — the session cookie lives in the app's shared,
+    /// persistent website data store.
+    func startSignIn() {
+        guard authWindow == nil else { return }
+        authStage = .signingIn
+
+        let coordinator = AuthFlowCoordinator(browser: self)
+        authCoordinator = coordinator
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 700),
+                              styleMask: [.titled, .closable],
+                              backing: .buffered, defer: false)
+        window.title = "Sign in to Xbox"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = coordinator
+
+        let webView = WKWebView(frame: .zero)
+        webView.navigationDelegate = coordinator
+        window.contentView = webView
+        webView.load(URLRequest(url: Self.homeURL))
+
+        window.makeKeyAndOrderFront(nil)
+        authWindow = window
+    }
+
+    func finishSignIn() {
+        UserDefaults.standard.set(true, forKey: Self.signedInKey)
+        authStage = .authenticated
+        closeAuthWindow()
+        note("Sign-in completed")
+    }
+
+    func signInCancelled() {
+        guard authStage == .signingIn else { return }
+        authStage = .landing
+        authWindow = nil
+        authCoordinator = nil
+    }
+
+    /// Clears all website data (session cookies included) and returns to the landing page.
+    func signOut() {
+        UserDefaults.standard.removeObject(forKey: Self.signedInKey)
+        WKWebsiteDataStore.default().removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast,
+            completionHandler: {}
+        )
+        closeAuthWindow()
+        authStage = .landing
+    }
+
+    private func closeAuthWindow() {
+        authWindow?.delegate = nil
+        authWindow?.close()
+        authWindow = nil
+        authCoordinator = nil
+    }
+
     // MARK: - Native controller monitoring
 
     private func refreshNativeControllers() {
         report.nativeControllerIDs = GCController.controllers().map { controller in
             controller.vendorName ?? "Game Controller"
         }
+    }
+}
+
+/// Watches the sign-in window: any navigation that lands back on xbox.com's
+/// player page means the Microsoft login succeeded and set the session cookie.
+@MainActor
+final class AuthFlowCoordinator: NSObject, WKNavigationDelegate, NSWindowDelegate {
+    private weak var browser: BrowserModel?
+
+    init(browser: BrowserModel) {
+        self.browser = browser
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let url = webView.url, isSignedInPlayerURL(url) else { return }
+        browser?.finishSignIn()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        browser?.signInCancelled()
+    }
+
+    private func isSignedInPlayerURL(_ url: URL) -> Bool {
+        guard let host = url.host, host.hasSuffix("xbox.com") else { return false }
+        // The player lives at /play but xbox.com may localize the path (e.g. /en-US/play).
+        return url.path.split(separator: "/").contains("play")
     }
 }
