@@ -13,13 +13,13 @@ struct WebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        // Per-profile persistent store keeps the Microsoft sign-in (and each
-        // profile's session) across app relaunches.
-        config.websiteDataStore = browser.activeDataStore
+        // The persistent default store keeps the Microsoft sign-in across
+        // app relaunches.
+        config.websiteDataStore = .default()
 
         let contentController = WKUserContentController()
         contentController.addUserScript(
-            WKUserScript(source: Coordinator.spikeScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            WKUserScript(source: Coordinator.capabilitiesScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
         contentController.add(context.coordinator, name: "spikeHandler")
         config.userContentController = contentController
@@ -47,7 +47,7 @@ struct WebView: NSViewRepresentable {
 
         /// Reports environment capabilities and polls for connected gamepads,
         /// messaging the native side whenever the set of controllers changes.
-        static let spikeScript = #"""
+        static let capabilitiesScript = #"""
         (function () {
           function send(type, data) {
             try {
@@ -61,7 +61,6 @@ struct WebView: NSViewRepresentable {
             ua: navigator.userAgent
           });
           var last = 'init';
-          var lastSignedOut = null;
           setInterval(function () {
             try {
               if (typeof navigator.getGamepads !== 'function') { return; }
@@ -71,12 +70,6 @@ struct WebView: NSViewRepresentable {
               if (state !== last) {
                 last = state;
                 send('gamepads', { count: ids.length, ids: ids });
-              }
-              var text = document.body ? document.body.innerText.slice(0, 1500).toLowerCase() : '';
-              var signedOut = text.indexOf('sign in') !== -1;
-              if (signedOut !== lastSignedOut) {
-                lastSignedOut = signedOut;
-                send('authcheck', { signedOut: signedOut, url: location.href });
               }
             } catch (e) {
               send('gamepad-error', { detail: String(e) });
@@ -88,56 +81,24 @@ struct WebView: NSViewRepresentable {
 }
 
 extension WebView.Coordinator: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        NSLog("XCG nav request: %@", navigationAction.request.url?.absoluteString ?? "nil")
-        decisionHandler(.allow)
-    }
-
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        NSLog("XCG nav start")
         browser.setLoading(true)
     }
 
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        NSLog("XCG load FAILED: %@", error.localizedDescription)
-        browser.setLoading(false)
-        browser.note("Load failed: \(error.localizedDescription)")
-    }
-
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        NSLog("XCG nav didFinish: %@", webView.url?.absoluteString ?? "nil")
         browser.setLoading(false)
         browser.syncNavState()
-
-        // Belt-and-braces: probe the signed-in state directly, in addition to
-        // the injected polling script.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, let webView = self.browser.webView else { return }
-            webView.evaluateJavaScript(Self.signedOutProbe) { result, _ in
-                MainActor.assumeIsolated {
-                    if let signedOut = result as? Bool {
-                        NSLog("XCG probe signedOut=%d", signedOut ? 1 : 0)
-                        self.browser.handleAuthCheck(signedOut: signedOut)
-                    }
-                }
-            }
-        }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        NSLog("XCG nav FAILED: %@", error.localizedDescription)
         browser.setLoading(false)
         browser.note("Navigation failed: \(error.localizedDescription)")
     }
 
-    static let signedOutProbe = """
-    (function () {
-      try {
-        var t = document.body ? document.body.innerText.slice(0, 1500).toLowerCase() : '';
-        return t.indexOf('sign in') !== -1;
-      } catch (e) { return true; }
-    })();
-    """
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        browser.setLoading(false)
+        browser.note("Load failed: \(error.localizedDescription)")
+    }
 }
 
 extension WebView.Coordinator: WKScriptMessageHandler {

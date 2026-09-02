@@ -20,10 +20,7 @@ struct Xbox_Cloud_GamingApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button(browser.selectedProfile.map { "Sign Out \($0.gamertag)" } ?? "Sign Out") {
-                    browser.signOutSelectedProfile()
-                }
-                .disabled(browser.selectedProfile == nil)
+                Button("Sign Out") { browser.signOut() }
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
@@ -36,7 +33,7 @@ struct Xbox_Cloud_GamingApp: App {
                 Button("Go to xbox.com/play") { browser.loadHome() }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 Divider()
-                Button(browser.showReport ? "Hide Spike Report" : "Show Spike Report") {
+                Button(browser.showReport ? "Hide Diagnostics" : "Show Diagnostics") {
                     browser.showReport.toggle()
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])

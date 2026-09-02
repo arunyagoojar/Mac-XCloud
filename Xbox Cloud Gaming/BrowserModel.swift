@@ -20,76 +20,19 @@ struct SpikeReport: Equatable {
     var messages: [String] = []
 }
 
-enum AuthStage {
-    case landing      // "Who's playing today?" profile picker
-    case signingIn    // sign-in window is open, waiting for it to finish
-    case authenticated
-}
-
-/// One signed-in Microsoft account. `id` doubles as the identifier of the
-/// profile's own persistent cookie store, so multiple accounts stay signed in
-/// side by side.
-struct PlayerProfile: Codable, Identifiable, Equatable {
-    let id: UUID
-    var gamertag: String
-    var avatarURL: String?
-}
-
 @MainActor
 final class BrowserModel: ObservableObject {
     static let homeURL = URL(string: "https://www.xbox.com/play")!
-    /// Microsoft's real sign-in page, posting the authenticated session back to
-    /// xbox.com/play — so the window opens on a login form, never the Xbox site.
-    static let microsoftLoginURL = URL(string: "https://login.live.com/login.srf?wa=wsignin1.0&wreply=https%3A%2F%2Fwww.xbox.com%2Fplay")!
 
-    private static let profilesKey = "playerProfiles"
-    private static let selectedProfileKey = "selectedProfileID"
-
-    @Published private(set) var authStage: AuthStage
-    /// True once the saved session has been verified against the live site.
-    /// While false, the landing page covers the player so a dead session can
-    /// never flash the signed-out web page on launch.
-    @Published private(set) var isSessionValidated: Bool
-    @Published private(set) var profiles: [PlayerProfile] = []
-    @Published private(set) var selectedProfileID: UUID?
     @Published private(set) var isLoading = false
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
-    @Published var showReport = true
+    @Published var showReport = false
     @Published private(set) var report = SpikeReport()
 
     weak var webView: WKWebView?
-    private var authWindow: NSWindow?
-    private var authCoordinator: AuthFlowCoordinator?
-    private var consecutiveSignedOutChecks = 0
-    private var validationFailsafe: DispatchWorkItem?
-    /// Set when the user explicitly picks a profile. If its session turns out
-    /// to be dead, we open the sign-in window exactly once — user-initiated,
-    /// so it can never loop.
-    private var pendingReauthProfileID: UUID?
 
     init() {
-        var decodedProfiles: [PlayerProfile] = []
-        if let data = UserDefaults.standard.data(forKey: Self.profilesKey),
-           let decoded = try? JSONDecoder().decode([PlayerProfile].self, from: data) {
-            decodedProfiles = decoded
-        }
-        let savedSelection = UserDefaults.standard.string(forKey: Self.selectedProfileKey).flatMap(UUID.init(uuidString:))
-
-        if let id = savedSelection, decodedProfiles.contains(where: { $0.id == id }) {
-            selectedProfileID = id
-            authStage = .authenticated
-            isSessionValidated = false
-        } else {
-            selectedProfileID = nil
-            authStage = .landing
-            isSessionValidated = true
-        }
-        profiles = decodedProfiles
-        if authStage == .authenticated {
-            scheduleValidationFailsafe()
-        }
-
         let center = NotificationCenter.default
         center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
@@ -98,171 +41,6 @@ final class BrowserModel: ObservableObject {
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
         }
         refreshNativeControllers()
-    }
-
-    /// Never leave the user on "Restoring your session…" forever: if validation
-    /// can't complete (page won't load, probe never answers), fall back to the
-    /// profile picker where every action is still reachable.
-    private func scheduleValidationFailsafe() {
-        validationFailsafe?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.authStage == .authenticated, !self.isSessionValidated else { return }
-            NSLog("XCG validation FAILED (timeout) — returning to picker")
-            self.pendingReauthProfileID = nil
-            self.authStage = .landing
-            self.note("Session check timed out — pick your profile")
-        }
-        validationFailsafe = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: work)
-    }
-
-    private func cancelValidationFailsafe() {
-        validationFailsafe?.cancel()
-        validationFailsafe = nil
-    }
-
-    var selectedProfile: PlayerProfile? {
-        profiles.first { $0.id == selectedProfileID }
-    }
-
-    /// The profile used most recently — shown larger on the picker.
-    var lastUsedProfileID: UUID? {
-        UserDefaults.standard.string(forKey: Self.selectedProfileKey).flatMap(UUID.init(uuidString:))
-    }
-
-    /// Each profile has its own persistent cookie jar; guest browsing (skip
-    /// sign-in) uses a throwaway store so it can't touch any account.
-    var activeDataStore: WKWebsiteDataStore {
-        if let id = selectedProfileID {
-            return WKWebsiteDataStore(forIdentifier: id)
-        }
-        return .nonPersistent()
-    }
-
-    // MARK: - Sign-in flow
-
-    /// Opens a small separate window straight on Microsoft's login page. Success
-    /// is verified — the page must be back on the player, signed in, on
-    /// consecutive checks — then the window closes itself and the profile is
-    /// saved. The auto-sign-in script stays as a fallback in case the post-back
-    /// lands on xbox.com's public homepage.
-    func startSignIn(for profile: PlayerProfile? = nil) {
-        guard authWindow == nil else { return }
-        authStage = .signingIn
-        consecutiveSignedOutChecks = 0
-
-        let coordinator = AuthFlowCoordinator(browser: self,
-                                              storeID: profile?.id ?? UUID(),
-                                              existingProfileID: profile?.id)
-        authCoordinator = coordinator
-
-        let contentController = WKUserContentController()
-        contentController.addUserScript(
-            WKUserScript(source: AuthFlowCoordinator.autoSignInScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        )
-        contentController.addUserScript(
-            WKUserScript(source: AuthFlowCoordinator.authCheckScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        )
-        contentController.add(coordinator, name: "authHandler")
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = WKWebsiteDataStore(forIdentifier: coordinator.storeID)
-        config.userContentController = contentController
-
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 700),
-                              styleMask: [.titled, .closable],
-                              backing: .buffered, defer: false)
-        window.title = "Microsoft Sign In"
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.delegate = coordinator
-
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.navigationDelegate = coordinator
-        coordinator.attach(webView)
-        window.contentView = webView
-        webView.load(URLRequest(url: Self.microsoftLoginURL))
-
-        window.makeKeyAndOrderFront(nil)
-        authWindow = window
-    }
-
-    func completeSignIn(storeID: UUID, existingProfileID: UUID?, gamertag: String?, avatarURL: String?) {
-        let cleaned = gamertag?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = (cleaned?.isEmpty == false) ? cleaned! : "Player \(profiles.count + 1)"
-
-        if let id = existingProfileID, let index = profiles.firstIndex(where: { $0.id == id }) {
-            profiles[index].gamertag = name
-            profiles[index].avatarURL = avatarURL
-            selectedProfileID = id
-        } else {
-            let profile = PlayerProfile(id: storeID, gamertag: name, avatarURL: avatarURL)
-            profiles.append(profile)
-            selectedProfileID = profile.id
-        }
-        persistProfiles()
-        persistSelection()
-        closeAuthWindow()
-        authStage = .authenticated
-        isSessionValidated = true
-    }
-
-    func signInCancelled() {
-        guard authStage == .signingIn else { return }
-        authStage = .landing
-        authWindow = nil
-        authCoordinator = nil
-    }
-
-    /// Picks an existing profile. The session under it is re-verified first;
-    /// if it has expired, the sign-in window opens once for that account.
-    func pickProfile(_ profile: PlayerProfile) {
-        selectedProfileID = profile.id
-        pendingReauthProfileID = profile.id
-        persistSelection()
-        authStage = .authenticated
-        isSessionValidated = false
-        consecutiveSignedOutChecks = 0
-        scheduleValidationFailsafe()
-    }
-
-    /// Enter without an account (browse the store; streaming still needs a login).
-    func skipSignIn() {
-        selectedProfileID = nil
-        persistSelection()
-        authStage = .authenticated
-        isSessionValidated = true
-    }
-
-    /// Signs out the selected profile: wipes its cookie store and removes it
-    /// from the "Who's playing today?" list.
-    func signOutSelectedProfile() {
-        guard let profile = selectedProfile else { return }
-        removeProfile(profile)
-        authStage = .landing
-        isSessionValidated = true
-    }
-
-    func removeProfile(_ profile: PlayerProfile) {
-        let store = WKWebsiteDataStore(forIdentifier: profile.id)
-        store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                         modifiedSince: .distantPast,
-                         completionHandler: {})
-        profiles.removeAll { $0.id == profile.id }
-        if selectedProfileID == profile.id {
-            selectedProfileID = nil
-        }
-        persistProfiles()
-        persistSelection()
-        if authStage == .authenticated && selectedProfileID == nil {
-            authStage = .landing
-        }
-    }
-
-    private func closeAuthWindow() {
-        authWindow?.delegate = nil
-        authWindow?.close()
-        authWindow = nil
-        authCoordinator = nil
     }
 
     // MARK: - Actions
@@ -285,6 +63,16 @@ final class BrowserModel: ObservableObject {
 
     func toggleFullscreen() {
         (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+    }
+
+    /// Wipes the persistent session cookies, signing the user out of the site.
+    func signOut() {
+        WKWebsiteDataStore.default().removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast,
+            completionHandler: {}
+        )
+        loadHome()
     }
 
     // MARK: - State updates (called by WebView.Coordinator)
@@ -315,66 +103,11 @@ final class BrowserModel: ObservableObject {
             report.webRTC = (body["webrtc"] as? Bool) ?? false
             report.userAgent = body["ua"] as? String ?? ""
         case "gamepads":
-            let ids = body["ids"] as? [String] ?? []
-            report.webControllerIDs = ids
+            report.webControllerIDs = body["ids"] as? [String] ?? []
         case "gamepad-error":
             note("Gamepad polling error: \(body["detail"] as? String ?? "unknown")")
-        case "authcheck":
-            handleAuthCheck(signedOut: (body["signedOut"] as? Bool) ?? false)
         default:
             note("\(type): \(body["detail"] as? String ?? "")")
-        }
-    }
-
-    func handleAuthCheck(signedOut: Bool) {
-        // Guests browse signed-out by design; nothing to verify.
-        guard authStage == .authenticated, selectedProfileID != nil else {
-            consecutiveSignedOutChecks = 0
-            return
-        }
-
-        if signedOut {
-            // A single miss means nothing — the page may still be hydrating.
-            // Only a sustained signed-out state counts as a dead session.
-            consecutiveSignedOutChecks += 1
-            if consecutiveSignedOutChecks >= 3 {
-                consecutiveSignedOutChecks = 0
-                isSessionValidated = false
-                authStage = .landing
-                cancelValidationFailsafe()
-
-                // Only when the user explicitly picked this profile do we
-                // offer re-authentication — once. Never auto-reopens.
-                if let id = pendingReauthProfileID,
-                   let profile = profiles.first(where: { $0.id == id }) {
-                    pendingReauthProfileID = nil
-                    note("Session expired — sign in to continue with \(profile.gamertag)")
-                    startSignIn(for: profile)
-                } else {
-                    note("Session expired — pick your profile to sign in again")
-                }
-            }
-        } else {
-            consecutiveSignedOutChecks = 0
-            pendingReauthProfileID = nil
-            isSessionValidated = true
-            cancelValidationFailsafe()
-        }
-    }
-
-    // MARK: - Persistence
-
-    private func persistProfiles() {
-        if let data = try? JSONEncoder().encode(profiles) {
-            UserDefaults.standard.set(data, forKey: Self.profilesKey)
-        }
-    }
-
-    private func persistSelection() {
-        if let id = selectedProfileID {
-            UserDefaults.standard.set(id.uuidString, forKey: Self.selectedProfileKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.selectedProfileKey)
         }
     }
 
@@ -385,139 +118,4 @@ final class BrowserModel: ObservableObject {
             controller.vendorName ?? "Game Controller"
         }
     }
-}
-
-/// Watches the sign-in window. "Signed in" means: on an xbox.com player URL and
-/// the page header no longer offers a Sign in action, twice in a row. This
-/// matters because xbox.com shows a public homepage at /play when signed out
-/// instead of redirecting to the login flow.
-@MainActor
-final class AuthFlowCoordinator: NSObject, WKNavigationDelegate, NSWindowDelegate, WKScriptMessageHandler {
-    let storeID: UUID
-    private let existingProfileID: UUID?
-    private weak var browser: BrowserModel?
-    private weak var webView: WKWebView?
-    private var cleanChecks = 0
-    private var finished = false
-
-    init(browser: BrowserModel, storeID: UUID, existingProfileID: UUID?) {
-        self.browser = browser
-        self.storeID = storeID
-        self.existingProfileID = existingProfileID
-    }
-
-    func attach(_ webView: WKWebView) {
-        self.webView = webView
-        webView.navigationDelegate = self
-    }
-
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard !finished, let body = message.body as? [String: Any] else { return }
-        let signedOut = (body["signedOut"] as? Bool) ?? true
-        let urlString = body["url"] as? String ?? ""
-
-        if !signedOut && isPlayerURL(urlString) {
-            cleanChecks += 1
-            if cleanChecks >= 2 {
-                finished = true
-                scrapeIdentityAndFinish()
-            }
-        } else {
-            cleanChecks = 0
-        }
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        browser?.signInCancelled()
-    }
-
-    /// Grabs the gamertag and gamerpic from the signed-in page so the profile
-    /// picker can show the real account. Falls back to a generic name.
-    private func scrapeIdentityAndFinish() {
-        let storeID = self.storeID
-        let existingProfileID = self.existingProfileID
-        webView?.evaluateJavaScript(Self.identityScript) { [weak self] result, _ in
-            MainActor.assumeIsolated {
-                var gamertag: String?
-                var avatar: String?
-                if let dict = result as? [String: Any] {
-                    gamertag = dict["gamertag"] as? String
-                    avatar = dict["avatar"] as? String
-                }
-                self?.browser?.completeSignIn(storeID: storeID,
-                                              existingProfileID: existingProfileID,
-                                              gamertag: gamertag,
-                                              avatarURL: avatar)
-            }
-        }
-    }
-
-    private func isPlayerURL(_ urlString: String) -> Bool {
-        guard let url = URL(string: urlString), let host = url.host, host.hasSuffix("xbox.com") else { return false }
-        // The player lives at /play but xbox.com may localize the path (e.g. /en-US/play).
-        return url.path.split(separator: "/").contains("play")
-    }
-
-    /// xbox.com shows its public homepage when signed out instead of a login
-    /// redirect, so find the header "Sign in" control and click it. Stops as
-    /// soon as the browser leaves for the Microsoft login domain.
-    static let autoSignInScript = #"""
-    (function () {
-      var tries = 0;
-      var timer = setInterval(function () {
-        tries++;
-        if (tries > 30) { clearInterval(timer); return; }
-        var host = location.host;
-        if (host.indexOf('login.') === 0 || host.indexOf('signin.') !== -1 || host.indexOf('live.com') !== -1) {
-          clearInterval(timer);
-          return;
-        }
-        if (host.indexOf('xbox.com') === -1) { return; }
-        var els = document.querySelectorAll('a, button, [role="button"]');
-        for (var i = 0; i < els.length; i++) {
-          var label = ((els[i].innerText || '') + ' ' + (els[i].getAttribute('aria-label') || '')).trim().toLowerCase();
-          if (label === 'sign in' || label.indexOf('sign in') === 0) {
-            els[i].click();
-            clearInterval(timer);
-            return;
-          }
-        }
-      }, 700);
-    })();
-    """#
-
-    /// Reports whether the page still offers a "Sign in" action (checked in the
-    /// first chunk of the page text, where the site header lives).
-    static let authCheckScript = #"""
-    (function () {
-      function send() {
-        try {
-          var text = document.body ? document.body.innerText.slice(0, 1500).toLowerCase() : '';
-          window.webkit.messageHandlers.authHandler.postMessage({
-            signedOut: text.indexOf('sign in') !== -1,
-            url: location.href
-          });
-        } catch (e) {}
-      }
-      setInterval(send, 900);
-      send();
-    })();
-    """#
-
-    static let identityScript = #"""
-    (function () {
-      try {
-        var img = document.querySelector('img[src*="xboxlive"], img[src*="gamerpic"], img[alt*="gamertag" i]');
-        var name = null;
-        var els = document.querySelectorAll('button[aria-label], a[aria-label]');
-        for (var i = 0; i < els.length; i++) {
-          var label = els[i].getAttribute('aria-label') || '';
-          if (/profile|account|gamertag/i.test(label) && label.length < 60) { name = label; break; }
-        }
-        return { avatar: img ? img.src : null, gamertag: name };
-      } catch (e) {
-        return { avatar: null, gamertag: null };
-      }
-    })();
-    """#
 }

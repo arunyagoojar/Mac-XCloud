@@ -11,39 +11,8 @@ struct ContentView: View {
     @EnvironmentObject private var browser: BrowserModel
 
     var body: some View {
-        switch browser.authStage {
-        case .landing, .signingIn:
-            LandingView(mode: browser.authStage == .signingIn ? .signingIn : .choose,
-                        profiles: browser.profiles,
-                        currentProfileID: browser.lastUsedProfileID,
-                        onPickProfile: { browser.pickProfile($0) },
-                        onAddNew: { browser.startSignIn() },
-                        onSkip: { browser.skipSignIn() },
-                        onRemoveProfile: { browser.removeProfile($0) })
-        case .authenticated:
-            ZStack {
-                playerView
-
-                // A saved session is verified quietly underneath; until then
-                // the landing page stays up so no signed-out page flashes.
-                if !browser.isSessionValidated {
-                    LandingView(mode: .validating,
-                                profiles: [],
-                                onPickProfile: { _ in },
-                                onAddNew: {},
-                                onSkip: {})
-                        .transition(.opacity)
-                        .animation(.easeInOut(duration: 0.25), value: browser.isSessionValidated)
-                }
-            }
-        }
-    }
-
-    private var playerView: some View {
         ZStack(alignment: .top) {
-            // Re-created per profile: each has its own cookie store.
             WebView(browser: browser)
-                .id(browser.selectedProfileID?.uuidString ?? "guest")
 
             if browser.isLoading {
                 ProgressView()
@@ -77,7 +46,7 @@ struct ContentView: View {
         Group {
             if browser.showReport {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Compatibility Spike")
+                    Text("Diagnostics")
                         .font(.headline)
 
                     Label(browser.report.gamepadAPI ? "Gamepad API: available" : "Gamepad API: MISSING",
@@ -93,12 +62,6 @@ struct ContentView: View {
 
                     ForEach(browser.report.nativeControllerIDs, id: \.self) { id in
                         Text("• \(id)").font(.caption).padding(.leading, 8)
-                    }
-
-                    if browser.report.webControllerIDs.count != browser.report.nativeControllerIDs.count {
-                        Text("Web-visible gamepads: \(browser.report.webControllerIDs.count) — bridge needed")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
                     }
 
                     ForEach(Array(browser.report.messages.suffix(4).enumerated()), id: \.offset) { _, message in
