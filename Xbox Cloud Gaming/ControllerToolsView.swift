@@ -83,6 +83,7 @@ struct ControllerToolsView: View {
                 GroupBox {
                     LabeledContent("Controller", value: d.vendorName)
                     LabeledContent("Category", value: d.productCategory)
+                    LabeledContent("In-game gyro bridge", value: browser.nativeInputMergeReady ? "Ready" : browser.nativeInputMergeReason)
                     LabeledContent("Battery", value: batteryText)
                     LabeledContent("Adaptive triggers", value: service.capabilities.hasAdaptiveTriggers ? "Available" : "Unavailable")
                     LabeledContent("Motion", value: service.capabilities.hasMotion ? "Available" : "Unavailable")
@@ -177,9 +178,13 @@ struct ControllerToolsView: View {
             title("Motion & Touchpad")
             Picker("Gyro mode", selection: gyroMode) {
                 Text("Off").tag(GyroMode.off)
-                Text("Aim (right stick)").tag(GyroMode.rightStick)
+                Text("Aim").tag(GyroMode.rightStick)
                 Text("Aim while L2 held").tag(GyroMode.pointer)
                 Text("Steering (tilt)").tag(GyroMode.raw)
+            }
+            Picker("Output stick", selection: gyroTarget) {
+                Text("Left Stick (steering/movement)").tag(GyroTarget.leftStick)
+                Text("Right Stick (camera/aim)").tag(GyroTarget.rightStick)
             }
             valueSlider("Horizontal sensitivity", value: gyroSensitivityX, range: 0.1...3, format: { String(format: "%.1fx", $0) })
             valueSlider("Vertical sensitivity", value: gyroSensitivityY, range: 0.1...3, format: { String(format: "%.1fx", $0) })
@@ -307,6 +312,7 @@ struct ControllerToolsView: View {
     private var hapticGain: Binding<Double> { Binding(get: { Double(service.settings.haptics.intensityMultiplier) }, set: { value in service.updateSettings { $0.haptics.intensityMultiplier = Float(value) } }) }
     private var hapticSharpness: Binding<Double> { Binding(get: { Double(service.settings.haptics.sharpness) }, set: { value in service.updateSettings { $0.haptics.sharpness = Float(value) } }) }
     private var gyroMode: Binding<GyroMode> { Binding(get: { service.settings.gyro.mode }, set: { value in service.updateSettings { $0.gyro.mode = value } }) }
+    private var gyroTarget: Binding<GyroTarget> { Binding(get: { service.settings.gyro.target }, set: { value in service.updateSettings { $0.gyro.target = value } }) }
     private var gyroSensitivityX: Binding<Double> { Binding(get: { Double(service.settings.gyro.sensitivityX) }, set: { value in service.updateSettings { $0.gyro.sensitivityX = Float(value) } }) }
     private var gyroSensitivityY: Binding<Double> { Binding(get: { Double(service.settings.gyro.sensitivityY) }, set: { value in service.updateSettings { $0.gyro.sensitivityY = Float(value) } }) }
     private var gyroDeadzone: Binding<Double> { Binding(get: { Double(service.settings.gyro.deadzone) }, set: { value in service.updateSettings { $0.gyro.deadzone = Float(value) } }) }
@@ -335,13 +341,13 @@ struct ControllerToolsView: View {
             settings.categoryPreset.selectedPreset = preset
             switch preset {
             case .racing:
-                settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .brakeComfort; settings.adaptiveTriggers.rightPreset = .accelerator; settings.haptics.intensityMultiplier = 1.0
+                settings.gyro.mode = .raw; settings.gyro.target = .leftStick; settings.adaptiveTriggers.leftPreset = .brakeComfort; settings.adaptiveTriggers.rightPreset = .accelerator; settings.haptics.intensityMultiplier = 1.0
                 settings.calibration.leftStick.responseCurve = .sCurve(strength: 0.28)
             case .simulation:
-                settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .bow; settings.adaptiveTriggers.rightPreset = .bow; settings.haptics.intensityMultiplier = 0.9
+                settings.gyro.mode = .raw; settings.gyro.target = .leftStick; settings.adaptiveTriggers.leftPreset = .bow; settings.adaptiveTriggers.rightPreset = .bow; settings.haptics.intensityMultiplier = 0.9
                 settings.calibration.leftStick.responseCurve = .sCurve(strength: 0.45)
             case .shooter:
-                settings.gyro.mode = .pointer; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .automaticRecoil; settings.haptics.intensityMultiplier = 1.15
+                settings.gyro.mode = .pointer; settings.gyro.target = .rightStick; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .automaticRecoil; settings.haptics.intensityMultiplier = 1.15
                 settings.calibration.rightStick.responseCurve = .exponential(exponent: 1.25)
             case .platformer:
                 settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .platformerEndStop; settings.adaptiveTriggers.rightPreset = .platformerEndStop; settings.haptics.intensityMultiplier = 0.9
