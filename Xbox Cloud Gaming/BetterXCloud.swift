@@ -158,7 +158,7 @@ enum BetterXCloud {
               "video.contrast": 100,
               "video.saturation": 100,
               "audio.volume": 100,
-              "stats.showWhenPlaying": true,
+              "stats.showWhenPlaying": false,
               "stats.items": ["ping", "fps", "btr", "dt", "pl", "fl"],
               "stats.position": "top-right",
               "stats.opacity.all": 90,
@@ -463,12 +463,54 @@ enum BetterXCloud {
           },
           regions: function () { try { return STATES.serverRegions || {}; } catch (e) { return {}; } },
           selectedRegion: function () { try { return STATES.selectedRegion || {}; } catch (e) { return {}; } },
-          getGlobal: function (k) { return getGlobalPref(k); },
-          setGlobal: function (k, v) { setGlobalPref(k, v, "ui"); return getGlobalPref(k); },
-          getStream: function (k) { return getStreamPref(k); },
-          setStream: function (k, v) { setStreamPref(k, v, "ui"); return getStreamPref(k); },
+          getGlobal: function (k) {
+            if (!isGlobalPref(k)) throw new Error("Setting is not global: " + k);
+            return getGlobalPref(k);
+          },
+          setGlobal: function (k, v) {
+            if (!isGlobalPref(k)) throw new Error("Setting is not global: " + k);
+            setGlobalPref(k, v, "ui");
+            return getGlobalPref(k);
+          },
+          getStream: function (k) {
+            if (!isStreamPref(k)) throw new Error("Setting is not stream: " + k);
+            return getStreamPref(k);
+          },
+          setStream: function (k, v) {
+            if (!isStreamPref(k)) throw new Error("Setting is not stream: " + k);
+            setStreamPref(k, v, "ui");
+            return getStreamPref(k);
+          },
+          getPublic: function (scope, k) {
+            if (scope === "global") return this.getGlobal(k);
+            if (scope === "stream") return this.getStream(k);
+            throw new Error("Unknown setting scope: " + scope);
+          },
+          setPublic: function (scope, k, v) {
+            if (scope === "global") return this.setGlobal(k, v);
+            if (scope === "stream") return this.setStream(k, v);
+            throw new Error("Unknown setting scope: " + scope);
+          },
           rawGlobal: function () { try { return JSON.parse(localStorage.getItem("BetterXcloud") || "{}"); } catch (e) { return {}; } },
           rawStream: function () { try { return JSON.parse(localStorage.getItem("BetterXcloud.Stream") || "{}"); } catch (e) { return {}; } },
+          rawSameScope: function (scope, k) {
+            if (scope === "global") return this.rawGlobal()[k];
+            /* Stream settings can be overridden per game. The public getter is
+               the only same-scope value that is safe for the native mirror. */
+            if (scope === "stream") return this.getStream(k);
+            throw new Error("Unknown setting scope: " + scope);
+          },
+          settingsSnapshot: function () {
+            var out = { global: {}, stream: {}, rawGlobal: {}, rawStream: {} };
+            (ALL_PREFS.global || []).forEach(function (k) {
+              try { out.global[k] = getGlobalPref(k); } catch (e) {}
+            });
+            (ALL_PREFS.stream || []).forEach(function (k) {
+              try { out.stream[k] = getStreamPref(k); } catch (e) {}
+            });
+            try { out.rawGlobal = this.rawGlobal(); } catch (e) {}
+            return out;
+          },
           getBaseStream: function (key, fallback) {
             try {
               if (typeof STORAGE !== "undefined" && STORAGE.Stream) {

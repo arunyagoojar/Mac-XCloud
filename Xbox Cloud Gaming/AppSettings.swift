@@ -371,7 +371,7 @@ extension SettingsModel {
         .init(key: "ui.feedbackDialog.disabled", scope: .global, value: true),
         .init(key: "ui.controllerFriendly", scope: .global, value: true),
         .init(key: "block.tracking", scope: .global, value: true),
-        .init(key: "stats.showWhenPlaying", scope: .stream, value: true),
+        .init(key: "stats.showWhenPlaying", scope: .stream, value: false),
         .init(key: "stats.items", scope: .stream, value: ["ping", "fps", "btr", "dt", "pl", "fl"]),
         .init(key: "stats.position", scope: .stream, value: "top-right"),
         .init(key: "stats.opacity.all", scope: .stream, value: 90.0),
@@ -392,16 +392,40 @@ extension SettingsModel {
 
     func applySuggested() {
         saveMessage = "Applying optimized M1 settings…"
-        for change in Self.suggestedForMac {
-            write(id: change.key, scope: change.scope, value: change.value)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for change in Self.suggestedForMac {
+                await self.writeAndWait(id: change.key, scope: change.scope, value: change.value)
+            }
+            self.saveMessage = "Suggested settings saved"
         }
     }
 
-    /// Verified write: Better xCloud validates/transforms the value, writes it
-    /// to localStorage, and returns both its public value and raw persisted
-    /// value. The native UI and mirror update only after that succeeds.
+    /// Verified write: Better xCloud validates/transforms the value, writes it,
+    /// and returns a same-scope readback. UI and native mirrors update only after
+    /// that response, and per-key generations discard stale completions.
     func write(id: String, scope: SettingScope, value: Any) {
+        write(id: id, scope: scope, value: value, completion: nil)
+    }
+
+    private func writeAndWait(id: String, scope: SettingScope, value: Any) async {
+        await withCheckedContinuation { continuation in
+            write(id: id, scope: scope, value: value) { _ in continuation.resume() }
+        }
+    }
+
+    private func write(id: String, scope: SettingScope, value: Any, completion: ((Bool) -> Void)?) {
         let intendedPresetID = browser?.inputPresets.activePresetID
+        let generationKey = "\(scope == .global ? "global" : "stream"):\(id)"
+        let generation = (writeGenerations[generationKey] ?? 0) + 1
+        writeGenerations[generationKey] = generation
+
+        guard let browser else {
+            saveMessage = "The Xbox page is not ready."
+            completion?(false)
+            return
+        }
+        let script: String
         if id == "app.clarityPipeline" {
             let pipeline = (value as? String) ?? "fsr1"
             let mode = pipeline == "fsr1" ? "fsr1" : "off"
@@ -414,74 +438,85 @@ extension SettingsModel {
             case "webgpu-cas": renderer = "webgpu"; processing = "cas"
             default: renderer = "default"; processing = "usm"
             }
-            browser?.evaluateJS("""
-            try {
-              localStorage.setItem('XCG.Upscaler', '\(mode)');
-              window.postMessage({ type: 'xcg-upscaler', mode: '\(mode)' }, '*');
-              BxCBridge.setStream('video.player.type', '\(renderer)');
-              BxCBridge.setStream('video.processing', '\(processing)');
-              'ok'
-            } catch (e) { 'err' }
-            """)
-            globalValues[id] = pipeline
-            streamValues["video.player.type"] = renderer
-            streamValues["video.processing"] = processing
-            NativeSettingsMirror.save(pipeline, for: id, scope: .global)
-            NativeSettingsMirror.save(renderer, for: "video.player.type", scope: .stream)
-            NativeSettingsMirror.save(processing, for: "video.processing", scope: .stream)
-            saveMessage = "Clarity pipeline saved — reload to apply renderer changes"
-            needsReload = pipeline != "fsr1"
-            browser?.inputPresets.noteBetterXCloudInputChanged(for: intendedPresetID)
-            objectWillChange.send()
-            return
+            script = """
+            (function () {
+              try {
+                if (typeof BxCBridge === 'undefined') return JSON.stringify({ok:false,error:'Better xCloud is not ready'});
+                BxCBridge.setStream('video.player.type', \(jsonEncoded(renderer)));
+                BxCBridge.setStream('video.processing', \(jsonEncoded(processing)));
+                localStorage.setItem('XCG.Upscaler', \(jsonEncoded(mode)));
+                window.postMessage({type:'xcg-upscaler', mode:\(jsonEncoded(mode))}, '*');
+                var up = localStorage.getItem('XCG.Upscaler');
+                var r = BxCBridge.getStream('video.player.type');
+                var p = BxCBridge.getStream('video.processing');
+                return JSON.stringify({ok: up === \(jsonEncoded(mode)) && r === \(jsonEncoded(renderer)) && p === \(jsonEncoded(processing)), accepted:\(jsonEncoded(pipeline)), raw:up, renderer:r, processing:p});
+              } catch (e) { return JSON.stringify({ok:false,error:String(e)}); }
+            })();
+            """
+        } else {
+            let scopeName = scope == .global ? "global" : "stream"
+            script = """
+            (function () {
+              try {
+                if (typeof BxCBridge === 'undefined') return JSON.stringify({ok:false,error:'Better xCloud is not ready'});
+                var accepted = BxCBridge.setPublic('\(scopeName)', \(jsonEncoded(id)), \(jsonEncoded(value)));
+                var readback = BxCBridge.getPublic('\(scopeName)', \(jsonEncoded(id)));
+                var raw = BxCBridge.rawSameScope('\(scopeName)', \(jsonEncoded(id)));
+                return JSON.stringify({ok:true,accepted:accepted,readback:readback,raw:raw});
+              } catch (e) { return JSON.stringify({ok:false,error:String(e)}); }
+            })();
+            """
         }
-        guard let browser else {
-            saveMessage = "The Xbox page is not ready."
-            return
-        }
-        let scopeCall = scope == .global ? "setGlobal" : "setStream"
-        let rawCall = scope == .global ? "rawGlobal" : "rawStream"
-        let script = """
-        (function () {
-          try {
-            if (typeof BxCBridge === 'undefined') return JSON.stringify({ok:false,error:'Better xCloud is not ready'});
-            var accepted = BxCBridge.\(scopeCall)('\(id)', \(jsonEncoded(value)));
-            var raw = BxCBridge.\(rawCall)();
-            return JSON.stringify({ok:true,accepted:accepted,raw:raw['\(id)']});
-          } catch (e) { return JSON.stringify({ok:false,error:String(e)}); }
-        })();
-        """
         browser.evaluateJS(script) { [weak self] result, error in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self else { completion?(false); return }
+                guard self.writeGenerations[generationKey] == generation else { completion?(false); return }
                 if let error {
                     self.saveMessage = "Could not save: \(error.localizedDescription)"
+                    completion?(false)
                     return
                 }
                 guard let json = result as? String,
                       let data = json.data(using: .utf8),
                       let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       response["ok"] as? Bool == true else {
-                    self.saveMessage = "Could not save this setting."
+                    self.saveMessage = (try? JSONSerialization.jsonObject(with: (result as? String ?? "").data(using: .utf8) ?? Data()) as? [String: Any])?["error"] as? String ?? "Could not save this setting."
+                    completion?(false)
                     return
                 }
-                let raw = response["raw"] ?? value
-                switch scope {
-                case .global:
-                    self.globalValues[id] = raw
-                    NativeSettingsMirror.save(raw, for: id, scope: .global)
-                case .stream:
-                    self.streamValues[id] = raw
-                    NativeSettingsMirror.save(raw, for: id, scope: .stream)
+                if id == "app.clarityPipeline" {
+                    let pipeline = (value as? String) ?? "fsr1"
+                    self.globalValues[id] = pipeline
+                    self.streamValues["video.player.type"] = response["renderer"] ?? "default"
+                    self.streamValues["video.processing"] = response["processing"] ?? "usm"
+                    NativeSettingsMirror.save(pipeline, for: id, scope: .global)
+                    NativeSettingsMirror.save(self.streamValues["video.player.type"]!, for: "video.player.type", scope: .stream)
+                    NativeSettingsMirror.save(self.streamValues["video.processing"]!, for: "video.processing", scope: .stream)
+                    self.needsReload = pipeline != "fsr1"
+                } else {
+                    let stored = response["raw"] ?? response["readback"] ?? value
+                    switch scope {
+                    case .global:
+                        self.globalValues[id] = stored
+                        NativeSettingsMirror.save(stored, for: id, scope: .global)
+                    case .stream:
+                        self.streamValues[id] = stored
+                        NativeSettingsMirror.save(stored, for: id, scope: .stream)
+                    }
+                    if ["stream.video.codecProfile", "userAgent.profile", "video.player.type", "video.processing"].contains(id) {
+                        self.needsReload = true
+                    }
+                    if ["mkb.enabled", "nativeMkb.mode", "mkb.p1.slot", "mkb.p2.slot", "mkb.p1.preset.mappingId", "mkb.p2.preset.mappingId", "keyboardShortcuts.preset.inGameId", "controller.settings"].contains(id) {
+                        self.browser?.inputPresets.noteBetterXCloudInputChanged(for: intendedPresetID)
+                    }
+                }
+                if id == "server.region", let selected = response["readback"] as? String,
+                   let index = self.regions.firstIndex(where: { $0.value == selected }) {
+                    self.regionIndex = index
                 }
                 self.saveMessage = "Saved"
-                if ["mkb.enabled", "nativeMkb.mode", "mkb.p1.slot", "mkb.p2.slot", "mkb.p1.preset.mappingId", "mkb.p2.preset.mappingId", "keyboardShortcuts.preset.inGameId", "controller.settings"].contains(id) {
-                    self.browser?.inputPresets.noteBetterXCloudInputChanged(for: intendedPresetID)
-                }
-                if scope == .global || ["stream.video.codecProfile", "video.player.type", "video.processing", "userAgent.profile"].contains(id) {
-                    self.needsReload = true
-                }
                 self.objectWillChange.send()
+                completion?(true)
             }
         }
     }
@@ -581,14 +616,12 @@ final class SettingsModel: ObservableObject {
 
     func useBestRegion() {
         guard let bestRegionResult,
-              let index = regions.firstIndex(where: { $0.value == bestRegionResult.name }) else {
+              regions.contains(where: { $0.value == bestRegionResult.name }) else {
             saveMessage = "Run the region test first"
             return
         }
-        regionIndex = index
         write(id: "server.region", scope: .global, value: bestRegionResult.name)
-        saveMessage = "Selected \(bestRegionResult.name) (\(bestRegionResult.averageMs) ms)"
-        objectWillChange.send()
+        saveMessage = "Selecting \(bestRegionResult.name)…"
     }
 
     /// App-local: a custom LED color chosen with the color picker.
@@ -614,12 +647,15 @@ final class SettingsModel: ObservableObject {
     private var globalValues: [String: Any] = [:]
     private var streamValues: [String: Any] = [:]
     private var regionIndex = 0
+    private var loadGeneration = 0
+    private var writeGenerations: [String: Int] = [:]
 
     private(set) weak var browser: BrowserModel?
 
     init(browser: BrowserModel) {
         self.browser = browser
-        ledColorIndex = UserDefaults.standard.object(forKey: "ledColorIndex") as? Int ?? 1
+        let savedLED = UserDefaults.standard.object(forKey: "ledColorIndex") as? Int ?? 1
+        ledColorIndex = min(max(savedLED, 0), max(0, LEDColor.all.count - 1))
     }
 
     var selectedCategory: SettingsCategory {
@@ -639,46 +675,53 @@ final class SettingsModel: ObservableObject {
     private static let readAllJS = """
     (function () {
       try {
-        var regions = (typeof BxCBridge !== 'undefined') ? BxCBridge.regions() : {};
-        var selected = (typeof BxCBridge !== 'undefined') ? BxCBridge.selectedRegion() : {};
+        if (typeof BxCBridge === 'undefined') return JSON.stringify({bridge:false,error:'Better xCloud bridge is unavailable'});
+        var snapshot = BxCBridge.settingsSnapshot();
+        var selected = BxCBridge.selectedRegion();
         return JSON.stringify({
-          bridge: typeof BxCBridge !== 'undefined',
-          regions: regions,
+          bridge: true,
+          regions: BxCBridge.regions(),
           selectedRegion: selected,
           upscaler: localStorage.getItem('XCG.Upscaler') || 'off',
-          global: JSON.parse(localStorage.getItem('BetterXcloud') || '{}'),
-          stream: JSON.parse(localStorage.getItem('BetterXcloud.Stream') || '{}')
+          global: snapshot.global || {},
+          stream: snapshot.stream || {}
         });
-      } catch (e) { return JSON.stringify({ bridge: false }); }
+      } catch (e) { return JSON.stringify({bridge:false,error:String(e)}); }
     })();
     """
 
     func load() {
-        browser?.evaluateJS(Self.readAllJS) { [weak self] result, _ in
+        loadGeneration += 1
+        let generation = loadGeneration
+        guard let browser else {
+            bridgeAvailable = false
+            saveMessage = "The Xbox page is not ready."
+            return
+        }
+        browser.evaluateJS(Self.readAllJS) { [weak self] result, error in
             MainActor.assumeIsolated {
-                guard let self,
+                guard let self, self.loadGeneration == generation else { return }
+                guard error == nil,
                       let json = result as? String,
                       let data = json.data(using: .utf8),
-                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-
+                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    self.bridgeAvailable = false
+                    self.saveMessage = "The Xbox page is not ready."
+                    return
+                }
                 self.bridgeAvailable = root["bridge"] as? Bool ?? false
+                guard self.bridgeAvailable else {
+                    self.saveMessage = root["error"] as? String ?? "Better xCloud bridge is unavailable."
+                    return
+                }
                 self.globalValues = root["global"] as? [String: Any] ?? [:]
                 self.streamValues = root["stream"] as? [String: Any] ?? [:]
                 let upscaler = root["upscaler"] as? String ?? "off"
                 let renderer = self.streamValues["video.player.type"] as? String ?? "default"
                 let processing = self.streamValues["video.processing"] as? String ?? "usm"
-                let clarity: String
-                if upscaler == "fsr1" {
-                    clarity = "fsr1"
-                } else if renderer == "webgpu" {
-                    clarity = processing == "cas" ? "webgpu-cas" : "webgpu-usm"
-                } else if renderer == "webgl2" {
-                    clarity = processing == "cas" ? "webgl-cas" : "webgl-usm"
-                } else {
-                    clarity = "native"
-                }
-                self.globalValues["app.clarityPipeline"] = clarity
-
+                self.globalValues["app.clarityPipeline"] = upscaler == "fsr1" ? "fsr1" :
+                    (renderer == "webgpu" ? (processing == "cas" ? "webgpu-cas" : "webgpu-usm") :
+                     renderer == "webgl2" ? (processing == "cas" ? "webgl-cas" : "webgl-usm") : "native")
                 if let selected = root["selectedRegion"] as? [String: Any] {
                     self.resolvedRegionName = (selected["displayName"] as? String) ?? (selected["shortName"] as? String)
                 }
@@ -687,12 +730,10 @@ final class SettingsModel: ObservableObject {
                     var options: [(value: String, label: String)] = [("default", autoLabel)]
                     for key in regionDict.keys.sorted() {
                         let info = regionDict[key] as? [String: Any]
-                        let name = (info?["displayName"] as? String) ?? (info?["shortName"] as? String) ?? key
-                        options.append((key, name))
+                        options.append((key, (info?["displayName"] as? String) ?? (info?["shortName"] as? String) ?? key))
                     }
                     self.regions = options
                 }
-
                 let current = self.rawValue("server.region") as? String ?? "default"
                 self.regionIndex = self.regions.firstIndex { $0.value == current } ?? 0
                 self.saveMessage = nil
@@ -804,8 +845,12 @@ final class SettingsModel: ObservableObject {
     // MARK: - Changes
 
     func toggle(_ def: SettingDef) {
-        write(def, !isOn(def))
-        objectWillChange.send()
+        setToggle(def, desired: !isOn(def))
+    }
+
+    func setToggle(_ def: SettingDef, desired: Bool) {
+        guard case .toggle = def.kind else { return }
+        write(def, desired)
     }
 
     func adjust(_ def: SettingDef, delta: Int) {
@@ -823,10 +868,10 @@ final class SettingsModel: ObservableObject {
             let new = min(max(current + Double(delta) * step, lower), upper)
             write(def, new)
         case .serverRegion:
-            regionIndex = wrap(regionIndex + delta, regions.count)
-            write(def, regions[regionIndex].value)
+            let proposed = wrap(regionIndex + delta, regions.count)
+            write(def, regions[proposed].value)
         case .ledColor:
-            ledColorIndex = wrap(ledColorIndex + delta, LEDColor.all.count)
+            ledColorIndex = min(max(wrap(ledColorIndex + delta, LEDColor.all.count), 0), max(0, LEDColor.all.count - 1))
         default:
             break
         }

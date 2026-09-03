@@ -382,7 +382,12 @@ final class BrowserModel: ObservableObject {
     }
 
     func evaluateJS(_ script: String, completion: (@Sendable (Any?, (any Error)?) -> Void)? = nil) {
-        webView?.evaluateJavaScript(script, completionHandler: completion)
+        guard let webView else {
+            let error = NSError(domain: "BrowserModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "Web view is unavailable"])
+            completion?(nil, error)
+            return
+        }
+        webView.evaluateJavaScript(script, completionHandler: completion)
     }
 
     func handleNativeAction(_ action: ControllerNativeAction) {
@@ -563,10 +568,12 @@ final class BrowserModel: ObservableObject {
             if readyState == "interactive" || readyState == "complete" {
                 pageBecameReady()
                 inputPresets.retryActiveWebSettings()
+                if isSettingsWindowOpen { settingsModel.load() }
             }
         case "bridge-ready":
             bridgeReady = true
             inputPresets.retryActiveWebSettings()
+            if isSettingsWindowOpen { settingsModel.load() }
             note("Better xCloud bridge ready")
         case "native-rumble":
             let left = Float(body["leftMotorPercent"] as? Double ?? 0) / 100

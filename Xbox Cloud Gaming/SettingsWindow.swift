@@ -203,7 +203,7 @@ struct SettingsRootView: View {
         case .toggle:
             Toggle("", isOn: Binding(
                 get: { model.isOn(def) },
-                set: { _ in model.toggle(def) }
+                set: { desired in model.setToggle(def, desired: desired) }
             ))
             .toggleStyle(.switch)
             .labelsHidden()
