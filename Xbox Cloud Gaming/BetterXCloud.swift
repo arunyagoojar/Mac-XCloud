@@ -103,10 +103,39 @@ enum BetterXCloud {
     })();
     """#
 
+    /// Gyro state is held independently from Better xCloud's bridge lifecycle.
+    /// The bundled controller template calls __xcgMergeNativeAxes after its own
+    /// remapping; only the selected stick axes are changed.
+    static let gyroInputPrelude = #"""
+    (function () {
+      'use strict';
+      var state = { enabled:false, target:'right', x:0, y:0, updatedAt:0 };
+      window.__xcgUpdateGyro = function (next) {
+        next = next && typeof next === 'object' ? next : {};
+        state.enabled = next.enabled === true;
+        state.target = next.target === 'left' ? 'left' : 'right';
+        state.x = Number.isFinite(Number(next.x)) ? Math.max(-1, Math.min(1, Number(next.x))) : 0;
+        state.y = Number.isFinite(Number(next.y)) ? Math.max(-1, Math.min(1, Number(next.y))) : 0;
+        state.updatedAt = Date.now();
+      };
+      window.__xcgMergeNativeAxes = function (sample) {
+        if (!state.enabled || !sample || Date.now() - state.updatedAt > 250) return sample;
+        var xKey = state.target === 'left' ? 'LeftThumbXAxis' : 'RightThumbXAxis';
+        var yKey = state.target === 'left' ? 'LeftThumbYAxis' : 'RightThumbYAxis';
+        sample[xKey] = Math.max(-1, Math.min(1, Number(sample[xKey] || 0) + state.x));
+        sample[yKey] = Math.max(-1, Math.min(1, Number(sample[yKey] || 0) + state.y));
+        sample.Dirty = true;
+        return sample;
+      };
+    })();
+    """#
+
     /// WKUserScripts for the main web view, in execution order.
     static func userScripts() -> [WKUserScript] {
         NativeSettingsMirror.applySafeRendererRecoveryIfNeeded()
         var scripts: [WKUserScript] = []
+
+        scripts.append(WKUserScript(source: gyroInputPrelude, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         // 0. WebKit compatibility shims, installed before Xbox/BxC evaluate
         //    browser features. WKWebView can omit mediaDevices entirely and
@@ -338,10 +367,15 @@ enum BetterXCloud {
 
     private static func wrappedScript(source: String) -> String {
         // Strip source-map comments; keep everything else intact.
-        let cleaned = source
+        let stripped = source
             .components(separatedBy: .newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//#") }
             .joined(separator: "\n")
+        let gyroMarker = "if(shareButtonPressed&&!shareButtonHandled)window.dispatchEvent(new Event(BxEvent.CAPTURE_SCREENSHOT));\\n"
+        let gyroPatch = "if(shareButtonPressed&&!shareButtonHandled)window.dispatchEvent(new Event(BxEvent.CAPTURE_SCREENSHOT));if(window.__xcgMergeNativeAxes)window.__xcgMergeNativeAxes(xCloudGamepad);if(window.BxCBridge)window.BxCBridge.mergeGamepadSample(xCloudGamepad,currentGamepad);\\n"
+        let cleaned = stripped.components(separatedBy: gyroMarker).count == 2
+            ? stripped.replacingOccurrences(of: gyroMarker, with: gyroPatch)
+            : stripped
 
         let bridge = #"""
         const __xcgInputFields = Object.freeze({
@@ -372,6 +406,7 @@ enum BetterXCloud {
         const __xcgBridgeCapability = {
           inputMerge: false,
           inputMergeReason: "patch-pending",
+          gyroMerge: typeof window.__xcgMergeNativeAxes === "function",
           nativeRumble: false
         };
 
@@ -445,12 +480,16 @@ enum BetterXCloud {
           try {
             if (typeof controller_customization_default !== "string") throw new Error("controller_customization_default unavailable");
             var occurrences = controller_customization_default.split(marker).length - 1;
-            if (occurrences !== 1) throw new Error(occurrences ? "ambiguous mapping marker" : "mapping marker absent");
-            controller_customization_default = controller_customization_default.replace(
-              marker,
-              marker.slice(0, -2) + ";if(window.BxCBridge)window.BxCBridge.mergeGamepadSample(xCloudGamepad,currentGamepad);\n"
-            );
-            __xcgBridgeCapability.inputMerge = true;
+            if (controller_customization_default.indexOf("window.BxCBridge.mergeGamepadSample") !== -1) {
+              __xcgBridgeCapability.inputMerge = true;
+            } else {
+              if (occurrences !== 1) throw new Error(occurrences ? "ambiguous mapping marker" : "mapping marker absent");
+              controller_customization_default = controller_customization_default.replace(
+                marker,
+                marker.slice(0, -2) + ";if(window.BxCBridge)window.BxCBridge.mergeGamepadSample(xCloudGamepad,currentGamepad);\n"
+              );
+              __xcgBridgeCapability.inputMerge = true;
+            }
             __xcgBridgeCapability.inputMergeReason = null;
           } catch (error) {
             __xcgNativeInput.enabled = false;

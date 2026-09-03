@@ -66,6 +66,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var currentGameTitle = ""
     @Published private(set) var currentRegion = ""
     @Published private(set) var telemetry = StreamTelemetry.empty
+    @Published private(set) var nativeInputMergeReady = false
+    @Published private(set) var nativeInputMergeReason = "Waiting for Xbox input bridge"
 
     var statusController: MenuBarStatusController?
     let controllerInput = ControllerInputService()
@@ -373,16 +375,16 @@ final class BrowserModel: ObservableObject {
         // sticks, triggers and remapping. Native contributes only gyro and
         // finite macro deltas, preventing remapped shooter controls from being
         // overwritten by a stale raw native snapshot.
+        let target = gyroSettings.target == .leftStick ? "left" : "right"
+        evaluateJS("try { window.__xcgUpdateGyro({ enabled: \(gyroSettings.mode != .off && gyroActive), target: '\(target)', x: \(gyroX), y: \(gyroY) }); 'ok' } catch (e) { 'err' }")
+
         let state: [String: Any] = [
-            "enabled": gyroSettings.mode != .off || !macroFields.isEmpty,
-            "gyro": gyroSettings.mode == .raw
-                ? ["LeftThumbXAxis": max(-1, min(1, gyroX))]
-                : ["RightThumbXAxis": max(-1, min(1, gyroX)), "RightThumbYAxis": max(-1, min(1, gyroY))],
+            "enabled": !macroFields.isEmpty,
+            "gyro": [:],
             "suppressBrowserRumble": controllerFeatures.settings.haptics.mode != .standard,
             "preset": controllerFeatures.settings.categoryPreset.selectedPreset.rawValue,
             "macro": macroFields,
         ]
-
         guard JSONSerialization.isValidJSONObject(state),
               let data = try? JSONSerialization.data(withJSONObject: state),
               let json = String(data: data, encoding: .utf8) else { return }
@@ -562,7 +564,12 @@ final class BrowserModel: ObservableObject {
                 pageBecameReady()
             }
         case "bridge-ready":
-            note("Better xCloud bridge ready")
+            let capabilities = body["capabilities"] as? [String: Any] ?? [:]
+            nativeInputMergeReady = capabilities["inputMerge"] as? Bool ?? false
+            nativeInputMergeReason = nativeInputMergeReady
+                ? "Ready"
+                : (capabilities["inputMergeReason"] as? String ?? "Input merge unavailable")
+            note("Better xCloud bridge ready (inputMerge=\(nativeInputMergeReady))")
         case "native-rumble":
             let left = Float(body["leftMotorPercent"] as? Double ?? 0) / 100
             let right = Float(body["rightMotorPercent"] as? Double ?? 0) / 100
