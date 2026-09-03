@@ -37,6 +37,18 @@ enum NativeSettingsMirror {
         }
     }
 
+    static func applySafeRendererRecoveryIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.integer(forKey: "nativeRendererRecoveryVersion") < 3 else { return }
+        save("webgl2", for: "video.player.type", scope: .stream)
+        save("high-performance", for: "video.player.powerPreference", scope: .stream)
+        save("cas", for: "video.processing", scope: .stream)
+        save("quality", for: "video.processing.mode", scope: .stream)
+        save(2, for: "video.processing.sharpness", scope: .stream)
+        save("webgl-cas", for: "app.clarityPipeline", scope: .global)
+        defaults.set(3, forKey: "nativeRendererRecoveryVersion")
+    }
+
     static func javascriptObject(for scope: SettingsScopeKey) -> String {
         let values = self.values(for: scope)
         guard JSONSerialization.isValidJSONObject(values),
@@ -93,6 +105,7 @@ enum BetterXCloud {
 
     /// WKUserScripts for the main web view, in execution order.
     static func userScripts() -> [WKUserScript] {
+        NativeSettingsMirror.applySafeRendererRecoveryIfNeeded()
         var scripts: [WKUserScript] = []
 
         // 0. WebKit compatibility shims, installed before Xbox/BxC evaluate
@@ -154,12 +167,18 @@ enum BetterXCloud {
               "controller.pollingRate": 4
             };
             var defaultsVersion = parseInt(localStorage.getItem("XCG.NativeDefaultsVersion") || "0", 10);
-            if (defaultsVersion < 2) {
-              /* One corrective migration for the earlier low/off native UI.
-                 Once v2 is recorded, user choices always win. */
-              Object.assign(global, optimizedGlobal);
-              Object.assign(stream, optimizedStream);
-              localStorage.setItem("XCG.NativeDefaultsVersion", "2");
+            if (defaultsVersion < 3) {
+              /* v3 recovery: an experimental WebGPU/FSR renderer could remain
+                 persisted across app rollbacks and black-screen the stream.
+                 Reset only the rendering pipeline once; account/session and
+                 every unrelated preference remain untouched. */
+              stream["video.player.type"] = "webgl2";
+              stream["video.player.powerPreference"] = "high-performance";
+              stream["video.processing"] = "cas";
+              stream["video.processing.mode"] = "quality";
+              stream["video.processing.sharpness"] = 2;
+              localStorage.setItem("XCG.Upscaler", "off");
+              localStorage.setItem("XCG.NativeDefaultsVersion", "3");
             } else {
               for (var k in optimizedGlobal) if (!(k in global)) global[k] = optimizedGlobal[k];
               for (var s in optimizedStream) if (!(s in stream)) stream[s] = optimizedStream[s];
