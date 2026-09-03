@@ -528,10 +528,12 @@
 
     var loop = function () {
       if (mode !== "fsr1" || !canvas) { rafId = 0; return; }
-      render();
-      rafId = requestAnimationFrame(loop);
+      if (!document.hidden && video && !video.paused && !video.ended) render();
+      if (video && typeof video.requestVideoFrameCallback === "function") rafId = video.requestVideoFrameCallback(loop);
+      else rafId = requestAnimationFrame(loop);
     };
-    rafId = requestAnimationFrame(loop);
+    if (typeof video.requestVideoFrameCallback === "function") rafId = video.requestVideoFrameCallback(loop);
+    else rafId = requestAnimationFrame(loop);
   }
 
   function resize() {
@@ -540,6 +542,9 @@
     var rect = canvas.getBoundingClientRect();
     var w = Math.max(2, Math.round(rect.width * dpr));
     var h = Math.max(2, Math.round(rect.height * dpr));
+    var cap = Math.min(1, 2560 / w, 1440 / h);
+    w = Math.max(2, Math.round(w * cap));
+    h = Math.max(2, Math.round(h * cap));
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -553,6 +558,9 @@
     var rect = canvas.getBoundingClientRect();
     var outW = Math.max(2, Math.round(rect.width * dpr));
     var outH = Math.max(2, Math.round(rect.height * dpr));
+    var cap = Math.min(1, 2560 / outW, 1440 / outH);
+    outW = Math.max(2, Math.round(outW * cap));
+    outH = Math.max(2, Math.round(outH * cap));
     var inW = video.videoWidth, inH = video.videoHeight;
 
     if (!videoTexture(video)) return;
@@ -592,7 +600,7 @@
   }
 
   function teardown(clearCanvasOnly) {
-    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    if (rafId) { if (video && typeof video.cancelVideoFrameCallback === "function") video.cancelVideoFrameCallback(rafId); else cancelAnimationFrame(rafId); rafId = 0; }
     if (detachObserver) { detachObserver.disconnect(); detachObserver = null; }
     if (video) video.style.visibility = "";
     if (canvas) { canvas.remove(); canvas = null; }

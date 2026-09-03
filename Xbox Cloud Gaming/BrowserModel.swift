@@ -232,7 +232,8 @@ final class BrowserModel: ObservableObject {
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
             let closeDelegate = WindowCloseDelegate { [weak self] in
-                self?.setGamepadPollingPaused(false)
+                self?.controllerFeatures.setControllerToolsActive(false)
+                self?.recomputeControllerOwner()
             }
             controllerToolsDelegate = closeDelegate
             window.delegate = closeDelegate
@@ -269,8 +270,19 @@ final class BrowserModel: ObservableObject {
         transitionControllerOwner(to: owner(for: NSApp.keyWindow))
     }
 
+    private func reconcileControllerOwnerState() {
+        switch controllerInputOwner {
+        case .stream: setGamepadPollingPaused(false)
+        case .settings, .controllerTools, .profile, .none: setGamepadPollingPaused(true)
+        }
+        controllerFeatures.setControllerToolsActive(controllerInputOwner == .controllerTools)
+    }
+
     private func transitionControllerOwner(to next: ControllerInputOwner) {
-        guard next != controllerInputOwner else { return }
+        guard next != controllerInputOwner else {
+            reconcileControllerOwnerState()
+            return
+        }
         let previous = controllerInputOwner
         controllerInputOwner = next
 
@@ -278,12 +290,7 @@ final class BrowserModel: ObservableObject {
             macroFields.removeAll()
             evaluateJS("try { BxCBridge.updateNativeInput({ reset:true, enabled:false }); 'ok' } catch(e) { 'err' }")
         }
-        switch next {
-        case .stream:
-            setGamepadPollingPaused(false)
-        case .settings, .controllerTools, .profile, .none:
-            setGamepadPollingPaused(true)
-        }
+        reconcileControllerOwnerState()
         if next != .controllerTools { controllerFeatures.cancelCalibration() }
     }
 
@@ -362,33 +369,12 @@ final class BrowserModel: ObservableObject {
         let gyroX = gyroActive ? Double(processedGyro.x) : 0
         let gyroY = gyroActive ? Double(processedGyro.y) : 0
 
-        let calibration = controllerFeatures.settings.calibration
+        // Browser/Better xCloud remains authoritative for physical buttons,
+        // sticks, triggers and remapping. Native contributes only gyro and
+        // finite macro deltas, preventing remapped shooter controls from being
+        // overwritten by a stale raw native snapshot.
         let state: [String: Any] = [
-            "enabled": true,
-            "leftStick": ["x": snapshot.leftStick.x, "y": snapshot.leftStick.y],
-            "rightStick": ["x": snapshot.rightStick.x, "y": snapshot.rightStick.y],
-            "leftTrigger": snapshot.leftTrigger,
-            "rightTrigger": snapshot.rightTrigger,
-            "buttons": [
-                "a": snapshot.buttons.a.value, "b": snapshot.buttons.b.value,
-                "x": snapshot.buttons.x.value, "y": snapshot.buttons.y.value,
-                "leftShoulder": snapshot.buttons.leftShoulder.value,
-                "rightShoulder": snapshot.buttons.rightShoulder.value,
-                "leftStick": snapshot.buttons.leftStick.value,
-                "rightStick": snapshot.buttons.rightStick.value,
-                "dpadUp": snapshot.buttons.dpadUp.value,
-                "dpadDown": snapshot.buttons.dpadDown.value,
-                "dpadLeft": snapshot.buttons.dpadLeft.value,
-                "dpadRight": snapshot.buttons.dpadRight.value,
-                "menu": snapshot.buttons.menu.value,
-                "options": snapshot.buttons.options.value,
-                "home": snapshot.buttons.home.value,
-            ],
-            // Calibration has already been applied natively to the snapshot;
-            // keep bridge transform neutral and merge gyro afterward.
-            "calibration": [:],
-            "curve": ["default": 1.0],
-            "deadzone": ["default": 0.0],
+            "enabled": gyroSettings.mode != .off || !macroFields.isEmpty,
             "gyro": gyroSettings.mode == .raw
                 ? ["LeftThumbXAxis": max(-1, min(1, gyroX))]
                 : ["RightThumbXAxis": max(-1, min(1, gyroX)), "RightThumbYAxis": max(-1, min(1, gyroY))],
@@ -396,7 +382,6 @@ final class BrowserModel: ObservableObject {
             "preset": controllerFeatures.settings.categoryPreset.selectedPreset.rawValue,
             "macro": macroFields,
         ]
-        _ = calibration // documents that snapshots are already calibrated
 
         guard JSONSerialization.isValidJSONObject(state),
               let data = try? JSONSerialization.data(withJSONObject: state),

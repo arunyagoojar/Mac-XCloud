@@ -32,6 +32,7 @@ final class ControllerInputService: ObservableObject {
     @Published private(set) var batteryStateText: String?
 
     private var timer: Timer?
+    private var lastMetadataRefresh: TimeInterval = 0
     private var l3r3HoldStarted: TimeInterval?
     private var l3r3Triggered = false
     private var previous = ButtonState()
@@ -79,26 +80,31 @@ final class ControllerInputService: ObservableObject {
     private func refreshControllerInfo() {
         let controllers = GCController.controllers()
         if let controller = controllers.first {
-            controllerName = controller.vendorName ?? "Game Controller"
-            supportsLED = controller.light != nil
+            let nextName = controller.vendorName ?? "Game Controller"
+            if controllerName != nextName { controllerName = nextName }
+            let nextLED = controller.light != nil
+            if supportsLED != nextLED { supportsLED = nextLED }
             if let battery = controller.battery {
-                batteryPercent = Int((battery.batteryLevel * 100).rounded())
+                let nextPercent = Int((battery.batteryLevel * 100).rounded())
+                let nextState: String
                 switch battery.batteryState {
-                case .charging: batteryStateText = "Charging"
-                case .discharging: batteryStateText = "Battery"
-                case .full: batteryStateText = "Full"
-                case .unknown: batteryStateText = "Battery"
-                @unknown default: batteryStateText = "Battery"
+                case .charging: nextState = "Charging"
+                case .discharging: nextState = "Battery"
+                case .full: nextState = "Full"
+                case .unknown: nextState = "Battery"
+                @unknown default: nextState = "Battery"
                 }
+                if batteryPercent != nextPercent { batteryPercent = nextPercent }
+                if batteryStateText != nextState { batteryStateText = nextState }
             } else {
-                batteryPercent = nil
-                batteryStateText = nil
+                if batteryPercent != nil { batteryPercent = nil }
+                if batteryStateText != nil { batteryStateText = nil }
             }
         } else {
-            controllerName = nil
-            supportsLED = false
-            batteryPercent = nil
-            batteryStateText = nil
+            if controllerName != nil { controllerName = nil }
+            if supportsLED { supportsLED = false }
+            if batteryPercent != nil { batteryPercent = nil }
+            if batteryStateText != nil { batteryStateText = nil }
         }
         let hasController = !controllers.isEmpty
         if hasController != lastPresenceState {
@@ -117,9 +123,11 @@ final class ControllerInputService: ObservableObject {
             refreshControllerInfo()
             return
         }
-        refreshControllerInfo()
-
         let now = CACurrentMediaTime()
+        if now - lastMetadataRefresh >= 1 {
+            lastMetadataRefresh = now
+            refreshControllerInfo()
+        }
 
         let homePressed = pad.buttonHome?.isPressed ?? false
 

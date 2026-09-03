@@ -56,13 +56,11 @@ struct ControllerToolsView: View {
         .frame(minWidth: 860, minHeight: 600)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
-            browser.setGamepadPollingPaused(true)
             service.setControllerToolsActive(true)
             service.startPolling()
         }
         .onDisappear {
             service.setControllerToolsActive(false)
-            browser.setGamepadPollingPaused(false)
         }
     }
 
@@ -393,5 +391,11 @@ struct TouchpadGestureDemo: View {
 }
 
 private extension String {
-    var humanized: String { replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized }
+    var humanized: String {
+        let withSpaces = unicodeScalars.reduce(into: "") { result, scalar in
+            if CharacterSet.uppercaseLetters.contains(scalar), !result.isEmpty { result.append(" ") }
+            result.append(Character(scalar))
+        }
+        return withSpaces.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ").capitalized
+    }
 }

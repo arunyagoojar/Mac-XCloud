@@ -50,6 +50,7 @@ final class ControllerFeatureService: ObservableObject {
     private var gyroBaselineGravityX: Double = 0
     private var filteredGyro = ControllerVector2.zero
     private var lastGyroTimestamp: TimeInterval?
+    private var lastLEDColor: ControllerLEDColor?
 
     private struct ShortcutRuntimeState {
         var wasChordPressed = false
@@ -369,9 +370,9 @@ final class ControllerFeatureService: ObservableObject {
     private func configureMotion(for controller: GCController?) {
         guard let motion = controller?.motion else { return }
         let shouldEnable = settings.gyro.mode != .off || controllerToolsActive
-        motion.valueChangedHandler = shouldEnable ? { [weak self] _ in
-            MainActor.assumeIsolated { self?.publishCurrentSnapshot() }
-        } : nil
+        // Motion is sampled by the fixed-rate snapshot timer; no duplicate
+        // full snapshot publication from the sensor callback.
+        motion.valueChangedHandler = shouldEnable ? { _ in } : nil
         if motion.sensorsRequireManualActivation {
             motion.sensorsActive = shouldEnable
         }
@@ -528,11 +529,25 @@ final class ControllerFeatureService: ObservableObject {
         case .firmResistance:
             trigger.setModeFeedbackWithStartPosition(0.2, resistiveStrength: 0.75)
         case .weapon:
-            trigger.setModeWeaponWithStartPosition(0.2, endPosition: 0.55, resistiveStrength: 0.8)
+            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.67, resistiveStrength: 0.75)
+        case .pistolBreakpoint:
+            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.55, resistiveStrength: 0.55)
+        case .heavyPistol:
+            trigger.setModeWeaponWithStartPosition(0.25, endPosition: 0.62, resistiveStrength: 0.72)
+        case .shotgunBreak:
+            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.72, resistiveStrength: 0.78)
+        case .hairTrigger:
+            trigger.setModeWeaponWithStartPosition(0.222, endPosition: 0.333, resistiveStrength: 0.38)
+        case .triggerLock:
+            trigger.setModeFeedbackWithStartPosition(0.20, resistiveStrength: 0.72)
         case .automaticRecoil:
             trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.78, frequency: 0.72)
+        case .smgRapidPulse:
+            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.38, frequency: 0.18)
         case .burstPulse:
             trigger.setModeVibrationWithStartPosition(0.24, amplitude: 0.58, frequency: 0.32)
+        case .flamethrower:
+            trigger.setModeVibrationWithStartPosition(0.15, amplitude: 0.34, frequency: 0.08)
         case .bow:
             applyCustomAdaptiveTrigger(
                 trigger,
@@ -987,11 +1002,10 @@ final class ControllerFeatureService: ObservableObject {
         }
 
         let brightness = min(max(config.brightness, 0), 1)
-        light.color = GCColor(
-            red: color.red * brightness,
-            green: color.green * brightness,
-            blue: color.blue * brightness
-        )
+        let effective = ControllerLEDColor(red: color.red * brightness, green: color.green * brightness, blue: color.blue * brightness)
+        guard effective != lastLEDColor else { return }
+        lastLEDColor = effective
+        light.color = GCColor(red: effective.red, green: effective.green, blue: effective.blue)
     }
 
     // MARK: - Framework adapters
@@ -1019,9 +1033,9 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     private func configureInputHandlers(for controller: GCController) {
-        controller.extendedGamepad?.valueChangedHandler = { [weak self] _, _ in
-            MainActor.assumeIsolated { self?.publishCurrentSnapshot() }
-        }
+        // A single fixed-rate publisher owns snapshots. Hardware callbacks
+        // previously duplicated full snapshot work on top of the 60 Hz timer.
+        controller.extendedGamepad?.valueChangedHandler = nil
     }
 
     private func makeDescriptor(for controller: GCController) -> ControllerDescriptor {

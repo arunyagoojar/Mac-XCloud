@@ -364,8 +364,15 @@ enum AdaptiveTriggerPreset: String, Codable, CaseIterable, Sendable {
     case softResistance
     case firmResistance
     case weapon
+    case pistolBreakpoint
+    case heavyPistol
+    case shotgunBreak
+    case hairTrigger
+    case triggerLock
     case automaticRecoil
+    case smgRapidPulse
     case burstPulse
+    case flamethrower
     case bow
     case accelerator
     case brakeComfort
