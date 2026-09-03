@@ -34,6 +34,7 @@ enum SettingKind {
     case profileLauncher(ProfileKind)
     case forcedMKBGames
     case pingTest
+    case controllerTools
 }
 
 struct SettingDef: Identifiable {
@@ -211,22 +212,6 @@ struct SettingsCategory: Identifiable {
                        note: "Stream volume — up to 600% boost (needs 'Enable volume control').",
                        scope: .stream, kind: .range(min: 0, max: 600, step: 10, defaultValue: 100, format: { "\(Int($0))%" })),
         ]),
-        SettingsCategory(id: "controller", title: "Controller", icon: "gamecontroller", rows: [
-            SettingDef(id: "app.led", label: "LED color",
-                       note: "The DualSense light bar. Pick a dot, or use the picker for any color.",
-                       scope: .stream, kind: .ledColor),
-            SettingDef(id: "controller.pollingRate", label: "Polling rate",
-                       note: "How often input is sent to the cloud. Higher = lower latency, more CPU.",
-                       scope: .stream, kind: .range(min: 4, max: 60, step: 4, defaultValue: 4, format: { "\((1000.0 / $0).rounded()) Hz" })),
-            SettingDef(id: "localCoOp.enabled", label: "Enable local co-op support",                       note: "Two controllers as two players in the same stream. Only works with some games.",
-                       scope: .stream, kind: .toggle(defaultValue: false)),
-            SettingDef(id: "controller.shortcutProfiles", label: "Home-chord shortcut profiles",
-                       note: "Home/PS + button combos for stats, screenshots and volume.",
-                       scope: .stream, kind: .profileLauncher(.controllerShortcuts)),
-            SettingDef(id: "controller.customizationProfiles", label: "Controller remapping profiles",
-                       note: "Button remaps, deadzones, trigger ranges and rumble intensity.",
-                       scope: .stream, kind: .profileLauncher(.controllerCustomization)),
-        ]),
         SettingsCategory(id: "remote", title: "Remote Play", icon: "tv.and.mediabox", rows: [
             SettingDef(id: "xhome.video.resolution", label: "Remote Play resolution",
                        note: "Resolution when streaming from your own Xbox console.",
@@ -347,6 +332,20 @@ struct SettingsCategory: Identifiable {
                             values: ["default", "normal", "tv"],
                             labels: ["Default", "Normal", "Smart TV"],
                             defaultValue: "default")),
+        ]),
+        SettingsCategory(id: "controller", title: "Controller Tools", icon: "gamecontroller.fill", rows: [
+            SettingDef(id: "app.controllerTools", label: "Open Controller Tools",
+                       note: "Test, calibrate, configure DualSense triggers and haptics, motion, touchpad gestures, presets, shortcuts and macros.",
+                       scope: .stream, kind: .controllerTools),
+            SettingDef(id: "app.led", label: "LED color",
+                       note: "The DualSense light bar. Pick a dot, or use the picker for any color.",
+                       scope: .stream, kind: .ledColor),
+            SettingDef(id: "controller.pollingRate", label: "Polling rate",
+                       note: "How often input is sent to the cloud. Higher = lower latency, more CPU.",
+                       scope: .stream, kind: .range(min: 4, max: 60, step: 4, defaultValue: 4, format: { "\((1000.0 / $0).rounded()) Hz" })),
+            SettingDef(id: "localCoOp.enabled", label: "Enable local co-op support",
+                       note: "Two controllers as two players in the same stream. Only works with some games.",
+                       scope: .stream, kind: .toggle(defaultValue: false)),
         ]),
     ]
 }
@@ -770,7 +769,7 @@ final class SettingsModel: ObservableObject {
 
     /// Current numeric value for slider rows (falls back to the default).
     func rangeValue(_ def: SettingDef) -> Double? {
-        guard case .range(let lower, let upper, let step, let defaultValue, _) = def.kind else { return nil }
+        guard case .range(let lower, let upper, _, let defaultValue, _) = def.kind else { return nil }
         let raw = rawValue(def.id)
         if let value = raw as? Double { return min(max(value, lower), upper) }
         if let value = raw as? Int, let asDouble = Double(exactly: value) { return min(max(asDouble, lower), upper) }

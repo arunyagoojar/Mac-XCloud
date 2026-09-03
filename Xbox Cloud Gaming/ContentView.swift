@@ -67,15 +67,27 @@ struct ContentView: View {
         ZStack(alignment: .top) {
             WebView(browser: browser)
 
-            if browser.isLoading {
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .frame(maxWidth: .infinity)
-                    .padding(6)
-                    .background(.thinMaterial)
+            switch browser.loadPhase {
+            case .initialLoading:
+                XboxSplashView()
+                    .transition(.opacity)
+            case .failed(let failure):
+                ConnectionIssueView(
+                    failure: failure,
+                    onRetry: browser.retryLoading,
+                    onQuit: { NSApp.terminate(nil) }
+                )
+                .transition(.opacity)
+            case .ready, .subsequentLoading:
+                EmptyView()
             }
         }
         .overlay(alignment: .bottomLeading) { controllerBadge }
+        .overlay(alignment: .bottomTrailing) {
+            if case .subsequentLoading = browser.loadPhase {
+                MinimalLoadingIndicator(label: "Loading")
+            }
+        }
         .overlay(alignment: .top) { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
         .overlay(alignment: .topTrailing) { spikePanel }
         .onAppear { browser.pollStreamInfo() }

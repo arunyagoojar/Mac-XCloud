@@ -324,8 +324,265 @@ enum BetterXCloud {
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//#") }
             .joined(separator: "\n")
 
-        let bridge = """
+        let bridge = #"""
+        const __xcgInputFields = Object.freeze({
+          A: [0, 1], B: [0, 1], X: [0, 1], Y: [0, 1],
+          LeftShoulder: [0, 1], RightShoulder: [0, 1],
+          LeftTrigger: [0, 1], RightTrigger: [0, 1],
+          View: [0, 1], Menu: [0, 1], LeftThumb: [0, 1], RightThumb: [0, 1],
+          DPadUp: [0, 1], DPadDown: [0, 1], DPadLeft: [0, 1], DPadRight: [0, 1],
+          Nexus: [0, 1], Share: [0, 1],
+          LeftThumbXAxis: [-1, 1], LeftThumbYAxis: [-1, 1],
+          RightThumbXAxis: [-1, 1], RightThumbYAxis: [-1, 1]
+        });
+        const __xcgAxes = ["LeftThumbXAxis", "LeftThumbYAxis", "RightThumbXAxis", "RightThumbYAxis"];
+        const __xcgAxesWithDefault = __xcgAxes.concat(["default"]);
+        const __xcgNativeInput = {
+          sequence: 0,
+          updatedAt: 0,
+          enabled: false,
+          values: Object.create(null),
+          calibration: Object.create(null),
+          curve: Object.create(null),
+          deadzone: Object.create(null),
+          gyro: Object.create(null),
+          touchpad: Object.create(null),
+          macro: Object.create(null),
+          suppressBrowserRumble: false
+        };
+        const __xcgBridgeCapability = {
+          inputMerge: false,
+          inputMergeReason: "patch-pending",
+          nativeRumble: false
+        };
+
+        function __xcgFinite(value, fallback, min, max) {
+          value = Number(value);
+          if (!Number.isFinite(value)) return fallback;
+          if (typeof min === "number") value = Math.max(min, value);
+          if (typeof max === "number") value = Math.min(max, value);
+          return value;
+        }
+        function __xcgFiniteMap(value, keys, min, max) {
+          var out = Object.create(null);
+          if (!value || typeof value !== "object") return out;
+          keys.forEach(function (key) {
+            if (Object.prototype.hasOwnProperty.call(value, key)) {
+              var number = Number(value[key]);
+              if (Number.isFinite(number)) out[key] = Math.max(min, Math.min(max, number));
+            }
+          });
+          return out;
+        }
+        function __xcgTransformAxis(value, calibration, curve, deadzone) {
+          var v = __xcgFinite(value, 0, -1, 1);
+          calibration = calibration && typeof calibration === "object" ? calibration : {};
+          var center = __xcgFinite(calibration.center ?? calibration.offset, 0, -1, 1);
+          var minimum = __xcgFinite(calibration.min, -1, -1, center);
+          var maximum = __xcgFinite(calibration.max, 1, center, 1);
+          var span = v < center ? center - minimum : maximum - center;
+          var scale = __xcgFinite(calibration.scale, 1, 0, 4);
+          var invert = calibration.invert === true ? -1 : 1;
+          v = Math.max(-1, Math.min(1, ((v - center) / Math.max(0.0001, span)) * scale * invert));
+          var dz = __xcgFinite(deadzone, 0, 0, 0.99);
+          var magnitude = Math.abs(v);
+          if (magnitude <= dz) return 0;
+          magnitude = (magnitude - dz) / (1 - dz);
+          var exponent = __xcgFinite(curve, 1, 0.1, 5);
+          return Math.max(-1, Math.min(1, Math.sign(v) * Math.pow(magnitude, exponent)));
+        }
+        function __xcgSanitizeMacro(value) {
+          var out = Object.create(null);
+          if (!value || typeof value !== "object") return out;
+          Object.keys(__xcgInputFields).forEach(function (key) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+            var range = __xcgInputFields[key];
+            var number = Number(value[key]);
+            if (Number.isFinite(number)) out[key] = Math.max(range[0], Math.min(range[1], number));
+          });
+          ["duration", "durationMs", "repeat", "delay", "delayMs", "interval", "intervalMs"].forEach(function (key) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+            var max = key === "repeat" ? 1000 : 600000;
+            var number = Number(value[key]);
+            if (Number.isFinite(number)) out[key] = Math.max(0, Math.min(max, number));
+          });
+          return out;
+        }
+        function __xcgApplyObject(target, source) {
+          if (!source || typeof source !== "object") return;
+          Object.keys(source).forEach(function (key) {
+            if (Object.prototype.hasOwnProperty.call(__xcgInputFields, key)) {
+              var range = __xcgInputFields[key];
+              var number = Number(source[key]);
+              if (Number.isFinite(number)) target[key] = Math.max(range[0], Math.min(range[1], number));
+            }
+          });
+        }
+        function __xcgPatchBundledSource() {
+          /* Better xCloud constructs this string inside Patcher.patchPollGamepads.
+             Replacing its unique terminator puts the native merge after BxC's
+             mappings/ranges and immediately before the packet continues. */
+          var marker = "if(shareButtonPressed&&!shareButtonHandled)window.dispatchEvent(new Event(BxEvent.CAPTURE_SCREENSHOT));\n";
+          try {
+            if (typeof controller_customization_default !== "string") throw new Error("controller_customization_default unavailable");
+            var occurrences = controller_customization_default.split(marker).length - 1;
+            if (occurrences !== 1) throw new Error(occurrences ? "ambiguous mapping marker" : "mapping marker absent");
+            controller_customization_default = controller_customization_default.replace(
+              marker,
+              marker.slice(0, -2) + ";if(window.BxCBridge)window.BxCBridge.mergeGamepadSample(xCloudGamepad,currentGamepad);\n"
+            );
+            __xcgBridgeCapability.inputMerge = true;
+            __xcgBridgeCapability.inputMergeReason = null;
+          } catch (error) {
+            __xcgNativeInput.enabled = false;
+            __xcgBridgeCapability.inputMerge = false;
+            __xcgBridgeCapability.inputMergeReason = String(error && error.message || error);
+            try { console.error("[XCG] Native input merge disabled:", error); } catch (_) {}
+          }
+
+          /* Patcher.playVibration prepends vibration_adjust_default to the site's
+             playVibration body. Appending here therefore reports adjusted values
+             and can return before the browser actuator receives them. */
+          try {
+            if (typeof vibration_adjust_default !== "string") throw new Error("vibration adjustment unavailable");
+            var zeroIntensityMarker = "e.repeat=0;return";
+            if (vibration_adjust_default.indexOf(zeroIntensityMarker) !== -1) {
+              vibration_adjust_default = vibration_adjust_default.replace(
+                zeroIntensityMarker,
+                "e.repeat=0,e.leftMotorPercent=0,e.rightMotorPercent=0,e.leftTriggerMotorPercent=0,e.rightTriggerMotorPercent=0"
+              );
+            }
+            if (vibration_adjust_default.indexOf("__xcgPostNativeRumble") === -1) {
+              vibration_adjust_default += ";if(window.__xcgPostNativeRumble&&window.__xcgPostNativeRumble(e))return";
+            }
+            __xcgBridgeCapability.nativeRumble = true;
+          } catch (error) {
+            __xcgBridgeCapability.nativeRumble = false;
+            try { console.error("[XCG] Native rumble bridge disabled:", error); } catch (_) {}
+          }
+        }
+
+        window.__xcgPostNativeRumble = function (event) {
+          try {
+            var pad = event && event.gamepad;
+            var finite = function (value, fallback, min, max) { return __xcgFinite(value, fallback, min, max); };
+            var payload = {
+              type: "native-rumble",
+              gamepadID: pad && typeof pad.id === "string" ? pad.id : "",
+              gamepadId: pad && typeof pad.id === "string" ? pad.id : "",
+              gamepadIndex: finite(event && (event.gamepadIndex ?? (pad && pad.index)), -1, -1, 255),
+              mainMotorPercents: {
+                left: finite(event && event.leftMotorPercent, 0, 0, 100),
+                right: finite(event && event.rightMotorPercent, 0, 0, 100)
+              },
+              triggerMotorPercents: {
+                left: finite(event && event.leftTriggerMotorPercent, 0, 0, 100),
+                right: finite(event && event.rightTriggerMotorPercent, 0, 0, 100)
+              },
+              leftMotorPercent: finite(event && event.leftMotorPercent, 0, 0, 100),
+              rightMotorPercent: finite(event && event.rightMotorPercent, 0, 0, 100),
+              leftTriggerMotorPercent: finite(event && event.leftTriggerMotorPercent, 0, 0, 100),
+              rightTriggerMotorPercent: finite(event && event.rightTriggerMotorPercent, 0, 0, 100)
+            };
+            if (event && (event.durationMs !== undefined || event.duration !== undefined)) {
+              payload.duration = finite(event.duration ?? event.durationMs, 0, 0, 600000);
+              payload.durationMs = finite(event.durationMs ?? event.duration, 0, 0, 600000);
+            }
+            if (event && event.repeat !== undefined) payload.repeat = finite(event.repeat, 0, 0, 1000);
+            window.webkit.messageHandlers.spikeHandler.postMessage(payload);
+          } catch (error) {}
+          return !!__xcgNativeInput.suppressBrowserRumble;
+        };
+
         window.BxCBridge = {
+          capabilities: __xcgBridgeCapability,
+          nativeInputState: __xcgNativeInput,
+          updateNativeInput: function (next) {
+            next = next && typeof next === "object" ? next : {};
+            if (next.suppressBrowserRumble !== undefined) __xcgNativeInput.suppressBrowserRumble = next.suppressBrowserRumble === true;
+            if (!__xcgBridgeCapability.inputMerge) {
+              __xcgNativeInput.enabled = false;
+              return { ok: false, capability: this.capabilities, state: this.nativeInputState };
+            }
+            if (next.reset === true) {
+              __xcgNativeInput.values = Object.create(null);
+              __xcgNativeInput.calibration = Object.create(null);
+              __xcgNativeInput.curve = Object.create(null);
+              __xcgNativeInput.deadzone = Object.create(null);
+              __xcgNativeInput.gyro = Object.create(null);
+              __xcgNativeInput.touchpad = Object.create(null);
+              __xcgNativeInput.macro = Object.create(null);
+            }
+            if (next.values || next.axes || next.buttons || next.leftStick || next.rightStick || next.leftTrigger !== undefined || next.rightTrigger !== undefined) {
+              var values = Object.assign({}, next.values || {}, next.axes || {});
+              if (next.leftStick) Object.assign(values, { LeftThumbXAxis: next.leftStick.x, LeftThumbYAxis: next.leftStick.y });
+              if (next.rightStick) Object.assign(values, { RightThumbXAxis: next.rightStick.x, RightThumbYAxis: next.rightStick.y });
+              if (next.leftTrigger !== undefined) values.LeftTrigger = next.leftTrigger;
+              if (next.rightTrigger !== undefined) values.RightTrigger = next.rightTrigger;
+              var buttons = next.buttons || {};
+              var buttonMap = {
+                a: "A", b: "B", x: "X", y: "Y", menu: "Menu", options: "View", home: "Nexus",
+                leftShoulder: "LeftShoulder", rightShoulder: "RightShoulder",
+                leftStick: "LeftThumb", rightStick: "RightThumb",
+                dpadUp: "DPadUp", dpadDown: "DPadDown", dpadLeft: "DPadLeft", dpadRight: "DPadRight"
+              };
+              Object.keys(buttonMap).forEach(function (key) {
+                if (!Object.prototype.hasOwnProperty.call(buttons, key)) return;
+                var button = buttons[key];
+                values[buttonMap[key]] = button && typeof button === "object" ? button.value : button;
+              });
+              __xcgNativeInput.values = __xcgFiniteMap(values, Object.keys(__xcgInputFields), -1, 1);
+              Object.keys(__xcgNativeInput.values).forEach(function (key) {
+                var range = __xcgInputFields[key];
+                __xcgNativeInput.values[key] = Math.max(range[0], Math.min(range[1], __xcgNativeInput.values[key]));
+              });
+              if (next.enabled === undefined) __xcgNativeInput.enabled = true;
+            }
+            if (next.calibration && typeof next.calibration === "object") __xcgNativeInput.calibration = next.calibration;
+            if (next.curve && typeof next.curve === "object") __xcgNativeInput.curve = __xcgFiniteMap(next.curve, __xcgAxesWithDefault, 0.1, 5);
+            if (next.deadzone && typeof next.deadzone === "object") __xcgNativeInput.deadzone = __xcgFiniteMap(next.deadzone, __xcgAxesWithDefault, 0, 0.99);
+            if (next.gyro && typeof next.gyro === "object") {
+              var gyro = Object.assign({}, next.gyro);
+              if (next.gyro.x !== undefined) gyro.RightThumbXAxis = next.gyro.x;
+              if (next.gyro.y !== undefined) gyro.RightThumbYAxis = next.gyro.y;
+              __xcgNativeInput.gyro = __xcgFiniteMap(gyro, __xcgAxes, -1, 1);
+            }
+            if (next.touchpad && typeof next.touchpad === "object") {
+              var touchpad = Object.assign({}, next.touchpad);
+              if (next.touchpad.x !== undefined) touchpad.RightThumbXAxis = next.touchpad.x;
+              if (next.touchpad.y !== undefined) touchpad.RightThumbYAxis = next.touchpad.y;
+              __xcgNativeInput.touchpad = __xcgFiniteMap(touchpad, __xcgAxes, -1, 1);
+            }
+            if (next.macro !== undefined) __xcgNativeInput.macro = __xcgSanitizeMacro(next.macro);
+            if (next.enabled !== undefined) __xcgNativeInput.enabled = next.enabled === true;
+            __xcgNativeInput.updatedAt = Date.now();
+            __xcgNativeInput.sequence = (__xcgNativeInput.sequence + 1) >>> 0;
+            return { ok: true, capability: this.capabilities, state: this.nativeInputState };
+          },
+          mergeGamepadSample: function (sample, gamepad) {
+            if (!__xcgBridgeCapability.inputMerge || !__xcgNativeInput.enabled || !sample || typeof sample !== "object") return sample;
+            var state = __xcgNativeInput;
+            __xcgApplyObject(sample, state.values);
+            __xcgAxes.forEach(function (key) {
+              var base = Object.prototype.hasOwnProperty.call(state.values, key) ? state.values[key] : sample[key];
+              var calibration = state.calibration[key] || {};
+              var curve = state.curve[key] ?? state.curve.default;
+              var deadzone = state.deadzone[key] ?? state.deadzone.default;
+              var transformed = __xcgTransformAxis(base, calibration, curve, deadzone);
+              transformed += __xcgFinite(state.gyro[key], 0, -1, 1);
+              transformed += __xcgFinite(state.touchpad[key], 0, -1, 1);
+              sample[key] = Math.max(-1, Math.min(1, transformed));
+            });
+            __xcgApplyObject(sample, state.macro);
+            if (gamepad && Number.isFinite(Number(gamepad.index))) sample.GamepadIndex = Math.max(0, Math.min(255, Number(gamepad.index)));
+            sample.Dirty = true;
+            return sample;
+          },
+          setGamepadPollingPaused: function (flag) {
+            if (!window.BX_EXPOSED || typeof window.BX_EXPOSED !== "object") return false;
+            window.BX_EXPOSED.disableGamepadPolling = flag === true;
+            return window.BX_EXPOSED.disableGamepadPolling;
+          },
           regions: function () { try { return STATES.serverRegions || {}; } catch (e) { return {}; } },
           selectedRegion: function () { try { return STATES.selectedRegion || {}; } catch (e) { return {}; } },
           getGlobal: function (k) { return getGlobalPref(k); },
@@ -355,7 +612,38 @@ enum BetterXCloud {
             if (id <= 0) throw new Error("Default profiles are read-only");
             return await this.profileTable(kind).deletePreset(id);
           },
-                    streamInfo: function () { try { return { playing: !!STATES.isPlaying, title: (STATES.currentStream && STATES.currentStream.title) || document.title.replace(/ - Xbox Cloud Gaming.*/, '') || '', region: (STATES.selectedRegion && (STATES.selectedRegion.displayName || STATES.selectedRegion.shortName)) || '' }; } catch (e) { return { playing: false, title: '', region: '' }; } },
+          streamInfo: function () {
+            try {
+              var stream = STATES.currentStream || {};
+              var remote = STATES.remotePlay || {};
+              var title = stream.titleInfo && stream.titleInfo.product && stream.titleInfo.product.title;
+              title = title || remote.title || remote.consoleName || remote.name || stream.title || "";
+              if (!title) title = document.title.replace(/ - Xbox Cloud Gaming.*/, "");
+              return { playing: !!STATES.isPlaying, title: title || "", region: (STATES.selectedRegion && (STATES.selectedRegion.displayName || STATES.selectedRegion.shortName)) || remote.region || "" };
+            } catch (e) { return { playing: false, title: "", region: "" }; }
+          },
+          streamStats: async function () {
+            var collector = StreamStatsCollector.getInstance();
+            await collector.collect();
+            var stats = collector.currentStats || {};
+            var finite = function (value, fallback) { value = Number(value); return Number.isFinite(value) ? value : fallback; };
+            var pl = stats.pl || {}, fl = stats.fl || {}, dt = stats.dt || {};
+            return {
+              ping: finite(stats.ping && stats.ping.current, -1),
+              fps: finite(stats.fps && stats.fps.current, 0),
+              bitrate: finite(stats.btr && stats.btr.current, 0),
+              loss: {
+                packets: finite(pl.dropped, 0),
+                packetPercent: finite(pl.dropped, 0) * 100 / Math.max(1, finite(pl.received, 0) + finite(pl.dropped, 0)),
+                frames: finite(fl.dropped, 0),
+                framePercent: finite(fl.dropped, 0) * 100 / Math.max(1, finite(fl.received, 0) + finite(fl.dropped, 0))
+              },
+              frames: { received: finite(fl.received, 0), dropped: finite(fl.dropped, 0) },
+              jitter: finite(stats.jit && stats.jit.current, 0),
+              resolution: String(stats.res && stats.res.current || ""),
+              decodeTime: finite(dt.current, 0)
+            };
+          },
           regionList: function () { try { return Object.keys(STATES.serverRegions).map(function (k) { var r = STATES.serverRegions[k]; return { name: k, baseUri: r.baseUri || '' }; }); } catch (e) { return []; } },
           refreshProfiles: async function (kind) {
             if (kind === "mkb") return await StreamSettings.refreshMkbSettings();
@@ -399,7 +687,12 @@ enum BetterXCloud {
             return id;
           }
         };
-        """
+        __xcgPatchBundledSource();
+        try {
+          window.dispatchEvent(new CustomEvent("bxc-bridge-ready", { detail: { capabilities: __xcgBridgeCapability } }));
+          window.webkit.messageHandlers.spikeHandler.postMessage({ type: "bridge-ready", capabilities: __xcgBridgeCapability });
+        } catch (e) {}
+        """#
 
         return """
         (function () {

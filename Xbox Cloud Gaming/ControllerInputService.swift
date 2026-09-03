@@ -111,7 +111,8 @@ final class ControllerInputService: ObservableObject {
 
     private func poll() {
         guard let pad = GCController.controllers().first?.extendedGamepad else {
-            if previous.home != false { previous = ButtonState(); refreshControllerInfo() }
+            previous = ButtonState()
+            refreshControllerInfo()
             return
         }
         refreshControllerInfo()

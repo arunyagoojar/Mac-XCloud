@@ -197,7 +197,7 @@ struct SettingsRootView: View {
             .toggleStyle(.switch)
             .labelsHidden()
 
-        case .option(let values, let labels, _):
+        case .option(let values, _, _):
             optionMenu(model: model, def: def, count: values.count) { index in
                 Text(pickerLabel(model, def: def, index: index))
             } select: { index in
@@ -283,6 +283,14 @@ struct SettingsRootView: View {
 
         case .pingTest:
             PingTestControl(model: model)
+
+        case .controllerTools:
+            Button {
+                browser.openControllerTools()
+            } label: {
+                Label("Open Controller Tools…", systemImage: "arrow.up.right.square")
+            }
+            .buttonStyle(.borderedProminent)
 
         case .info(let text):
             Text(text)

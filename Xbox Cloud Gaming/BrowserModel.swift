@@ -22,10 +22,33 @@ struct SpikeReport: Equatable {
 }
 
 @MainActor
+final class WindowCloseDelegate: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
+    init(onClose: @escaping () -> Void) { self.onClose = onClose }
+    func windowWillClose(_ notification: Notification) { onClose() }
+}
+
+struct StreamTelemetry: Equatable {
+    var pingMs: Double = -1
+    var fps: Double = 0
+    var bitrateMbps: Double = 0
+    var packetLossPercent: Double = 0
+    var packetLossCount: Int = 0
+    var framesDropped: Int = 0
+    var jitterMs: Double = 0
+    var resolution = ""
+    var decodeTimeMs: Double = 0
+
+    static let empty = StreamTelemetry()
+}
+
+@MainActor
 final class BrowserModel: ObservableObject {
     static let homeURL = URL(string: "https://www.xbox.com/play")!
 
-    @Published private(set) var isLoading = false
+    @Published private(set) var isLoading = true
+    @Published private(set) var loadPhase: BrowserLoadPhase = .initialLoading
+    @Published private(set) var hasReachedInitialReadiness = false
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     @Published var showReport = false
@@ -34,10 +57,14 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var isStreaming = false
     @Published private(set) var currentGameTitle = ""
     @Published private(set) var currentRegion = ""
+    @Published private(set) var telemetry = StreamTelemetry.empty
 
     var statusController: MenuBarStatusController?
     let controllerInput = ControllerInputService()
+    let controllerFeatures = ControllerFeatureService()
     private var cancellables = Set<AnyCancellable>()
+    private var loadingTimeout: DispatchWorkItem?
+    private var macroFields: [String: Double] = [:]
     lazy var settingsModel = SettingsModel(browser: self)
 
     weak var webView: WKWebView?
@@ -64,6 +91,12 @@ final class BrowserModel: ObservableObject {
             }
             .store(in: &cancellables)
         controllerInput.start()
+        controllerFeatures.onShortcutAction = { [weak self] action in self?.handleNativeAction(action) }
+        controllerFeatures.onNativeInputState = { [weak self] snapshot in self?.sendNativeInput(snapshot) }
+        controllerFeatures.onMacroButtonAction = { [weak self] control, isPressed in
+            self?.setMacroField(control, isPressed: isPressed)
+        }
+        controllerFeatures.startPolling(interval: 1.0 / 60.0)
 
         // This app drives a website, not documents: File and Edit menus add
         // noise. Remove them once the (SwiftUI-built) main menu exists.
@@ -127,6 +160,8 @@ final class BrowserModel: ObservableObject {
     // MARK: - Settings window
 
     private var settingsWindow: NSWindow?
+    private var controllerToolsWindow: NSWindow?
+    private var controllerToolsDelegate: WindowCloseDelegate?
     private var profileWindows: [ProfileKind: NSWindow] = [:]
 
     /// Opens the settings as a real, separate NSWindow that we fully control
@@ -161,6 +196,34 @@ final class BrowserModel: ObservableObject {
         settingsWindow?.performClose(nil)
     }
 
+    func openControllerTools() {
+        if controllerToolsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.title = "Controller Tools"
+            window.titlebarAppearsTransparent = true
+            window.isReleasedWhenClosed = false
+            let closeDelegate = WindowCloseDelegate { [weak self] in
+                self?.setGamepadPollingPaused(false)
+            }
+            controllerToolsDelegate = closeDelegate
+            window.delegate = closeDelegate
+            window.center()
+            window.contentView = NSHostingView(rootView:
+                ControllerToolsView(service: controllerFeatures)
+                    .environmentObject(self)
+            )
+            controllerToolsWindow = window
+        }
+        controllerToolsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: false)
+    }
+
+    func setGamepadPollingPaused(_ paused: Bool) {
+        evaluateJS("try { if (window.BX_EXPOSED) window.BX_EXPOSED.disableGamepadPolling = \(paused); 'ok' } catch (e) { 'err' }")
+    }
+
     func openProfileEditor(_ kind: ProfileKind) {
         if profileWindows[kind] == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 600),
@@ -186,7 +249,13 @@ final class BrowserModel: ObservableObject {
     }
 
     func reload() {
+        navigationStarted()
         webView?.reload()
+    }
+
+    func retryLoading() {
+        loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
+        if let webView, webView.url != nil { webView.reload() } else { loadHome() }
     }
 
     func goBack() {
@@ -215,14 +284,155 @@ final class BrowserModel: ObservableObject {
         webView?.evaluateJavaScript(script, completionHandler: completion)
     }
 
+    private var lastNativeInputSentAt: TimeInterval = 0
+
+    func sendNativeInput(_ snapshot: ControllerInputSnapshot) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastNativeInputSentAt >= (1.0 / 60.0) else { return }
+        lastNativeInputSentAt = now
+
+        let gyroSettings = controllerFeatures.settings.gyro
+        var gyroX: Double = 0
+        var gyroY: Double = 0
+        if let motion = snapshot.motion, gyroSettings.mode != .off {
+            let active = gyroSettings.mode != .pointer || snapshot.leftTrigger > 0.15
+            if active {
+                switch gyroSettings.mode {
+                case .raw: // steering from controller roll/gravity
+                    gyroX = motion.gravity.x * Double(gyroSettings.sensitivityX)
+                    gyroY = 0
+                case .rightStick, .pointer:
+                    gyroX = motion.rotationRate.y * Double(gyroSettings.sensitivityX) * 0.08
+                    gyroY = -motion.rotationRate.x * Double(gyroSettings.sensitivityY) * 0.08
+                case .off:
+                    break
+                }
+                if abs(gyroX) < Double(gyroSettings.deadzone) { gyroX = 0 }
+                if abs(gyroY) < Double(gyroSettings.deadzone) { gyroY = 0 }
+                if gyroSettings.invertX { gyroX *= -1 }
+                if gyroSettings.invertY { gyroY *= -1 }
+            }
+        }
+
+        let calibration = controllerFeatures.settings.calibration
+        let state: [String: Any] = [
+            "enabled": true,
+            "leftStick": ["x": snapshot.leftStick.x, "y": snapshot.leftStick.y],
+            "rightStick": ["x": snapshot.rightStick.x, "y": snapshot.rightStick.y],
+            "leftTrigger": snapshot.leftTrigger,
+            "rightTrigger": snapshot.rightTrigger,
+            "buttons": [
+                "a": snapshot.buttons.a.value, "b": snapshot.buttons.b.value,
+                "x": snapshot.buttons.x.value, "y": snapshot.buttons.y.value,
+                "leftShoulder": snapshot.buttons.leftShoulder.value,
+                "rightShoulder": snapshot.buttons.rightShoulder.value,
+                "leftStick": snapshot.buttons.leftStick.value,
+                "rightStick": snapshot.buttons.rightStick.value,
+                "dpadUp": snapshot.buttons.dpadUp.value,
+                "dpadDown": snapshot.buttons.dpadDown.value,
+                "dpadLeft": snapshot.buttons.dpadLeft.value,
+                "dpadRight": snapshot.buttons.dpadRight.value,
+                "menu": snapshot.buttons.menu.value,
+                "options": snapshot.buttons.options.value,
+                "home": snapshot.buttons.home.value,
+            ],
+            // Calibration has already been applied natively to the snapshot;
+            // keep bridge transform neutral and merge gyro afterward.
+            "calibration": [:],
+            "curve": ["default": 1.0],
+            "deadzone": ["default": 0.0],
+            "gyro": gyroSettings.mode == .raw
+                ? ["LeftThumbXAxis": max(-1, min(1, gyroX))]
+                : ["RightThumbXAxis": max(-1, min(1, gyroX)), "RightThumbYAxis": max(-1, min(1, gyroY))],
+            "suppressBrowserRumble": controllerFeatures.settings.haptics.mode != .standard,
+            "preset": controllerFeatures.settings.categoryPreset.selectedPreset.rawValue,
+            "macro": macroFields,
+        ]
+        _ = calibration // documents that snapshots are already calibrated
+
+        guard JSONSerialization.isValidJSONObject(state),
+              let data = try? JSONSerialization.data(withJSONObject: state),
+              let json = String(data: data, encoding: .utf8) else { return }
+        evaluateJS("try { BxCBridge.updateNativeInput(\(json)); 'ok' } catch (e) { 'err' }")
+    }
+
+    private func setMacroField(_ control: ControllerControl, isPressed: Bool) {
+        let key: String?
+        switch control {
+        case .buttonA: key = "A"
+        case .buttonB: key = "B"
+        case .buttonX: key = "X"
+        case .buttonY: key = "Y"
+        case .menu: key = "Menu"
+        case .options: key = "View"
+        case .home: key = "Nexus"
+        case .leftShoulder: key = "LeftShoulder"
+        case .rightShoulder: key = "RightShoulder"
+        case .leftStickButton: key = "LeftThumb"
+        case .rightStickButton: key = "RightThumb"
+        case .dpadUp: key = "DPadUp"
+        case .dpadDown: key = "DPadDown"
+        case .dpadLeft: key = "DPadLeft"
+        case .dpadRight: key = "DPadRight"
+        case .leftTrigger: key = "LeftTrigger"
+        case .rightTrigger: key = "RightTrigger"
+        case .touchpadButton: key = nil
+        }
+        guard let key else { return }
+        if isPressed { macroFields[key] = 1 } else { macroFields.removeValue(forKey: key) }
+    }
+
+    func handleNativeAction(_ action: ControllerNativeAction) {
+        switch action {
+        case .none: break
+        case .toggleSettings: openSettingsWindow()
+        case .toggleFullscreen: toggleFullscreen()
+        case .screenshot: evaluateJS("try { ShortcutHandler.runAction('stream.screenshot.capture'); 'ok' } catch(e) { 'err' }")
+        case .toggleStats: evaluateJS("try { ShortcutHandler.runAction('stream.stats.toggle'); 'ok' } catch(e) { 'err' }")
+        case .volumeUp: evaluateJS("try { ShortcutHandler.runAction('stream.volume.inc'); 'ok' } catch(e) { 'err' }")
+        case .volumeDown: evaluateJS("try { ShortcutHandler.runAction('stream.volume.dec'); 'ok' } catch(e) { 'err' }")
+        case .mute: evaluateJS("try { ShortcutHandler.runAction('stream.sound.toggle'); 'ok' } catch(e) { 'err' }")
+        case .custom(let identifier): evaluateJS("try { ShortcutHandler.runAction('\(identifier)'); 'ok' } catch(e) { 'err' }")
+        case .macro(let id): controllerFeatures.runMacro(id: id)
+        }
+    }
+
     func pollStreamInfo() {
-        evaluateJS("try { JSON.stringify(BxCBridge.streamInfo()) } catch (e) { '{}' }") { [weak self] result, _ in
-            guard let text = result as? String, let data = text.data(using: .utf8), let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-            Task { @MainActor in
-                self?.isStreaming = info["playing"] as? Bool ?? false
-                self?.currentGameTitle = info["title"] as? String ?? ""
-                self?.currentRegion = info["region"] as? String ?? ""
-                self?.statusController?.refreshMenu()
+        Task {
+            do {
+                let result = try await callAsyncJS("""
+                    try {
+                      var info = await BxCBridge.streamInfo();
+                      var stats = info.playing ? await BxCBridge.streamStats() : null;
+                      return JSON.stringify({info:info, stats:stats});
+                    } catch (e) { return JSON.stringify({info:{playing:false,title:'',region:''},stats:null}); }
+                    """)
+                guard let text = result as? String, let data = text.data(using: .utf8),
+                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                let info = root["info"] as? [String: Any] ?? [:]
+                isStreaming = info["playing"] as? Bool ?? false
+                currentGameTitle = info["title"] as? String ?? ""
+                currentRegion = info["region"] as? String ?? ""
+                if let stats = root["stats"] as? [String: Any] {
+                    let loss = stats["loss"] as? [String: Any] ?? [:]
+                    let frames = stats["frames"] as? [String: Any] ?? [:]
+                    telemetry = StreamTelemetry(
+                        pingMs: (stats["ping"] as? NSNumber)?.doubleValue ?? -1,
+                        fps: (stats["fps"] as? NSNumber)?.doubleValue ?? 0,
+                        bitrateMbps: (stats["bitrate"] as? NSNumber)?.doubleValue ?? 0,
+                        packetLossPercent: (loss["packetPercent"] as? NSNumber)?.doubleValue ?? 0,
+                        packetLossCount: (loss["packets"] as? NSNumber)?.intValue ?? 0,
+                        framesDropped: (frames["dropped"] as? NSNumber)?.intValue ?? 0,
+                        jitterMs: (stats["jitter"] as? NSNumber)?.doubleValue ?? 0,
+                        resolution: stats["resolution"] as? String ?? "",
+                        decodeTimeMs: (stats["decodeTime"] as? NSNumber)?.doubleValue ?? 0
+                    )
+                } else {
+                    telemetry = .empty
+                }
+                statusController?.refreshMenu()
+            } catch {
+                // Keep the last good telemetry sample; the page may be navigating.
             }
         }
     }
@@ -234,8 +444,55 @@ final class BrowserModel: ObservableObject {
 
     // MARK: - State updates (called by WebView.Coordinator)
 
+    func navigationStarted() {
+        isLoading = true
+        loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
+        loadingTimeout?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isLoading else { return }
+            self.loadPhase = .failed(BrowserLoadFailure(
+                title: "Connection issue",
+                message: "Xbox Cloud Gaming took too long to become ready.",
+                recoverySuggestion: "Check your connection and try again.",
+                failingURL: self.webView?.url
+            ))
+            self.isLoading = false
+        }
+        loadingTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 40, execute: work)
+    }
+
     func setLoading(_ loading: Bool) {
         isLoading = loading
+        if loading { navigationStarted() }
+    }
+
+    func pageBecameReady() {
+        loadingTimeout?.cancel()
+        loadingTimeout = nil
+        hasReachedInitialReadiness = true
+        isLoading = false
+        withAnimation(.easeInOut(duration: 0.35)) { loadPhase = .ready }
+    }
+
+    func navigationFailed(_ error: Error, url: URL? = nil) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
+        loadingTimeout?.cancel()
+        loadingTimeout = nil
+        isLoading = false
+        loadPhase = .failed(BrowserLoadFailure(error: error, failingURL: url))
+    }
+
+    func webContentTerminated() {
+        loadingTimeout?.cancel()
+        loadingTimeout = nil
+        isLoading = false
+        loadPhase = .failed(BrowserLoadFailure(
+            title: "Connection issue",
+            message: "The Xbox web process stopped unexpectedly.",
+            recoverySuggestion: "Retry to restart the Xbox page."
+        ))
     }
 
     func syncNavState() {
@@ -265,6 +522,25 @@ final class BrowserModel: ObservableObject {
             note("Gamepad polling error: \(body["detail"] as? String ?? "unknown")")
         case "app-fullscreen":
             toggleFullscreen()
+        case "site-ready":
+            let readyState = body["readyState"] as? String ?? ""
+            if readyState == "interactive" || readyState == "complete" {
+                pageBecameReady()
+            }
+        case "bridge-ready":
+            note("Better xCloud bridge ready")
+        case "native-rumble":
+            let left = Float(body["leftMotorPercent"] as? Double ?? 0)
+            let right = Float(body["rightMotorPercent"] as? Double ?? 0)
+            let durationMs = body["durationMs"] as? Double ?? 150
+            let intensity = min(max(max(left, right), 0), 1)
+            if intensity > 0 {
+                controllerFeatures.playTestPulse(
+                    intensity: intensity,
+                    sharpness: min(max(right, 0), 1),
+                    duration: min(max(durationMs / 1_000, 0.03), 2)
+                )
+            }
         default:
             note("\(type): \(body["detail"] as? String ?? "")")
         }

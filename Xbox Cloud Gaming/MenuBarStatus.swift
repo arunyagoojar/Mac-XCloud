@@ -25,10 +25,16 @@ final class MenuBarStatusController {
         let current = NSMenuItem(title: "Current Streaming: \(title)", action: nil, keyEquivalent: "")
         current.isEnabled = false
         menu.addItem(current)
-        if !browser.currentRegion.isEmpty {
-            let region = NSMenuItem(title: "Region: \(browser.currentRegion)", action: nil, keyEquivalent: "")
-            region.isEnabled = false
-            menu.addItem(region)
+        if browser.isStreaming {
+            addInfo("Region", browser.currentRegion.isEmpty ? "—" : browser.currentRegion, to: menu)
+            addInfo("Resolution", browser.telemetry.resolution.isEmpty ? "—" : browser.telemetry.resolution, to: menu)
+            addInfo("Ping", browser.telemetry.pingMs >= 0 ? String(format: "%.0f ms", browser.telemetry.pingMs) : "—", to: menu)
+            addInfo("FPS", String(format: "%.0f", browser.telemetry.fps), to: menu)
+            addInfo("Bitrate", String(format: "%.1f Mbps", browser.telemetry.bitrateMbps), to: menu)
+            addInfo("Packet Loss", String(format: "%.2f%% (%d)", browser.telemetry.packetLossPercent, browser.telemetry.packetLossCount), to: menu)
+            addInfo("Frames Dropped", "\(browser.telemetry.framesDropped)", to: menu)
+            addInfo("Decode Time", String(format: "%.2f ms", browser.telemetry.decodeTimeMs), to: menu)
+            addInfo("Jitter", String(format: "%.2f ms", browser.telemetry.jitterMs), to: menu)
         }
         menu.addItem(.separator())
 
@@ -57,6 +63,12 @@ final class MenuBarStatusController {
         quit.target = self
         menu.addItem(quit)
         item.menu = menu
+    }
+
+    private func addInfo(_ label: String, _ value: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: "\(label): \(value)", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
     }
 
     @objc private func openSettings() { browser?.openSettingsWindow() }

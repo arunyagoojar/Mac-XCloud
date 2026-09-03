@@ -38,13 +38,22 @@ struct WebView: NSViewRepresentable {
 
     func updateNSView(_ uiView: WKWebView, context: Context) {}
 
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        if coordinator.browser.webView === nsView {
+            coordinator.browser.webView = nil
+        }
+        nsView.navigationDelegate = nil
+        nsView.configuration.userContentController.removeScriptMessageHandler(forName: "spikeHandler")
+        nsView.stopLoading()
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(browser: browser)
     }
 
     @MainActor
     final class Coordinator: NSObject {
-        private let browser: BrowserModel
+        fileprivate let browser: BrowserModel
 
         init(browser: BrowserModel) {
             self.browser = browser
@@ -59,12 +68,37 @@ struct WebView: NSViewRepresentable {
               window.webkit.messageHandlers.spikeHandler.postMessage(Object.assign({ type: type }, data));
             } catch (e) {}
           }
+          var didSendReady = false;
+          function sendSiteReady() {
+            if (didSendReady) return;
+            var readyState = document.readyState;
+            var interactive = readyState === 'interactive' || readyState === 'complete';
+            var host = location.hostname || '';
+            var isAuth = host.indexOf('login.live.com') !== -1 || host.indexOf('login.microsoftonline.com') !== -1;
+            var hasAuthForm = !!document.querySelector('input[type="email"], input[name="loginfmt"], form');
+            var hasXboxShell = !!document.querySelector('#PageContent, [class*="HomePage"], main, [role="main"]');
+            var bridgeReady = typeof window.BxCBridge === 'object';
+            if (!interactive || !(isAuth ? hasAuthForm : (hasXboxShell && bridgeReady))) return;
+            didSendReady = true;
+            send('site-ready', {
+              url: location.href,
+              readyState: readyState,
+              bridgeReady: bridgeReady,
+              bridgeCapabilities: window.BxCBridge && window.BxCBridge.capabilities || null
+            });
+          }
           send('env', {
             url: location.href,
             gamepadAPI: typeof navigator.getGamepads === 'function',
             webrtc: typeof RTCPeerConnection !== 'undefined',
             ua: navigator.userAgent
           });
+          sendSiteReady();
+          window.addEventListener('bxc-bridge-ready', sendSiteReady);
+          document.addEventListener('readystatechange', sendSiteReady);
+          try {
+            new MutationObserver(sendSiteReady).observe(document.documentElement, { childList: true, subtree: true });
+          } catch (e) {}
           var last = 'init';
           setInterval(function () {
             try {
@@ -87,7 +121,17 @@ struct WebView: NSViewRepresentable {
 
 extension WebView.Coordinator: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        browser.setLoading(true)
+        browser.navigationStarted()
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        browser.syncNavState()
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        browser.syncNavState()
+        decisionHandler(.allow)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -99,18 +143,24 @@ extension WebView.Coordinator: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        browser.setLoading(false)
+        browser.navigationFailed(error, url: webView.url)
         browser.note("Navigation failed: \(error.localizedDescription)")
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        browser.setLoading(false)
+        browser.navigationFailed(error, url: webView.url)
         browser.note("Load failed: \(error.localizedDescription)")
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        browser.webContentTerminated()
+        browser.note("Web content process terminated")
     }
 }
 
 extension WebView.Coordinator: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame else { return }
         browser.handleSpikeMessage(message)
     }
 }
