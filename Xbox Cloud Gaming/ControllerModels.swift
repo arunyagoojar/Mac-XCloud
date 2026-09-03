@@ -477,14 +477,8 @@ enum GyroMode: String, Codable, CaseIterable, Sendable {
     case pointer
 }
 
-enum GyroTarget: String, Codable, CaseIterable, Sendable {
-    case leftStick
-    case rightStick
-}
-
 struct GyroSettings: Codable, Equatable, Sendable {
     var mode: GyroMode
-    var target: GyroTarget
     var sensitivityX: Float
     var sensitivityY: Float
     var deadzone: Float
@@ -493,31 +487,12 @@ struct GyroSettings: Codable, Equatable, Sendable {
 
     static let `default` = GyroSettings(
         mode: .off,
-        target: .rightStick,
         sensitivityX: 1,
         sensitivityY: 1,
         deadzone: 0.02,
         invertX: false,
         invertY: false
     )
-
-    private enum CodingKeys: String, CodingKey { case mode, target, sensitivityX, sensitivityY, deadzone, invertX, invertY }
-
-    init(mode: GyroMode, target: GyroTarget, sensitivityX: Float, sensitivityY: Float, deadzone: Float, invertX: Bool, invertY: Bool) {
-        self.mode = mode; self.target = target; self.sensitivityX = sensitivityX; self.sensitivityY = sensitivityY
-        self.deadzone = deadzone; self.invertX = invertX; self.invertY = invertY
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        mode = try c.decodeIfPresent(GyroMode.self, forKey: .mode) ?? .off
-        target = try c.decodeIfPresent(GyroTarget.self, forKey: .target) ?? (mode == .raw ? .leftStick : .rightStick)
-        sensitivityX = try c.decodeIfPresent(Float.self, forKey: .sensitivityX) ?? 1
-        sensitivityY = try c.decodeIfPresent(Float.self, forKey: .sensitivityY) ?? 1
-        deadzone = try c.decodeIfPresent(Float.self, forKey: .deadzone) ?? 0.02
-        invertX = try c.decodeIfPresent(Bool.self, forKey: .invertX) ?? false
-        invertY = try c.decodeIfPresent(Bool.self, forKey: .invertY) ?? false
-    }
 }
 
 // MARK: - Touchpad gestures and actions

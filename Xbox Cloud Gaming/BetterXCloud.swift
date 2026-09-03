@@ -343,21 +343,6 @@ enum BetterXCloud {
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//#") }
             .joined(separator: "\n")
 
-        // Better xCloud's bundled file ends by immediately calling main().
-        // The native input transform must patch its source templates before
-        // main() compiles/installs the page poller, otherwise gyro updates are
-        // accepted by BxCBridge but never reach the xCloud packet.
-        let mainMarker = "\nmain();"
-        let sourceBeforeMain: String
-        let deferredMain: String
-        if let range = cleaned.range(of: mainMarker, options: .backwards) {
-            sourceBeforeMain = String(cleaned[..<range.lowerBound])
-            deferredMain = "main();"
-        } else {
-            sourceBeforeMain = cleaned
-            deferredMain = ""
-        }
-
         let bridge = #"""
         const __xcgInputFields = Object.freeze({
           A: [0, 1], B: [0, 1], X: [0, 1], Y: [0, 1],
@@ -735,9 +720,8 @@ enum BetterXCloud {
             var __p = location.pathname || "";
             var __ok = location.hostname === "www.xbox.com" && (__p === "/play" || __p.indexOf("/play/") === 0 || __p.indexOf("/auth/msa") === 0 || /\\/play\\/?$/.test(__p));
             if (!__ok) return;
-            \(sourceBeforeMain)
+            \(cleaned)
             \(bridge)
-            \(deferredMain)
           } catch (e) {
             try { console.error("[XCG] Better xCloud injection failed:", e); } catch (e2) {}
           }

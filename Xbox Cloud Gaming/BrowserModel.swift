@@ -66,8 +66,6 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var currentGameTitle = ""
     @Published private(set) var currentRegion = ""
     @Published private(set) var telemetry = StreamTelemetry.empty
-    @Published private(set) var nativeInputMergeReady = false
-    @Published private(set) var nativeInputMergeReason = "Waiting for Xbox input bridge"
 
     var statusController: MenuBarStatusController?
     let controllerInput = ControllerInputService()
@@ -377,8 +375,8 @@ final class BrowserModel: ObservableObject {
         // overwritten by a stale raw native snapshot.
         let state: [String: Any] = [
             "enabled": gyroSettings.mode != .off || !macroFields.isEmpty,
-            "gyro": gyroSettings.target == .leftStick
-                ? ["LeftThumbXAxis": max(-1, min(1, gyroX)), "LeftThumbYAxis": max(-1, min(1, gyroY))]
+            "gyro": gyroSettings.mode == .raw
+                ? ["LeftThumbXAxis": max(-1, min(1, gyroX))]
                 : ["RightThumbXAxis": max(-1, min(1, gyroX)), "RightThumbYAxis": max(-1, min(1, gyroY))],
             "suppressBrowserRumble": controllerFeatures.settings.haptics.mode != .standard,
             "preset": controllerFeatures.settings.categoryPreset.selectedPreset.rawValue,
@@ -564,12 +562,7 @@ final class BrowserModel: ObservableObject {
                 pageBecameReady()
             }
         case "bridge-ready":
-            let capabilities = body["capabilities"] as? [String: Any] ?? [:]
-            nativeInputMergeReady = capabilities["inputMerge"] as? Bool ?? false
-            nativeInputMergeReason = nativeInputMergeReady
-                ? "Ready"
-                : (capabilities["inputMergeReason"] as? String ?? "Input merge unavailable")
-            note("Better xCloud bridge ready (inputMerge=\(nativeInputMergeReady))")
+            note("Better xCloud bridge ready")
         case "native-rumble":
             let left = Float(body["leftMotorPercent"] as? Double ?? 0) / 100
             let right = Float(body["rightMotorPercent"] as? Double ?? 0) / 100
