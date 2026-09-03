@@ -15,5 +15,15 @@
 			<pubDate>Thu, 03 Sep 2026 21:14:12 +0000</pubDate>
 			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.1/MacXcloud.zip" sparkle:edSignature="qrtFlQnksCMJrhC9zbRczTYJypnNkdQ4CZEwK+GCa0EsucXRuc3e8J0plMgPB8MWm4LtOjpGPYkRE54ERRG8Bg==" length="3478736" type="application/octet-stream" />
 		</item>
+		<item>
+			<title>Version 1.2</title>
+			<sparkle:version>2</sparkle:version>
+			<sparkle:shortVersionString>1.2</sparkle:shortVersionString>
+			<link>https://github.com/arunyagoojar/Mac-XCloud/releases/tag/v1.2-b2</link>
+			<sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
+			<description><![CDATA[<p>Automatic build from commit 150a9b9ed17bb3c1dab2c609caf8877b41c35564.</p>]]></description>
+			<pubDate>Thu, 03 Sep 2026 21:22:17 +0000</pubDate>
+			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.2-b2/MacXcloud.zip" sparkle:edSignature="beaBwfT95PP2zmRjHZypt2qdv9ka0vrx9JBIwt6+NIYkibCq8tRVzrpF7h0VSTfw+fgFm5xRkzVQac0OeV0zDg==" length="3480748" type="application/octet-stream" />
+		</item>
 	</channel>
 </rss>
