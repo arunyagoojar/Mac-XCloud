@@ -57,6 +57,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var isLoading = true
     @Published private(set) var loadPhase: BrowserLoadPhase = .initialLoading
     @Published private(set) var hasReachedInitialReadiness = false
+    @Published private(set) var hasFinishedBootVideo = false
+    private var isSiteSemanticallyReady = false
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     @Published var showReport = false
@@ -503,12 +505,24 @@ final class BrowserModel: ObservableObject {
         if loading { navigationStarted() }
     }
 
+    func bootVideoFinished() {
+        hasFinishedBootVideo = true
+        completeInitialLoadIfPossible()
+    }
+
     func pageBecameReady() {
+        isSiteSemanticallyReady = true
+        completeInitialLoadIfPossible()
+    }
+
+    private func completeInitialLoadIfPossible() {
+        guard isSiteSemanticallyReady else { return }
+        guard hasReachedInitialReadiness || hasFinishedBootVideo else { return }
         loadingTimeout?.cancel()
         loadingTimeout = nil
         hasReachedInitialReadiness = true
         isLoading = false
-        withAnimation(.easeInOut(duration: 0.35)) { loadPhase = .ready }
+        withAnimation(.easeInOut(duration: 0.55)) { loadPhase = .ready }
     }
 
     func navigationFailed(_ error: Error, url: URL? = nil) {

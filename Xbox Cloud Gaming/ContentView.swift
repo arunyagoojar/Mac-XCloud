@@ -69,7 +69,9 @@ struct ContentView: View {
 
             switch browser.loadPhase {
             case .initialLoading:
-                XboxSplashView()
+                BootVideoView(onFinished: browser.bootVideoFinished)
+                    .background(Color.black)
+                    .ignoresSafeArea()
                     .transition(.opacity)
             case .failed(let failure):
                 ConnectionIssueView(

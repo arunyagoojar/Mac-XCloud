@@ -176,23 +176,11 @@ struct ControllerToolsView: View {
     private var motion: some View {
         VStack(alignment: .leading, spacing: 18) {
             title("Motion & Touchpad")
-            Picker("Gyro mode", selection: gyroMode) {
-                Text("Off").tag(GyroMode.off)
-                Text("Aim").tag(GyroMode.rightStick)
-                Text("Aim while L2 held").tag(GyroMode.pointer)
-                Text("Steering (tilt)").tag(GyroMode.raw)
-            }
-            Picker("Output stick", selection: gyroTarget) {
-                Text("Left Stick (movement/steering)").tag(GyroTarget.leftStick)
-                Text("Right Stick (camera/aim)").tag(GyroTarget.rightStick)
-            }
-            valueSlider("Horizontal sensitivity", value: gyroSensitivityX, range: 0.1...3, format: { String(format: "%.1fx", $0) })
-            valueSlider("Vertical sensitivity", value: gyroSensitivityY, range: 0.1...3, format: { String(format: "%.1fx", $0) })
-            valueSlider("Motion deadzone", value: gyroDeadzone, range: 0...0.2, format: { String(format: "%.2f", $0) })
-            Toggle("Invert horizontal", isOn: gyroInvertX)
-            Toggle("Invert vertical", isOn: gyroInvertY)
-            Button("Recenter Motion") { service.recenterMotion() }
-
+            Label("Gyroscope", systemImage: "gyroscope")
+                .font(.headline)
+            Text("Gyroscope gameplay input is unavailable in this beta. Native motion remains visible in the Test page for diagnostics.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
             Divider()
             Toggle("Enable touchpad gestures", isOn: touchpadEnabled)
             TouchpadGestureDemo()
@@ -311,13 +299,6 @@ struct ControllerToolsView: View {
     private var hapticMode: Binding<HapticMode> { Binding(get: { service.settings.haptics.mode }, set: { value in service.updateSettings { $0.haptics.mode = value } }) }
     private var hapticGain: Binding<Double> { Binding(get: { Double(service.settings.haptics.intensityMultiplier) }, set: { value in service.updateSettings { $0.haptics.intensityMultiplier = Float(value) } }) }
     private var hapticSharpness: Binding<Double> { Binding(get: { Double(service.settings.haptics.sharpness) }, set: { value in service.updateSettings { $0.haptics.sharpness = Float(value) } }) }
-    private var gyroMode: Binding<GyroMode> { Binding(get: { service.settings.gyro.mode }, set: { value in service.updateSettings { $0.gyro.mode = value } }) }
-    private var gyroTarget: Binding<GyroTarget> { Binding(get: { service.settings.gyro.target }, set: { value in service.updateSettings { $0.gyro.target = value } }) }
-    private var gyroSensitivityX: Binding<Double> { Binding(get: { Double(service.settings.gyro.sensitivityX) }, set: { value in service.updateSettings { $0.gyro.sensitivityX = Float(value) } }) }
-    private var gyroSensitivityY: Binding<Double> { Binding(get: { Double(service.settings.gyro.sensitivityY) }, set: { value in service.updateSettings { $0.gyro.sensitivityY = Float(value) } }) }
-    private var gyroDeadzone: Binding<Double> { Binding(get: { Double(service.settings.gyro.deadzone) }, set: { value in service.updateSettings { $0.gyro.deadzone = Float(value) } }) }
-    private var gyroInvertX: Binding<Bool> { Binding(get: { service.settings.gyro.invertX }, set: { value in service.updateSettings { $0.gyro.invertX = value } }) }
-    private var gyroInvertY: Binding<Bool> { Binding(get: { service.settings.gyro.invertY }, set: { value in service.updateSettings { $0.gyro.invertY = value } }) }
     private var touchpadEnabled: Binding<Bool> { Binding(get: { service.settings.touchpad.isEnabled }, set: { value in service.updateSettings { $0.touchpad.isEnabled = value } }) }
 
     private func touchpadAction(for gesture: TouchpadGesture) -> Binding<ControllerNativeAction> {

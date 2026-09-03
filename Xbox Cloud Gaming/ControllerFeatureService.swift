@@ -98,15 +98,18 @@ final class ControllerFeatureService: ObservableObject {
            var saved = try? JSONDecoder().decode(ControllerSettings.self, from: data) {
             // v2 adds native default gestures without overwriting an existing
             // customized mapping set.
-            if defaults.integer(forKey: "nativeController.settingsVersion") < 2,
-               saved.touchpad.mappings.isEmpty {
+            let version = defaults.integer(forKey: "nativeController.settingsVersion")
+            if version < 2, saved.touchpad.mappings.isEmpty {
                 saved.touchpad.mappings = TouchpadSettings.default.mappings
             }
+            // v3 removes the unreliable gameplay gyro integration while keeping
+            // native motion diagnostics in the Controller Test screen.
+            if version < 3 { saved.gyro.mode = .off }
             settings = saved
         } else {
             settings = .default
         }
-        defaults.set(2, forKey: "nativeController.settingsVersion")
+        defaults.set(3, forKey: "nativeController.settingsVersion")
         registerForControllerNotifications()
         if automaticallyAttach {
             attach(to: GCController.current ?? GCController.controllers().first)
