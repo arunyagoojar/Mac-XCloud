@@ -268,6 +268,17 @@ struct SettingsRootView: View {
             }
             .buttonStyle(.plain)
 
+        case .pingTest:
+            PingTestControl(model: model)
+
+        case .discordClientID:
+            TextField("Discord Application ID", text: Binding(
+                get: { UserDefaults.standard.string(forKey: "discordClientId") ?? "" },
+                set: { UserDefaults.standard.set($0.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "discordClientId") }
+            ))
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 190)
+
         case .info(let text):
             Text(text)
                 .font(.system(size: 13))

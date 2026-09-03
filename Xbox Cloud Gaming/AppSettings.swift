@@ -33,6 +33,8 @@ enum SettingKind {
     case info(text: String)
     case profileLauncher(ProfileKind)
     case forcedMKBGames
+    case pingTest
+    case discordClientID
 }
 
 struct SettingDef: Identifiable {
@@ -53,21 +55,10 @@ struct SettingsCategory: Identifiable {
     static let localeLabels: [String] = ["Default (account)", "العربية", "Български", "Čeština", "Dansk", "Deutsch", "Ελληνικά", "English (UK)", "English (US)", "Español (ES)", "Español (LatAm)", "Suomi", "Français", "עברית", "Magyar", "Italiano", "日本語", "한국어", "Norsk bokmål", "Nederlands", "Polski", "Português (BR)", "Português (PT)", "Română", "Русский", "Slovenčina", "Svenska", "ไทย", "Türkçe", "中文(简体)", "中文(繁體)"]
 
     static let all: [SettingsCategory] = [
-        SettingsCategory(id: "general", title: "General", icon: "gear", rows: [
-            SettingDef(id: "bx.locale", label: "Interface language",
-                       note: "Language used by Better xCloud-generated labels. Reload to apply everywhere.",
-                       scope: .global, kind: .option(
-                            values: ["en-US", "ca-CA", "cs-CZ", "da-DK", "de-DE", "en-ID", "es-ES", "fr-FR", "it-IT", "ja-JP", "ko-KR", "pl-PL", "pt-BR", "ru-RU", "th-TH", "tr-TR", "uk-UA", "vi-VN", "zh-CN", "zh-TW"],
-                            labels: ["English (US)", "Català", "Čeština", "Dansk", "Deutsch", "Bahasa Indonesia", "Español", "Français", "Italiano", "日本語", "한국어", "Polski", "Português (BR)", "Русский", "ไทย", "Türkçe", "Українська", "Tiếng Việt", "中文(简体)", "中文(繁體)"],
-                            defaultValue: "en-US")),
-            SettingDef(id: "ui.controllerFriendly", label: "Controller-friendly UI",
-                       note: "Bigger targets and gamepad-navigable site menus.",
-                       scope: .global, kind: .toggle(defaultValue: true)),
-            SettingDef(id: "ui.systemMenu.hideHandle", label: "Hide Better xCloud menu handle",
-                       note: "Forced on because this app provides native settings and menus.",
-                       scope: .global, kind: .toggle(defaultValue: true)),
-        ]),
         SettingsCategory(id: "server", title: "Server", icon: "server.rack", rows: [
+            SettingDef(id: "app.pingTest", label: "Region latency test",
+                       note: "Pings every server three times and reports the round-trip time.",
+                       scope: .global, kind: .pingTest),
             SettingDef(id: "server.region", label: "Server region",
                        note: "Server used for new streams. Only affects the next stream you start.",
                        scope: .global, kind: .serverRegion),
@@ -167,6 +158,12 @@ struct SettingsCategory: Identifiable {
                             defaultValue: "off")),
         ]),
         SettingsCategory(id: "video", title: "Video", icon: "film", rows: [
+            SettingDef(id: "app.upscaler", label: "Image upscaler",
+                       note: "AMD FSR 1 upscales the stream with edge-adaptive sampling + robust sharpening - visibly crisper at 720p or low bitrate. Applies live.",
+                       scope: .stream, kind: .option(
+                            values: ["off", "fsr1"],
+                            labels: ["Off", "AMD FSR 1"],
+                            defaultValue: "off")),
             SettingDef(id: "video.player.type", label: "Renderer",
                        note: "WebGL2 can be smoother on some Macs; default uses the plain video element.",
                        scope: .stream, kind: .option(
@@ -229,15 +226,6 @@ struct SettingsCategory: Identifiable {
             SettingDef(id: "controller.pollingRate", label: "Polling rate",
                        note: "How often input is sent to the cloud. Higher = lower latency, more CPU.",
                        scope: .stream, kind: .range(min: 4, max: 60, step: 4, defaultValue: 4, format: { "\((1000.0 / $0).rounded()) Hz" })),
-            SettingDef(id: "deviceVibration.mode", label: "Device vibration",
-                       note: "Vibrates phones/tablets during effects (the controller's own rumble is unchanged).",
-                       scope: .stream, kind: .option(
-                            values: ["off", "on", "auto"],
-                            labels: ["Off", "On", "On when not using gamepad"],
-                            defaultValue: "off")),
-            SettingDef(id: "deviceVibration.intensity", label: "Vibration intensity",
-                       note: nil,
-                       scope: .stream, kind: .range(min: 10, max: 100, step: 10, defaultValue: 50, format: { "\(Int($0))%" })),
             SettingDef(id: "localCoOp.enabled", label: "Enable local co-op support",                       note: "Two controllers as two players in the same stream. Only works with some games.",
                        scope: .stream, kind: .toggle(defaultValue: false)),
             SettingDef(id: "controller.shortcutProfiles", label: "Home-chord shortcut profiles",
@@ -246,32 +234,6 @@ struct SettingsCategory: Identifiable {
             SettingDef(id: "controller.customizationProfiles", label: "Controller remapping profiles",
                        note: "Button remaps, deadzones, trigger ranges and rumble intensity.",
                        scope: .stream, kind: .profileLauncher(.controllerCustomization)),
-        ]),
-        SettingsCategory(id: "touch", title: "Touch Controls", icon: "hand.tap", rows: [
-            SettingDef(id: "touchController.mode", label: "Touch controller availability",
-                       note: "Requires a touch-capable device.",
-                       scope: .global, kind: .option(
-                            values: ["default", "off", "all"],
-                            labels: ["Default", "Off", "All games"],
-                            defaultValue: "default")),
-            SettingDef(id: "touchController.autoOff", label: "Hide when controller is found",
-                       note: nil,
-                       scope: .global, kind: .toggle(defaultValue: false)),
-            SettingDef(id: "touchController.opacity.default", label: "Default touch opacity",
-                       note: nil,
-                       scope: .global, kind: .range(min: 10, max: 100, step: 10, defaultValue: 100, format: { "\(Int($0))%" })),
-            SettingDef(id: "touchController.style.standard", label: "Standard controls style",
-                       note: nil,
-                       scope: .global, kind: .option(
-                            values: ["default", "white", "muted"],
-                            labels: ["Default", "All white", "Muted colors"],
-                            defaultValue: "default")),
-            SettingDef(id: "touchController.style.custom", label: "Custom controls style",
-                       note: nil,
-                       scope: .global, kind: .option(
-                            values: ["default", "muted"],
-                            labels: ["Default", "Muted colors"],
-                            defaultValue: "default")),
         ]),
         SettingsCategory(id: "remote", title: "Remote Play", icon: "tv.and.mediabox", rows: [
             SettingDef(id: "xhome.video.resolution", label: "Remote Play resolution",
@@ -358,6 +320,9 @@ struct SettingsCategory: Identifiable {
                        scope: .global, kind: .toggle(defaultValue: true)),
         ]),
         SettingsCategory(id: "advanced", title: "Advanced", icon: "gearshape.2", rows: [
+            SettingDef(id: "app.discordClientID", label: "Discord application ID",
+                       note: "Optional. Create a free Discord application, paste its Application ID, and restart Discord Rich Presence.",
+                       scope: .global, kind: .discordClientID),
             SettingDef(id: "block.tracking", label: "Block xCloud analytics",
                        note: "Stops the site's telemetry pings.",
                        scope: .global, kind: .toggle(defaultValue: false)),
@@ -384,12 +349,6 @@ struct SettingsCategory: Identifiable {
                             ("genres", "Genres"),
                             ("all-games", "All games"),
                        ])),
-            SettingDef(id: "userAgent.profile", label: "User-Agent profile",
-                       note: "⚠️ Pretends to be another device. May cause unexpected behavior.",
-                       scope: .global, kind: .option(
-                            values: ["default", "windows-edge", "macos-safari", "vr-oculus", "smarttv-generic", "smarttv-tizen", "custom"],
-                            labels: ["Default", "Edge + Windows", "Safari + macOS", "Android TV", "Smart TV (generic)", "Samsung Smart TV", "Custom"],
-                            defaultValue: "default")),
             SettingDef(id: "ui.imageQuality", label: "Website image quality",
                        note: "Compression of box art on the home page. Lower = faster.",
                        scope: .global, kind: .range(min: 10, max: 90, step: 10, defaultValue: 90, format: { $0 >= 90 ? "Default" : "\(Int($0))%" })),
@@ -454,6 +413,16 @@ extension SettingsModel {
     /// to localStorage, and returns both its public value and raw persisted
     /// value. The native UI and mirror update only after that succeeds.
     func write(id: String, scope: SettingScope, value: Any) {
+        if id == "app.upscaler" {
+            // App-local upscaler mode (not a Better xCloud preference).
+            let mode = (value as? String) ?? "off"
+            browser?.evaluateJS("try { localStorage.setItem('XCG.Upscaler', '\(mode)'); window.postMessage({ type: 'xcg-upscaler', mode: '\(mode)' }, '*'); 'ok' } catch (e) { 'err' }")
+            globalValues[id] = mode
+            NativeSettingsMirror.save(mode, for: id, scope: .global)
+            saveMessage = mode == "fsr1" ? "AMD FSR 1 active on the current stream" : "Upscaler off"
+            objectWillChange.send()
+            return
+        }
         guard let browser else {
             saveMessage = "The Xbox page is not ready."
             return
@@ -521,6 +490,15 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var resolvedRegionName: String?
     @Published var saveMessage: String?
     @Published var showForcedMKBPicker = false
+    @Published var isPingingRegions = false
+    @Published var bestRegionResult: RegionPingResult?
+
+    struct RegionPingResult: Equatable {
+        let name: String
+        let baseURI: String
+        let averageMs: Int
+        let samples: Int
+    }
 
     var forcedNativeMKBGames: Set<String> {
         Set((rawValue("nativeMkb.forcedGames") as? [String]) ?? [])
@@ -528,12 +506,69 @@ final class SettingsModel: ObservableObject {
 
     func toggleForcedNativeMKBGame(_ id: String) {
         var selection = forcedNativeMKBGames
-        if selection.contains(id) {
-            selection.remove(id)
-        } else {
-            selection.insert(id)
-        }
+        if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
         write(id: "nativeMkb.forcedGames", scope: .global, value: selection.sorted())
+        objectWillChange.send()
+    }
+
+    func testRegions() {
+        guard !isPingingRegions else { return }
+        isPingingRegions = true
+        saveMessage = ""
+        Task {
+            do {
+                let result = try await browser?.callAsyncJS("""
+                    try {
+                      if (typeof BxCBridge === 'undefined') return JSON.stringify({error:'Xbox page is not ready'});
+                      var regions = BxCBridge.regionList();
+                      var out = [];
+                      for (var i = 0; i < regions.length; i++) {
+                        var r = regions[i]; if (!r.baseUri) continue;
+                        var times = [];
+                        for (var n = 0; n < 3; n++) {
+                          var t = performance.now();
+                          try { await fetch(r.baseUri + '/v2/servers/home?mr=50', {method:'GET', cache:'no-store'}); times.push(Math.round(performance.now()-t)); } catch (e) {}
+                        }
+                        if (times.length) out.push({name:r.name, baseURI:r.baseUri, times:times});
+                      }
+                      return JSON.stringify(out);
+                    } catch (e) { return JSON.stringify({error:String(e)}); }
+                    """)
+                isPingingRegions = false
+                guard let text = result as? String, let data = text.data(using: .utf8),
+                      let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                    saveMessage = "Region test failed"
+                    return
+                }
+                let parsed = records.compactMap { r -> RegionPingResult? in
+                    guard let name = r["name"] as? String, let uri = r["baseURI"] as? String,
+                          let times = r["times"] as? [NSNumber], !times.isEmpty else { return nil }
+                    let average = Int(times.map(\.intValue).reduce(0, +) / times.count)
+                    return RegionPingResult(name: name, baseURI: uri, averageMs: average, samples: times.count)
+                }.sorted { $0.averageMs < $1.averageMs }
+                bestRegionResult = parsed.first
+                saveMessage = parsed.first.map { "Best region: \($0.name) (\($0.averageMs) ms)" } ?? "No regions responded"
+                objectWillChange.send()
+            } catch {
+                isPingingRegions = false
+                saveMessage = "Region test failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func stopRegionPing() {
+        isPingingRegions = false
+    }
+
+    func useBestRegion() {
+        guard let bestRegionResult,
+              let index = regions.firstIndex(where: { $0.value == bestRegionResult.name }) else {
+            saveMessage = "Run the region test first"
+            return
+        }
+        regionIndex = index
+        write(id: "server.region", scope: .global, value: bestRegionResult.name)
+        saveMessage = "Selected \(bestRegionResult.name) (\(bestRegionResult.averageMs) ms)"
         objectWillChange.send()
     }
 
@@ -591,6 +626,7 @@ final class SettingsModel: ObservableObject {
           bridge: typeof BxCBridge !== 'undefined',
           regions: regions,
           selectedRegion: selected,
+          upscaler: localStorage.getItem('XCG.Upscaler') || 'off',
           global: JSON.parse(localStorage.getItem('BetterXcloud') || '{}'),
           stream: JSON.parse(localStorage.getItem('BetterXcloud.Stream') || '{}')
         });
@@ -609,6 +645,7 @@ final class SettingsModel: ObservableObject {
                 self.bridgeAvailable = root["bridge"] as? Bool ?? false
                 self.globalValues = root["global"] as? [String: Any] ?? [:]
                 self.streamValues = root["stream"] as? [String: Any] ?? [:]
+                self.globalValues["app.upscaler"] = root["upscaler"] as? String ?? "off"
 
                 if let selected = root["selectedRegion"] as? [String: Any] {
                     self.resolvedRegionName = (selected["displayName"] as? String) ?? (selected["shortName"] as? String)

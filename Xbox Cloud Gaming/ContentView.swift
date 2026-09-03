@@ -78,6 +78,13 @@ struct ContentView: View {
         .overlay(alignment: .bottomLeading) { controllerBadge }
         .overlay(alignment: .top) { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
         .overlay(alignment: .topTrailing) { spikePanel }
+        .onAppear { browser.pollStreamInfo() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                browser.pollStreamInfo()
+            }
+        }
     }
 
     private var controllerBadge: some View {

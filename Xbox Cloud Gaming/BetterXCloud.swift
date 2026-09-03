@@ -160,7 +160,21 @@ enum BetterXCloud {
         //    the mouse is idle (native side enables/disables this).
         scripts.append(WKUserScript(source: cursorHideScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
+        // 8. AMD FSR 1 (EASU + RCAS) upscaler engine, rendered at native
+        //    devicePixelRatio over the stream video.
+        if let upscaler = upscalerScript() {
+            scripts.append(upscaler)
+        }
+
         return scripts
+    }
+
+    /// The upscaler engine ships precomposed (FSR1 EASU/RCAS blocks inlined,
+    /// AMD MIT license attributed in the file header).
+    private static func upscalerScript() -> WKUserScript? {
+        guard let coreURL = Bundle.main.url(forResource: "upscaler-core", withExtension: "js"),
+              let source = try? String(contentsOf: coreURL, encoding: .utf8) else { return nil }
+        return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
     }
 
     /// The native side enables this when a controller is connected. After 2.5s
@@ -189,6 +203,20 @@ enum BetterXCloud {
         if (data && data.type === "xcg-cursor-hide") {
           enabled = !!data.enabled;
           if (!enabled) { if (idleTimer) clearTimeout(idleTimer); show(); } else { hideSoon(); }
+        }
+        if (data && data.type === "xcg-battery") {
+          try {
+            var bar = document.querySelector(".bx-stats-bar");
+            if (!bar) return;
+            var el = document.getElementById("xcg-batt");
+            if (!el) {
+              el = document.createElement("span");
+              el.id = "xcg-batt";
+              el.style.opacity = "0.95";
+              bar.appendChild(el);
+            }
+            el.textContent = "  |  " + data.text;
+          } catch (e) {}
         }
       });
     })();
@@ -279,6 +307,8 @@ enum BetterXCloud {
             if (id <= 0) throw new Error("Default profiles are read-only");
             return await this.profileTable(kind).deletePreset(id);
           },
+                    streamInfo: function () { try { return { playing: !!STATES.isPlaying, title: (STATES.currentStream && STATES.currentStream.title) || document.title.replace(/ - Xbox Cloud Gaming.*/, '') || '', region: (STATES.selectedRegion && (STATES.selectedRegion.displayName || STATES.selectedRegion.shortName)) || '' }; } catch (e) { return { playing: false, title: '', region: '' }; } },
+          regionList: function () { try { return Object.keys(STATES.serverRegions).map(function (k) { var r = STATES.serverRegions[k]; return { name: k, baseUri: r.baseUri || '' }; }); } catch (e) { return []; } },
           refreshProfiles: async function (kind) {
             if (kind === "mkb") return await StreamSettings.refreshMkbSettings();
             if (kind === "keyboard") return await StreamSettings.refreshKeyboardShortcuts();

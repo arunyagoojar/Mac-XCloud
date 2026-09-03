@@ -31,8 +31,13 @@ final class BrowserModel: ObservableObject {
     @Published var showReport = false
     @Published var isSettingsWindowOpen = false
     @Published private(set) var report = SpikeReport()
+    @Published private(set) var isStreaming = false
+    @Published private(set) var currentGameTitle = ""
+    @Published private(set) var currentRegion = ""
 
+    var statusController: MenuBarStatusController?
     let controllerInput = ControllerInputService()
+    private var cancellables = Set<AnyCancellable>()
     lazy var settingsModel = SettingsModel(browser: self)
 
     weak var webView: WKWebView?
@@ -49,6 +54,15 @@ final class BrowserModel: ObservableObject {
         controllerInput.onPresenceChange = { [weak self] connected in
             self?.evaluateJS("window.postMessage({ type: 'xcg-cursor-hide', enabled: \(connected) }, '*')")
         }
+        // Mirror controller battery into the in-stream stats bar.
+        controllerInput.$batteryPercent.combineLatest(controllerInput.$batteryStateText)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] percent, stateText in
+                guard let self, let percent else { return }
+                let suffix = stateText == "Charging" ? " · Charging" : ""
+                self.evaluateJS("window.postMessage({ type: 'xcg-battery', text: '🔋 \(percent)%\(suffix)' }, '*')")
+            }
+            .store(in: &cancellables)
         controllerInput.start()
 
         // This app drives a website, not documents: File and Edit menus add
@@ -190,6 +204,20 @@ final class BrowserModel: ObservableObject {
 
     func evaluateJS(_ script: String, completion: (@Sendable (Any?, (any Error)?) -> Void)? = nil) {
         webView?.evaluateJavaScript(script, completionHandler: completion)
+    }
+
+    func pollStreamInfo() {
+        evaluateJS("try { JSON.stringify(BxCBridge.streamInfo()) } catch (e) { '{}' }") { [weak self] result, _ in
+            guard let text = result as? String, let data = text.data(using: .utf8), let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            Task { @MainActor in
+                self?.isStreaming = info["playing"] as? Bool ?? false
+                self?.currentGameTitle = info["title"] as? String ?? ""
+                self?.currentRegion = info["region"] as? String ?? ""
+                self?.statusController?.refreshMenu()
+                DiscordRPC.shared.update(playing: self?.isStreaming ?? false,
+                                         title: self?.currentGameTitle ?? "")
+            }
+        }
     }
 
     func callAsyncJS(_ functionBody: String, arguments: [String: Any] = [:]) async throws -> Any? {

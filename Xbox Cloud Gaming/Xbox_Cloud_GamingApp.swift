@@ -13,8 +13,12 @@ struct Xbox_Cloud_GamingApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MainWindowLauncher()
-                .environmentObject(browser)
+            ZStack {
+                MainWindowLauncher()
+                StatusItemBootstrap()
+                    .frame(width: 1, height: 1)
+            }
+            .environmentObject(browser)
         }
         .windowResizability(.contentMinSize)
         .commands {

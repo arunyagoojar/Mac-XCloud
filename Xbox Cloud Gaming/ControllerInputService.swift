@@ -26,6 +26,8 @@ final class ControllerInputService: ObservableObject {
 
     @Published private(set) var controllerName: String?
     @Published private(set) var supportsLED = false
+    @Published private(set) var batteryPercent: Int?
+    @Published private(set) var batteryStateText: String?
 
     private var timer: Timer?
     private var lastHomeEdge: TimeInterval = 0
@@ -76,9 +78,24 @@ final class ControllerInputService: ObservableObject {
         if let controller = controllers.first {
             controllerName = controller.vendorName ?? "Game Controller"
             supportsLED = controller.light != nil
+            if let battery = controller.battery {
+                batteryPercent = Int((battery.batteryLevel * 100).rounded())
+                switch battery.batteryState {
+                case .charging: batteryStateText = "Charging"
+                case .discharging: batteryStateText = "Battery"
+                case .full: batteryStateText = "Full"
+                case .unknown: batteryStateText = "Battery"
+                @unknown default: batteryStateText = "Battery"
+                }
+            } else {
+                batteryPercent = nil
+                batteryStateText = nil
+            }
         } else {
             controllerName = nil
             supportsLED = false
+            batteryPercent = nil
+            batteryStateText = nil
         }
         let hasController = !controllers.isEmpty
         if hasController != lastPresenceState {
