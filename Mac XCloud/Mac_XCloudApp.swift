@@ -6,6 +6,33 @@
 //
 
 import SwiftUI
+import Sparkle
+
+/// Shared Sparkle updater used by the app menu and the menu-bar menu.
+/// Sparkle checks for updates automatically on launch and hourly
+/// (SUEnableAutomaticChecks / SUScheduledCheckInterval in Config/Info.plist).
+enum UpdaterService {
+    static let controller = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
+
+    static func checkForUpdates() {
+        controller.checkForUpdates(nil)
+    }
+}
+
+/// Menu item matching Sparkle's convention: enabled only when an update
+/// check is possible.
+struct CheckForUpdatesView: View {
+    var body: some View {
+        Button("Check for Updates…") {
+            UpdaterService.checkForUpdates()
+        }
+        .disabled(!UpdaterService.controller.updater.canCheckForUpdates)
+    }
+}
 
 @main
 struct Mac_XCloudApp: App {
@@ -23,6 +50,8 @@ struct Mac_XCloudApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {
+                CheckForUpdatesView()
+                Divider()
                 Button("Sign Out") { browser.signOut() }
             }
             CommandMenu("Settings") {

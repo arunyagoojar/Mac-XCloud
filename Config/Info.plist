@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged with the generated Info.plist (GENERATE_INFOPLIST_FILE = YES). -->
+	<key>SUFeedURL</key>
+	<string>https://arunyagoojar.github.io/Mac-XCloud/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>9KfbNKzcw3HvPuTfWQy8QqDj5fVXufLOYyqWJhG45/U=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<string>3600</string>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,154 @@
+name: Release
+
+# Every push to main builds the app, publishes a GitHub Release, and updates
+# the Sparkle appcast so installed apps auto-update. Also runnable manually.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build app (version 1.<run number>)
+        run: |
+          xcodebuild \
+            -project "Mac XCloud.xcodeproj" \
+            -scheme "Mac XCloud" \
+            -configuration Release \
+            -destination "platform=macOS" \
+            -derivedDataPath build \
+            MARKETING_VERSION=1.${{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Zip app bundle
+        run: |
+          cd build/Build/Products/Release
+          ditto -c -k --keepParent "Mac Xcloud.app" ../../../../MacXcloud.zip
+
+      - name: Download Sparkle signing tools
+        run: |
+          LATEST_TAG=$(curl -sL https://api.github.com/repos/sparkle-project/Sparkle/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          curl -sL -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/${LATEST_TAG}/Sparkle-${LATEST_TAG}.tar.xz"
+          mkdir sparkle && tar -xf sparkle.tar.xz -C sparkle
+
+      - name: Sign archive with Sparkle EdDSA
+        id: sign
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" > private.key
+          OUTPUT=$(./sparkle/bin/sign_update --ed-key-file private.key MacXcloud.zip)
+          rm private.key
+          echo "output: $OUTPUT"
+          SIG=$(echo "$OUTPUT" | sed -E 's/.*sparkle:edSignature="([^"]+)".*/\1/')
+          LEN=$(echo "$OUTPUT" | sed -E 's/.*length="([0-9]+)".*/\1/')
+          if [ -z "$SIG" ] || [ -z "$LEN" ]; then echo "Signing failed"; exit 1; fi
+          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+          echo "len=$LEN" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v1.${{ github.run_number }}
+        run: |
+          gh release create "$TAG" \
+            --title "Mac Xcloud 1.${{ github.run_number }}" \
+            --notes "Automatic build from commit ${{ github.sha }}." \
+            MacXcloud.zip
+
+      - name: Update Sparkle appcast on gh-pages
+        env:
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/v1.${{ github.run_number }}/MacXcloud.zip
+          REPO_NAME: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin gh-pages 2>/dev/null || true
+          HAS_PAGES=false
+          if git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
+            HAS_PAGES=true
+            git checkout gh-pages
+          else
+            git checkout --orphan gh-pages
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          export DOWNLOAD_URL REPO_NAME COMMIT_SHA
+          python3 <<'PYEOF'
+          import os, re, datetime
+
+          url = os.environ["DOWNLOAD_URL"]
+          sig = "${{ steps.sign.outputs.sig }}"
+          length = "${{ steps.sign.outputs.len }}"
+          run_number = "${{ github.run_number }}"
+          version = f"1.{run_number}"
+          build = run_number
+          repo = os.environ["REPO_NAME"]
+          sha = os.environ["COMMIT_SHA"]
+          date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+
+          item = f"""\t\t<item>
+          \t\t\t<title>Version {version}</title>
+          \t\t\t<sparkle:version>{build}</sparkle:version>
+          \t\t\t<sparkle:shortVersionString>{version}</sparkle:shortVersionString>
+          \t\t\t<link>https://github.com/{repo}/releases/tag/v{version}</link>
+          \t\t\t<sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
+          \t\t\t<description><![CDATA[<p>Automatic build from commit {sha}.</p>]]></description>
+          \t\t\t<pubDate>{date_str}</pubDate>
+          \t\t\t<enclosure url="{url}" sparkle:edSignature="{sig}" length="{length}" type="application/octet-stream" />
+          \t\t</item>
+          """
+
+          try:
+              with open("appcast.xml") as f:
+                  content = f.read()
+          except FileNotFoundError:
+              content = (
+                  '<?xml version="1.0" standalone="yes"?>\n'
+                  '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" '
+                  'xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">\n'
+                  '\t<channel>\n'
+                  '\t\t<title>Mac Xcloud</title>\n'
+                  '\t\t<link>https://arunyagoojar.github.io/Mac-XCloud/appcast.xml</link>\n'
+                  '\t\t<description>Mac Xcloud updates</description>\n'
+                  '\t\t<language>en</language>\n'
+                  '\t</channel>\n'
+                  '</rss>\n'
+              )
+
+          # Replace any stale entry for the same build, else insert newest first.
+          stale = re.compile(
+              r"\t\t<item>(?:(?!</item>).)*?<sparkle:version>" + re.escape(build) +
+              r"</sparkle:version>(?:(?!</item>).)*?</item>\n", re.S)
+          if stale.search(content):
+              content = stale.sub("", content)
+          content = content.replace("\t</channel>", item + "\t</channel>")
+
+          with open("appcast.xml", "w") as f:
+              f.write(content)
+          PYEOF
+
+          git add appcast.xml
+          git commit -m "Appcast: v1.${{ github.run_number }}"
+          if [ "$HAS_PAGES" = true ]; then
+            git push origin gh-pages
+          else
+            git push origin gh-pages:gh-pages
+          fi

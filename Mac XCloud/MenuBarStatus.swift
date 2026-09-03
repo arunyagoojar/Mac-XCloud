@@ -60,6 +60,9 @@ final class MenuBarStatusController {
         }
         presets.submenu = presetMenu
         menu.addItem(presets)
+        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "u")
+        updates.target = self
+        menu.addItem(updates)
 
         // Adaptive trigger mode is user-settable from the menu bar, but only
         // while a DualSense-style controller with adaptive triggers is attached.
@@ -135,6 +138,9 @@ final class MenuBarStatusController {
     @objc private func selectPreset(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
         Task { await browser?.inputPresets.applyPreset(id: id) }
+    }
+    @objc private func checkForUpdates() {
+        UpdaterService.checkForUpdates()
     }
     @objc private func openSettings() { browser?.openSettingsWindow() }
     @objc private func toggleFullscreen() { browser?.toggleFullscreen() }

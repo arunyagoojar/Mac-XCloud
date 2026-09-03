@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A1C0DE00000000000000A001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A1C0DE00000000000000A002 /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		238EB1AA3048952700092F4F /* Mac Xcloud.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mac Xcloud.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1C0DE00000000000000A001 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = "Mac XCloud";
 			packageProductDependencies = (
+				A1C0DE00000000000000A002 /* Sparkle */,
 			);
 			productName = "Mac XCloud";
 			productReference = 238EB1AA3048952700092F4F /* Mac Xcloud.app */;
@@ -94,6 +100,9 @@
 			);
 			mainGroup = 238EB1A13048952700092F4F;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A1C0DE00000000000000A003 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 238EB1AB3048952700092F4F /* Products */;
 			projectDirPath = "";
@@ -253,6 +262,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Mac Xcloud";
 				INFOPLIST_KEY_CFBundleName = "Mac Xcloud";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -300,6 +310,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Mac Xcloud";
 				INFOPLIST_KEY_CFBundleName = "Mac Xcloud";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
@@ -355,6 +366,26 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A1C0DE00000000000000A003 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1C0DE00000000000000A002 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1C0DE00000000000000A003 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
+
 	};
 	rootObject = 238EB1A23048952700092F4F /* Project object */;
 }

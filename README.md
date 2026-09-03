@@ -13,6 +13,40 @@ chrome-less native window and layers on native macOS features:
   direct Left/Right adaptive-trigger mode switching
 - Xbox boot animation splash and clarity pipeline (FSR/CAS/USM)
 
+## Releasing updates (one command)
+
+Everything is automated. After changing the app, run:
+
+```bash
+./release.sh "What I changed"
+```
+
+That commits, pushes, and watches GitHub Actions, which:
+
+1. Builds a Release app with an auto-incrementing version (`1.<build number>`).
+2. Signs the archive with Sparkle EdDSA (no Apple Developer account needed).
+3. Publishes a GitHub Release and updates the update feed (`appcast.xml`).
+
+Installed copies of Mac Xcloud check the feed hourly and update themselves
+automatically; users can also use **Check for Updates…** in the app menu or
+the menu bar. Manual workflow trigger: the *Release* workflow on GitHub →
+*Run workflow*.
+
+The update signing key lives in the repo secret `SPARKLE_EDDSA_PRIVATE_KEY`;
+the matching public key is embedded in `Config/Info.plist`.
+
+## Distribution without an Apple Developer account
+
+There is no free Apple license for notarized Mac distribution — a free Apple
+ID only signs for personal use. Mac Xcloud therefore uses the standard
+no-cost path:
+
+- Updates delivered through Sparkle are EdDSA-signed, so they install
+  automatically without Apple's Gatekeeper.
+- **First-time** manual downloads (from GitHub Releases) need one extra step:
+  right-click the app → **Open** → confirm. After that it launches normally
+  forever.
+
 ## Building
 
 Requires Xcode with the macOS 15.7 SDK or newer:
