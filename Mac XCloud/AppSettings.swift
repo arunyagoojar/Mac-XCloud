@@ -425,6 +425,32 @@ extension SettingsModel {
             completion?(false)
             return
         }
+
+        // Optimistic update so the control responds instantly; every failure
+        // path below reverts to the previous value. The verified readback in
+        // the success path replaces this with what Better xCloud accepted.
+        let previous = rawValue(id)
+        if id != "app.clarityPipeline" {
+            switch scope {
+            case .global: globalValues[id] = value
+            case .stream: streamValues[id] = value
+            }
+            saveMessage = "Saving…"
+            objectWillChange.send()
+        }
+
+        func revertOptimisticUpdate() {
+            switch scope {
+            case .global: globalValues[id] = previous
+            case .stream: streamValues[id] = previous
+            }
+            if id == "server.region", let previousRegion = previous as? String,
+               let index = regions.firstIndex(where: { $0.value == previousRegion }) {
+                regionIndex = index
+            }
+            objectWillChange.send()
+        }
+
         let script: String
         if id == "app.clarityPipeline" {
             let pipeline = (value as? String) ?? "fsr1"
@@ -472,6 +498,7 @@ extension SettingsModel {
                 guard let self else { completion?(false); return }
                 guard self.writeGenerations[generationKey] == generation else { completion?(false); return }
                 if let error {
+                    revertOptimisticUpdate()
                     self.saveMessage = "Could not save: \(error.localizedDescription)"
                     completion?(false)
                     return
@@ -480,6 +507,7 @@ extension SettingsModel {
                       let data = json.data(using: .utf8),
                       let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       response["ok"] as? Bool == true else {
+                    revertOptimisticUpdate()
                     self.saveMessage = (try? JSONSerialization.jsonObject(with: (result as? String ?? "").data(using: .utf8) ?? Data()) as? [String: Any])?["error"] as? String ?? "Could not save this setting."
                     completion?(false)
                     return
@@ -514,7 +542,14 @@ extension SettingsModel {
                    let index = self.regions.firstIndex(where: { $0.value == selected }) {
                     self.regionIndex = index
                 }
-                self.saveMessage = "Saved"
+                // Surface normalization: if Better xCloud stored a different
+                // value than requested (e.g. unsupported quality), say so.
+                if let readback = response["readback"], !(readback is [Any] || readback is [String: Any]),
+                   String(describing: readback) != String(describing: value) {
+                    self.saveMessage = "Saved as \(readback) — the requested value is not supported here"
+                } else {
+                    self.saveMessage = "Saved"
+                }
                 self.objectWillChange.send()
                 completion?(true)
             }

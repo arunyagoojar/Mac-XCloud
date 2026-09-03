@@ -92,8 +92,12 @@ enum BetterXCloud {
             'profile-level-id=64001f;packetization-mode=1'
           ];
           profiles.forEach(function (fmtp) {
-            var prefix = fmtp.substring(0, 18).toLowerCase();
-            if (!codecs.some(function (c) { return (c.mimeType || '').toLowerCase() === 'video/h264' && (c.sdpFmtpLine || '').toLowerCase().indexOf(prefix) !== -1; })) {
+            /* Compare the exact profile-level-id (e.g. profile-level-id=4d401f),
+               not a short prefix — a prefix like "profile-level-id=4" also
+               matches WebKit's own baseline codec, which made the shim skip
+               adding the Main/High profiles entirely. */
+            var profile = (fmtp.split(';')[0] || '').toLowerCase();
+            if (!codecs.some(function (c) { return (c.mimeType || '').toLowerCase() === 'video/h264' && (c.sdpFmtpLine || '').toLowerCase().indexOf(profile) !== -1; })) {
               codecs.push({ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: fmtp });
             }
           });
