@@ -23,6 +23,8 @@ final class ControllerInputService: ObservableObject {
     /// When nil or false, UI navigation/activation input is ignored (e.g. the
     /// settings window is closed) — only the Home double-press stays active.
     var isUIInputEnabled: (() -> Bool)?
+    /// The global Settings shortcut is allowed only while the stream owns input.
+    var isSettingsShortcutEnabled: (() -> Bool)?
 
     @Published private(set) var controllerName: String?
     @Published private(set) var supportsLED = false
@@ -126,7 +128,8 @@ final class ControllerInputService: ObservableObject {
         let l3r3Pressed = (pad.leftThumbstickButton?.isPressed ?? false) && (pad.rightThumbstickButton?.isPressed ?? false)
         if l3r3Pressed {
             if l3r3HoldStarted == nil { l3r3HoldStarted = now }
-            if !l3r3Triggered, let started = l3r3HoldStarted, now - started >= 0.65 {
+            if !l3r3Triggered, let started = l3r3HoldStarted,
+               now - started >= 0.65, isSettingsShortcutEnabled?() == true {
                 l3r3Triggered = true
                 onToggleOverlay?()
             }

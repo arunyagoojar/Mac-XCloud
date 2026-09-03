@@ -46,6 +46,10 @@ final class ControllerFeatureService: ObservableObject {
     private var touchRuntime = TouchRuntimeState()
     private var calibrationSession: CalibrationSession?
     private var isApplyingSettings = false
+    private var controllerToolsActive = false
+    private var gyroBaselineGravityX: Double = 0
+    private var filteredGyro = ControllerVector2.zero
+    private var lastGyroTimestamp: TimeInterval?
 
     private struct ShortcutRuntimeState {
         var wasChordPressed = false
@@ -212,6 +216,20 @@ final class ControllerFeatureService: ObservableObject {
         settings = .default
     }
 
+    func setControllerToolsActive(_ active: Bool) {
+        controllerToolsActive = active
+        if !active { cancelCalibration() }
+        configureMotion(for: controller)
+    }
+
+    func recenterMotion() {
+        gyroBaselineGravityX = snapshot.motion?.gravity.x ?? 0
+        filteredGyro = .zero
+        lastGyroTimestamp = nil
+    }
+
+    var processedGyroOutput: ControllerVector2 { filteredGyro }
+
     func updateSettings(_ update: (inout ControllerSettings) -> Void) {
         var copy = settings
         update(&copy)
@@ -261,9 +279,10 @@ final class ControllerFeatureService: ObservableObject {
             battery: batterySnapshot(from: controller)
         )
 
-        if settings.gyro.mode == .off {
+        if settings.gyro.mode == .off && !controllerToolsActive {
             next.motion = nil
         }
+        updateFilteredGyro(from: next.motion, timestamp: timestamp)
 
         snapshot = next
         onNativeInputState?(next)
@@ -349,13 +368,46 @@ final class ControllerFeatureService: ObservableObject {
 
     private func configureMotion(for controller: GCController?) {
         guard let motion = controller?.motion else { return }
-        let shouldEnable = settings.gyro.mode != .off
+        let shouldEnable = settings.gyro.mode != .off || controllerToolsActive
         motion.valueChangedHandler = shouldEnable ? { [weak self] _ in
             MainActor.assumeIsolated { self?.publishCurrentSnapshot() }
         } : nil
         if motion.sensorsRequireManualActivation {
             motion.sensorsActive = shouldEnable
         }
+    }
+
+    private func updateFilteredGyro(from motion: ControllerMotionSnapshot?, timestamp: TimeInterval) {
+        guard let motion, settings.gyro.mode != .off else {
+            filteredGyro = .zero
+            lastGyroTimestamp = timestamp
+            return
+        }
+        let dt = min(max(timestamp - (lastGyroTimestamp ?? timestamp), 1.0 / 240.0), 0.1)
+        lastGyroTimestamp = timestamp
+        let target: ControllerVector2
+        switch settings.gyro.mode {
+        case .raw:
+            target = ControllerVector2(
+                x: Float((motion.gravity.x - gyroBaselineGravityX) * Double(settings.gyro.sensitivityX)),
+                y: 0
+            )
+        case .rightStick, .pointer:
+            target = ControllerVector2(
+                x: Float(motion.rotationRate.y * Double(settings.gyro.sensitivityX) * dt * 7.5),
+                y: Float(-motion.rotationRate.x * Double(settings.gyro.sensitivityY) * dt * 7.5)
+            )
+        case .off:
+            target = .zero
+        }
+        let magnitude = target.magnitude
+        let deadzone = settings.gyro.deadzone
+        let deadzoned = magnitude < deadzone ? ControllerVector2.zero : target
+        let alpha = Float(1 - exp(-dt * 16))
+        filteredGyro.x += (deadzoned.x - filteredGyro.x) * alpha
+        filteredGyro.y += (deadzoned.y - filteredGyro.y) * alpha
+        filteredGyro.x = min(max(settings.gyro.invertX ? -filteredGyro.x : filteredGyro.x, -1), 1)
+        filteredGyro.y = min(max(settings.gyro.invertY ? -filteredGyro.y : filteredGyro.y, -1), 1)
     }
 
     // MARK: - Calibration sessions
@@ -477,6 +529,10 @@ final class ControllerFeatureService: ObservableObject {
             trigger.setModeFeedbackWithStartPosition(0.2, resistiveStrength: 0.75)
         case .weapon:
             trigger.setModeWeaponWithStartPosition(0.2, endPosition: 0.55, resistiveStrength: 0.8)
+        case .automaticRecoil:
+            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.78, frequency: 0.72)
+        case .burstPulse:
+            trigger.setModeVibrationWithStartPosition(0.24, amplitude: 0.58, frequency: 0.32)
         case .bow:
             applyCustomAdaptiveTrigger(
                 trigger,
@@ -490,6 +546,18 @@ final class ControllerFeatureService: ObservableObject {
                     frequency: 0
                 )
             )
+        case .accelerator:
+            trigger.setModeSlopeFeedback(startPosition: 0.12, endPosition: 0.95, startStrength: 0.04, endStrength: 0.34)
+        case .brakeComfort:
+            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.92, startStrength: 0.06, endStrength: 0.48)
+        case .brakeFirm:
+            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.90, startStrength: 0.10, endStrength: 0.68)
+        case .absPulse:
+            trigger.setModeVibrationWithStartPosition(0.62, amplitude: 0.5, frequency: 0.82)
+        case .platformerEndStop:
+            trigger.setModeFeedbackWithStartPosition(0.78, resistiveStrength: 0.22)
+        case .cinematic:
+            trigger.setModeSlopeFeedback(startPosition: 0.15, endPosition: 0.95, startStrength: 0.03, endStrength: 0.18)
         case .vibration:
             trigger.setModeVibrationWithStartPosition(0.2, amplitude: 0.6, frequency: 0.55)
         case .custom:
@@ -610,13 +678,33 @@ final class ControllerFeatureService: ObservableObject {
             touchpad.touchMoved = nil
             touchpad.touchUp = nil
         }
+        if let dualSense = controller.extendedGamepad as? GCDualSenseGamepad {
+            dualSense.touchpadPrimary.valueChangedHandler = nil
+            dualSense.touchpadSecondary.valueChangedHandler = nil
+        }
+        touchRuntime = TouchRuntimeState()
         guard settings.touchpad.isEnabled else { return }
 
-        let profile = controller.physicalInputProfile
-        let primary = profile.touchpads[GCInputDualShockTouchpadOne]
-        let secondary = profile.touchpads[GCInputDualShockTouchpadTwo]
-        configureTouchpad(primary, index: 0)
-        configureTouchpad(secondary, index: 1)
+        let touchpads = controller.physicalInputProfile.allTouchpads
+        if !touchpads.isEmpty {
+            for (index, touchpad) in touchpads.prefix(2).enumerated() {
+                configureTouchpad(touchpad, index: index)
+            }
+        } else if let dualSense = controller.extendedGamepad as? GCDualSenseGamepad {
+            // Some macOS/connection combinations expose DualSense coordinates
+            // but not GCControllerTouchpad down/up events. Fall back to motion
+            // of the two contact pads and use touchpad click as an explicit tap.
+            dualSense.touchpadPrimary.valueChangedHandler = { [weak self] pad, x, y in
+                MainActor.assumeIsolated { self?.handleFallbackTouch(index: 0, x: x, y: y, moved: pad.valueChangedHandler != nil) }
+            }
+            dualSense.touchpadSecondary.valueChangedHandler = { [weak self] pad, x, y in
+                MainActor.assumeIsolated { self?.handleFallbackTouch(index: 1, x: x, y: y, moved: pad.valueChangedHandler != nil) }
+            }
+            dualSense.touchpadButton.pressedChangedHandler = { [weak self] _, _, pressed in
+                guard pressed else { return }
+                MainActor.assumeIsolated { self?.emitGesture(.tap) }
+            }
+        }
     }
 
     private func configureTouchpad(_ touchpad: GCControllerTouchpad?, index: Int) {
@@ -633,6 +721,40 @@ final class ControllerFeatureService: ObservableObject {
         }
     }
 
+    private func handleFallbackTouch(index: Int, x: Float, y: Float, moved: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let position = ControllerVector2(x: x, y: y)
+        if index == 0 {
+            if !touchRuntime.primaryActive {
+                touchRuntime.pendingTapTask?.cancel()
+                touchRuntime.beganAt = now
+                touchRuntime.startPosition = position
+            }
+            touchRuntime.primaryActive = true
+            touchRuntime.currentPosition = position
+        } else {
+            touchRuntime.secondaryActive = true
+            touchRuntime.secondFingerSeen = true
+        }
+        // Direction-pad fallback has no true up event; expire an inferred
+        // contact shortly after coordinate changes stop.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            await MainActor.run {
+                guard let self else { return }
+                if index == 0, self.touchRuntime.primaryActive {
+                    self.finishPrimaryTouch(at: ProcessInfo.processInfo.systemUptime, endPosition: self.touchRuntime.currentPosition)
+                    self.touchRuntime.primaryActive = false
+                } else if index == 1 {
+                    self.touchRuntime.secondaryActive = false
+                }
+                self.publishCurrentSnapshot()
+            }
+        }
+        publishCurrentSnapshot()
+        _ = moved
+    }
+
     private func handleTouch(index: Int, phase: GCControllerTouchpad.TouchState, x: Float, y: Float) {
         let now = ProcessInfo.processInfo.systemUptime
         let position = ControllerVector2(x: x, y: y)
@@ -640,6 +762,7 @@ final class ControllerFeatureService: ObservableObject {
         if index == 0 {
             switch phase {
             case .down:
+                touchRuntime.pendingTapTask?.cancel()
                 touchRuntime.beganAt = now
                 touchRuntime.startPosition = position
                 touchRuntime.currentPosition = position
@@ -677,14 +800,15 @@ final class ControllerFeatureService: ObservableObject {
         let distance = (deltaX * deltaX + deltaY * deltaY).squareRoot()
         let config = settings.touchpad
 
-        if touchRuntime.secondFingerSeen, duration <= config.tapMaximumDuration {
-            emitGesture(.twoFingerTap)
-        } else if distance >= config.swipeMinimumDistance {
+        if distance >= config.swipeMinimumDistance {
             if abs(deltaX) > abs(deltaY) {
                 emitGesture(deltaX > 0 ? .swipeRight : .swipeLeft)
             } else {
                 emitGesture(deltaY > 0 ? .swipeUp : .swipeDown)
             }
+        } else if touchRuntime.secondFingerSeen, duration <= config.tapMaximumDuration,
+                  distance < 0.12 {
+            emitGesture(.twoFingerTap)
         } else if duration >= config.longPressDuration {
             emitGesture(.longPress)
         } else if duration <= config.tapMaximumDuration {

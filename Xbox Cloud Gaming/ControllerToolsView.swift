@@ -25,7 +25,7 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
 struct ControllerToolsView: View {
     @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var service: ControllerFeatureService
-    @State private var section: ControllerToolSection = .overview
+    @State private var section: ControllerToolSection = .presets
 
     var body: some View {
         NavigationSplitView {
@@ -35,7 +35,7 @@ struct ControllerToolsView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 175, ideal: 205, max: 230)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 240)
         } detail: {
             ScrollView {
                 Group {
@@ -52,10 +52,18 @@ struct ControllerToolsView: View {
                 .padding(20)
             }
         }
+        .navigationTitle("Controller Tools")
         .frame(minWidth: 860, minHeight: 600)
-        .background(.ultraThinMaterial)
-        .onAppear { browser.setGamepadPollingPaused(true); service.startPolling() }
-        .onDisappear { browser.setGamepadPollingPaused(false) }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            browser.setGamepadPollingPaused(true)
+            service.setControllerToolsActive(true)
+            service.startPolling()
+        }
+        .onDisappear {
+            service.setControllerToolsActive(false)
+            browser.setGamepadPollingPaused(false)
+        }
     }
 
     private var batteryText: String {
@@ -178,7 +186,9 @@ struct ControllerToolsView: View {
             valueSlider("Horizontal sensitivity", value: gyroSensitivityX, range: 0.1...3, format: { String(format: "%.1fx", $0) })
             valueSlider("Vertical sensitivity", value: gyroSensitivityY, range: 0.1...3, format: { String(format: "%.1fx", $0) })
             valueSlider("Motion deadzone", value: gyroDeadzone, range: 0...0.2, format: { String(format: "%.2f", $0) })
-            Button("Recenter Motion") { service.updateSettings { $0.gyro.mode = $0.gyro.mode } }
+            Toggle("Invert horizontal", isOn: gyroInvertX)
+            Toggle("Invert vertical", isOn: gyroInvertY)
+            Button("Recenter Motion") { service.recenterMotion() }
 
             Divider()
             Toggle("Enable touchpad gestures", isOn: touchpadEnabled)
@@ -302,6 +312,8 @@ struct ControllerToolsView: View {
     private var gyroSensitivityX: Binding<Double> { Binding(get: { Double(service.settings.gyro.sensitivityX) }, set: { value in service.updateSettings { $0.gyro.sensitivityX = Float(value) } }) }
     private var gyroSensitivityY: Binding<Double> { Binding(get: { Double(service.settings.gyro.sensitivityY) }, set: { value in service.updateSettings { $0.gyro.sensitivityY = Float(value) } }) }
     private var gyroDeadzone: Binding<Double> { Binding(get: { Double(service.settings.gyro.deadzone) }, set: { value in service.updateSettings { $0.gyro.deadzone = Float(value) } }) }
+    private var gyroInvertX: Binding<Bool> { Binding(get: { service.settings.gyro.invertX }, set: { value in service.updateSettings { $0.gyro.invertX = value } }) }
+    private var gyroInvertY: Binding<Bool> { Binding(get: { service.settings.gyro.invertY }, set: { value in service.updateSettings { $0.gyro.invertY = value } }) }
     private var touchpadEnabled: Binding<Bool> { Binding(get: { service.settings.touchpad.isEnabled }, set: { value in service.updateSettings { $0.touchpad.isEnabled = value } }) }
 
     private func touchpadAction(for gesture: TouchpadGesture) -> Binding<ControllerNativeAction> {
@@ -325,15 +337,18 @@ struct ControllerToolsView: View {
             settings.categoryPreset.selectedPreset = preset
             switch preset {
             case .racing:
-                settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .firmResistance; settings.adaptiveTriggers.rightPreset = .softResistance; settings.haptics.intensityMultiplier = 1.1
+                settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .brakeComfort; settings.adaptiveTriggers.rightPreset = .accelerator; settings.haptics.intensityMultiplier = 1.0
+                settings.calibration.leftStick.responseCurve = .sCurve(strength: 0.28)
             case .simulation:
                 settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .bow; settings.adaptiveTriggers.rightPreset = .bow; settings.haptics.intensityMultiplier = 0.9
+                settings.calibration.leftStick.responseCurve = .sCurve(strength: 0.45)
             case .shooter:
-                settings.gyro.mode = .pointer; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .weapon; settings.haptics.intensityMultiplier = 1.15
+                settings.gyro.mode = .pointer; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .automaticRecoil; settings.haptics.intensityMultiplier = 1.15
+                settings.calibration.rightStick.responseCurve = .exponential(exponent: 1.25)
             case .platformer:
-                settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .softResistance; settings.haptics.intensityMultiplier = 0.9
+                settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .platformerEndStop; settings.adaptiveTriggers.rightPreset = .platformerEndStop; settings.haptics.intensityMultiplier = 0.9
             case .story:
-                settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .softResistance; settings.haptics.intensityMultiplier = 1.0
+                settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .cinematic; settings.adaptiveTriggers.rightPreset = .cinematic; settings.haptics.intensityMultiplier = 1.0
             case .custom: break
             }
         }

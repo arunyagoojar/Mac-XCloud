@@ -21,6 +21,14 @@ struct SpikeReport: Equatable {
     var messages: [String] = []
 }
 
+enum ControllerInputOwner: Equatable {
+    case none
+    case stream
+    case settings
+    case controllerTools
+    case profile(ProfileKind)
+}
+
 @MainActor
 final class WindowCloseDelegate: NSObject, NSWindowDelegate {
     private let onClose: () -> Void
@@ -65,6 +73,8 @@ final class BrowserModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var loadingTimeout: DispatchWorkItem?
     private var macroFields: [String: Double] = [:]
+    private(set) var controllerInputOwner: ControllerInputOwner = .none
+    private var focusObservers: [NSObjectProtocol] = []
     lazy var settingsModel = SettingsModel(browser: self)
 
     weak var webView: WKWebView?
@@ -73,9 +83,12 @@ final class BrowserModel: ObservableObject {
         controllerInput.onToggleOverlay = { [weak self] in
             self?.openSettingsWindow()
         }
-        // UI controller input is live only while the settings window is open.
+        // UI controller input is routed only to the active/key native window.
         controllerInput.isUIInputEnabled = { [weak self] in
-            self?.settingsWindow?.isVisible == true
+            self?.controllerInputOwner == .settings
+        }
+        controllerInput.isSettingsShortcutEnabled = { [weak self] in
+            self?.controllerInputOwner == .stream
         }
         // Auto-hide the mouse cursor while a controller is connected.
         controllerInput.onPresenceChange = { [weak self] connected in
@@ -91,9 +104,13 @@ final class BrowserModel: ObservableObject {
             }
             .store(in: &cancellables)
         controllerInput.start()
-        controllerFeatures.onShortcutAction = { [weak self] action in self?.handleNativeAction(action) }
+        controllerFeatures.onShortcutAction = { [weak self] action in
+            guard self?.controllerInputOwner == .stream else { return }
+            self?.handleNativeAction(action)
+        }
         controllerFeatures.onNativeInputState = { [weak self] snapshot in self?.sendNativeInput(snapshot) }
         controllerFeatures.onMacroButtonAction = { [weak self] control, isPressed in
+            guard self?.controllerInputOwner == .stream else { return }
             self?.setMacroField(control, isPressed: isPressed)
         }
         controllerFeatures.startPolling(interval: 1.0 / 60.0)
@@ -107,6 +124,14 @@ final class BrowserModel: ObservableObject {
         }
 
         let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSWindow.willCloseNotification, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+            focusObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.recomputeControllerOwner()
+                    DispatchQueue.main.async { self?.recomputeControllerOwner() }
+                }
+            })
+        }
         center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
         }
@@ -172,6 +197,7 @@ final class BrowserModel: ObservableObject {
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = "Settings"
+            window.identifier = NSUserInterfaceItemIdentifier("xcg-settings")
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
             window.center()
@@ -202,6 +228,7 @@ final class BrowserModel: ObservableObject {
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = "Controller Tools"
+            window.identifier = NSUserInterfaceItemIdentifier("xcg-controller-tools")
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
             let closeDelegate = WindowCloseDelegate { [weak self] in
@@ -221,7 +248,43 @@ final class BrowserModel: ObservableObject {
     }
 
     func setGamepadPollingPaused(_ paused: Bool) {
-        evaluateJS("try { if (window.BX_EXPOSED) window.BX_EXPOSED.disableGamepadPolling = \(paused); 'ok' } catch (e) { 'err' }")
+        evaluateJS("try { if (window.BxCBridge) BxCBridge.setGamepadPollingPaused(\(paused)); else if (window.BX_EXPOSED) window.BX_EXPOSED.disableGamepadPolling = \(paused); 'ok' } catch (e) { 'err' }")
+    }
+
+    private func owner(for window: NSWindow?) -> ControllerInputOwner {
+        guard NSApp.isActive, let window else { return .none }
+        let root = window.sheetParent ?? window
+        switch root.identifier?.rawValue {
+        case "xcg-main": return .stream
+        case "xcg-settings": return .settings
+        case "xcg-controller-tools": return .controllerTools
+        case let value? where value.hasPrefix("xcg-profile-"):
+            let raw = String(value.dropFirst("xcg-profile-".count))
+            return ProfileKind(rawValue: raw).map(ControllerInputOwner.profile) ?? .none
+        default: return .none
+        }
+    }
+
+    private func recomputeControllerOwner() {
+        transitionControllerOwner(to: owner(for: NSApp.keyWindow))
+    }
+
+    private func transitionControllerOwner(to next: ControllerInputOwner) {
+        guard next != controllerInputOwner else { return }
+        let previous = controllerInputOwner
+        controllerInputOwner = next
+
+        if previous == .stream, next != .stream {
+            macroFields.removeAll()
+            evaluateJS("try { BxCBridge.updateNativeInput({ reset:true, enabled:false }); 'ok' } catch(e) { 'err' }")
+        }
+        switch next {
+        case .stream:
+            setGamepadPollingPaused(false)
+        case .settings, .controllerTools, .profile, .none:
+            setGamepadPollingPaused(true)
+        }
+        if next != .controllerTools { controllerFeatures.cancelCalibration() }
     }
 
     func openProfileEditor(_ kind: ProfileKind) {
@@ -230,6 +293,7 @@ final class BrowserModel: ObservableObject {
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = kind.title
+            window.identifier = NSUserInterfaceItemIdentifier("xcg-profile-\(kind.rawValue)")
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
             window.center()
@@ -287,32 +351,16 @@ final class BrowserModel: ObservableObject {
     private var lastNativeInputSentAt: TimeInterval = 0
 
     func sendNativeInput(_ snapshot: ControllerInputSnapshot) {
+        guard controllerInputOwner == .stream else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastNativeInputSentAt >= (1.0 / 60.0) else { return }
         lastNativeInputSentAt = now
 
         let gyroSettings = controllerFeatures.settings.gyro
-        var gyroX: Double = 0
-        var gyroY: Double = 0
-        if let motion = snapshot.motion, gyroSettings.mode != .off {
-            let active = gyroSettings.mode != .pointer || snapshot.leftTrigger > 0.15
-            if active {
-                switch gyroSettings.mode {
-                case .raw: // steering from controller roll/gravity
-                    gyroX = motion.gravity.x * Double(gyroSettings.sensitivityX)
-                    gyroY = 0
-                case .rightStick, .pointer:
-                    gyroX = motion.rotationRate.y * Double(gyroSettings.sensitivityX) * 0.08
-                    gyroY = -motion.rotationRate.x * Double(gyroSettings.sensitivityY) * 0.08
-                case .off:
-                    break
-                }
-                if abs(gyroX) < Double(gyroSettings.deadzone) { gyroX = 0 }
-                if abs(gyroY) < Double(gyroSettings.deadzone) { gyroY = 0 }
-                if gyroSettings.invertX { gyroX *= -1 }
-                if gyroSettings.invertY { gyroY *= -1 }
-            }
-        }
+        let processedGyro = controllerFeatures.processedGyroOutput
+        let gyroActive = gyroSettings.mode != .pointer || snapshot.leftTrigger > 0.15
+        let gyroX = gyroActive ? Double(processedGyro.x) : 0
+        let gyroY = gyroActive ? Double(processedGyro.y) : 0
 
         let calibration = controllerFeatures.settings.calibration
         let state: [String: Any] = [
@@ -383,6 +431,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func handleNativeAction(_ action: ControllerNativeAction) {
+        guard controllerInputOwner == .stream else { return }
         switch action {
         case .none: break
         case .toggleSettings: openSettingsWindow()
@@ -530,8 +579,8 @@ final class BrowserModel: ObservableObject {
         case "bridge-ready":
             note("Better xCloud bridge ready")
         case "native-rumble":
-            let left = Float(body["leftMotorPercent"] as? Double ?? 0)
-            let right = Float(body["rightMotorPercent"] as? Double ?? 0)
+            let left = Float(body["leftMotorPercent"] as? Double ?? 0) / 100
+            let right = Float(body["rightMotorPercent"] as? Double ?? 0) / 100
             let durationMs = body["durationMs"] as? Double ?? 150
             let intensity = min(max(max(left, right), 0), 1)
             if intensity > 0 {
