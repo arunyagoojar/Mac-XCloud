@@ -103,7 +103,6 @@ struct AdaptiveTriggerPresetManager: View {
             store.saveTriggerPreset(updated)
         }
     }
-
     private func save() {
         if let selectedID,
            let existing = store.customTriggerPresets.first(where: { $0.id == selectedID }) {
