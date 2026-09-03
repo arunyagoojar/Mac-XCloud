@@ -217,6 +217,7 @@ final class InputPresetStore: ObservableObject {
         do {
             let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                 .appendingPathComponent("Xbox Cloud data", isDirectory: true)
+            migrateFromSandboxContainer(to: base)
             rootURL = base
             try createLayout(at: base)
             storageStatus = .local(base)
@@ -626,6 +627,22 @@ final class InputPresetStore: ObservableObject {
         let result = try await browser.callAsyncJS("return JSON.stringify(await BxCBridge.captureInputPresetSettings());")
         guard let text = result as? String, let data = text.data(using: .utf8) else { throw CocoaError(.fileReadCorruptFile) }
         return try decoder().decode(BetterXCloudInputSettings.self, from: data)
+    }
+
+    /// One-time carry-over for the sandbox removal: presets saved while the
+    /// app was sandboxed live in its container and would otherwise vanish.
+    private func migrateFromSandboxContainer(to destination: URL) {
+        guard !fileManager.fileExists(atPath: destination.path) else { return }
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let container = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/\(bundleID)/Data/Library/Application Support/Xbox Cloud data", isDirectory: true)
+        guard fileManager.fileExists(atPath: container.path) else { return }
+        do {
+            try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fileManager.copyItem(at: container, to: destination)
+        } catch {
+            operationMessage = "Could not migrate old presets: \(error.localizedDescription)"
+        }
     }
 
     private func createLayout(at root: URL) throws {

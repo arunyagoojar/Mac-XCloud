@@ -34,6 +34,51 @@ struct CheckForUpdatesView: View {
     }
 }
 
+/// Adaptive-trigger mode picker for one trigger side, shown in the app's
+/// main menu bar. Checkmarks follow the live controller settings.
+struct TriggerModeMenu: View {
+    @ObservedObject var features: ControllerFeatureService
+    let side: TriggerSide
+
+    enum TriggerSide { case left, right }
+
+    private var title: String { side == .left ? "Left Trigger" : "Right Trigger" }
+
+    private var binding: Binding<AdaptiveTriggerPreset> {
+        Binding(
+            get: {
+                side == .left
+                    ? features.settings.adaptiveTriggers.leftPreset
+                    : features.settings.adaptiveTriggers.rightPreset
+            },
+            set: { mode in
+                features.updateSettings { settings in
+                    if side == .left {
+                        settings.adaptiveTriggers.leftPreset = mode
+                        settings.adaptiveTriggers.leftUsesCustom = false
+                    } else {
+                        settings.adaptiveTriggers.rightPreset = mode
+                        settings.adaptiveTriggers.rightUsesCustom = false
+                    }
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        Menu(title) {
+            Picker(title, selection: binding) {
+                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
+                    Text(mode.htmlName).tag(mode)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        }
+        .disabled(!features.capabilities.hasAdaptiveTriggers)
+    }
+}
+
 @main
 struct Mac_XCloudApp: App {
     @StateObject private var browser = BrowserModel()
@@ -57,6 +102,10 @@ struct Mac_XCloudApp: App {
             CommandMenu("Settings") {
                 Button("Open Settings…") { browser.openSettingsWindow() }
                     .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandMenu("Triggers") {
+                TriggerModeMenu(features: browser.controllerFeatures, side: .left)
+                TriggerModeMenu(features: browser.controllerFeatures, side: .right)
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
