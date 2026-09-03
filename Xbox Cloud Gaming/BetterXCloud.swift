@@ -132,7 +132,7 @@ enum BetterXCloud {
           SafariWorkaround: true,
           CheckForUpdate: true,
           EnableXcloudLogging: false,
-          EnableWebGPURenderer: false
+          EnableWebGPURenderer: true
         });
         """
         scripts.append(WKUserScript(source: flags, injectionTime: .atDocumentStart, forMainFrameOnly: true))

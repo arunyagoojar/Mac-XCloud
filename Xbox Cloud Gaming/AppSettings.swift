@@ -34,7 +34,6 @@ enum SettingKind {
     case profileLauncher(ProfileKind)
     case forcedMKBGames
     case pingTest
-    case discordClientID
 }
 
 struct SettingDef: Identifiable {
@@ -157,19 +156,21 @@ struct SettingsCategory: Identifiable {
                             labels: ["Off", "Bottom left", "Bottom right"],
                             defaultValue: "off")),
         ]),
+        SettingsCategory(id: "clarity", title: "Clarity", icon: "sparkles.rectangle.stack", rows: [
+            SettingDef(id: "app.clarityPipeline", label: "Clarity pipeline",
+                       note: "Selects a compatible renderer and clarity algorithm together. FSR 1 uses native Retina output; WebGL/WebGPU modes use Better xCloud post-processing.",
+                       scope: .stream, kind: .option(
+                            values: ["native", "fsr1", "webgl-usm", "webgl-cas", "webgpu-usm", "webgpu-cas"],
+                            labels: ["Native video (off)", "AMD FSR 1 — Retina", "WebGL 2 + Unsharp Mask", "WebGL 2 + AMD CAS", "WebGPU + Unsharp Mask (experimental)", "WebGPU + AMD CAS (experimental)"],
+                            defaultValue: "fsr1")),
+            SettingDef(id: "video.processing.mode", label: "Processing mode",
+                       note: "Quality gives the best image on Apple Silicon; Performance reduces GPU use.",
+                       scope: .stream, kind: .option(
+                            values: ["performance", "quality"],
+                            labels: ["Performance", "Quality"],
+                            defaultValue: "quality")),
+        ]),
         SettingsCategory(id: "video", title: "Video", icon: "film", rows: [
-            SettingDef(id: "app.upscaler", label: "Image upscaler",
-                       note: "AMD FSR 1 upscales the stream with edge-adaptive sampling + robust sharpening - visibly crisper at 720p or low bitrate. Applies live.",
-                       scope: .stream, kind: .option(
-                            values: ["off", "fsr1"],
-                            labels: ["Off", "AMD FSR 1"],
-                            defaultValue: "off")),
-            SettingDef(id: "video.player.type", label: "Renderer",
-                       note: "WebGL2 can be smoother on some Macs; default uses the plain video element.",
-                       scope: .stream, kind: .option(
-                            values: ["default", "webgl2", "webgpu"],
-                            labels: ["Default", "WebGL 2", "WebGPU (experimental)"],
-                            defaultValue: "default")),
             SettingDef(id: "video.maxFps", label: "Limit FPS",
                        note: "Caps the stream's frame rate.",
                        scope: .stream, kind: .range(min: 10, max: 60, step: 10, defaultValue: 60, format: { $0 >= 60 ? "Unlimited" : "\(Int($0)) fps" })),
@@ -179,18 +180,6 @@ struct SettingsCategory: Identifiable {
                             values: ["default", "low-power", "high-performance"],
                             labels: ["Default", "Battery saving", "High performance"],
                             defaultValue: "default")),
-            SettingDef(id: "video.processing", label: "Clarity boost",
-                       note: "Post-processing to sharpen the stream image.",
-                       scope: .stream, kind: .option(
-                            values: ["usm", "cas"],
-                            labels: ["Unsharp masking", "AMD FidelityFX CAS"],
-                            defaultValue: "usm")),
-            SettingDef(id: "video.processing.mode", label: "Clarity boost mode",
-                       note: "Quality looks better; performance costs less CPU.",
-                       scope: .stream, kind: .option(
-                            values: ["performance", "quality"],
-                            labels: ["Performance", "Quality"],
-                            defaultValue: "performance")),
             SettingDef(id: "video.processing.sharpness", label: "Sharpness",
                        note: "Strength of the clarity boost filter. 0 = off.",
                        scope: .stream, kind: .range(min: 0, max: 10, step: 1, defaultValue: 0, format: { $0 == 0 ? "Off" : "\(Int($0))" })),
@@ -320,9 +309,6 @@ struct SettingsCategory: Identifiable {
                        scope: .global, kind: .toggle(defaultValue: true)),
         ]),
         SettingsCategory(id: "advanced", title: "Advanced", icon: "gearshape.2", rows: [
-            SettingDef(id: "app.discordClientID", label: "Discord application ID",
-                       note: "Optional. Create a free Discord application, paste its Application ID, and restart Discord Rich Presence.",
-                       scope: .global, kind: .discordClientID),
             SettingDef(id: "block.tracking", label: "Block xCloud analytics",
                        note: "Stops the site's telemetry pings.",
                        scope: .global, kind: .toggle(defaultValue: false)),
@@ -413,13 +399,34 @@ extension SettingsModel {
     /// to localStorage, and returns both its public value and raw persisted
     /// value. The native UI and mirror update only after that succeeds.
     func write(id: String, scope: SettingScope, value: Any) {
-        if id == "app.upscaler" {
-            // App-local upscaler mode (not a Better xCloud preference).
-            let mode = (value as? String) ?? "off"
-            browser?.evaluateJS("try { localStorage.setItem('XCG.Upscaler', '\(mode)'); window.postMessage({ type: 'xcg-upscaler', mode: '\(mode)' }, '*'); 'ok' } catch (e) { 'err' }")
-            globalValues[id] = mode
-            NativeSettingsMirror.save(mode, for: id, scope: .global)
-            saveMessage = mode == "fsr1" ? "AMD FSR 1 active on the current stream" : "Upscaler off"
+        if id == "app.clarityPipeline" {
+            let pipeline = (value as? String) ?? "fsr1"
+            let mode = pipeline == "fsr1" ? "fsr1" : "off"
+            let renderer: String
+            let processing: String
+            switch pipeline {
+            case "webgl-usm": renderer = "webgl2"; processing = "usm"
+            case "webgl-cas": renderer = "webgl2"; processing = "cas"
+            case "webgpu-usm": renderer = "webgpu"; processing = "usm"
+            case "webgpu-cas": renderer = "webgpu"; processing = "cas"
+            default: renderer = "default"; processing = "usm"
+            }
+            browser?.evaluateJS("""
+            try {
+              localStorage.setItem('XCG.Upscaler', '\(mode)');
+              window.postMessage({ type: 'xcg-upscaler', mode: '\(mode)' }, '*');
+              BxCBridge.setStream('video.player.type', '\(renderer)');
+              BxCBridge.setStream('video.processing', '\(processing)');
+              'ok'
+            } catch (e) { 'err' }
+            """)
+            globalValues[id] = pipeline
+            streamValues["video.player.type"] = renderer
+            streamValues["video.processing"] = processing
+            NativeSettingsMirror.save(pipeline, for: id, scope: .global)
+            NativeSettingsMirror.save(renderer, for: "video.player.type", scope: .stream)
+            NativeSettingsMirror.save(processing, for: "video.processing", scope: .stream)
+            saveMessage = "Clarity pipeline saved"
             objectWillChange.send()
             return
         }
@@ -645,7 +652,20 @@ final class SettingsModel: ObservableObject {
                 self.bridgeAvailable = root["bridge"] as? Bool ?? false
                 self.globalValues = root["global"] as? [String: Any] ?? [:]
                 self.streamValues = root["stream"] as? [String: Any] ?? [:]
-                self.globalValues["app.upscaler"] = root["upscaler"] as? String ?? "off"
+                let upscaler = root["upscaler"] as? String ?? "off"
+                let renderer = self.streamValues["video.player.type"] as? String ?? "default"
+                let processing = self.streamValues["video.processing"] as? String ?? "usm"
+                let clarity: String
+                if upscaler == "fsr1" {
+                    clarity = "fsr1"
+                } else if renderer == "webgpu" {
+                    clarity = processing == "cas" ? "webgpu-cas" : "webgpu-usm"
+                } else if renderer == "webgl2" {
+                    clarity = processing == "cas" ? "webgl-cas" : "webgl-usm"
+                } else {
+                    clarity = "native"
+                }
+                self.globalValues["app.clarityPipeline"] = clarity
 
                 if let selected = root["selectedRegion"] as? [String: Any] {
                     self.resolvedRegionName = (selected["displayName"] as? String) ?? (selected["shortName"] as? String)

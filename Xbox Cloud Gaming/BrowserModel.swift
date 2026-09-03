@@ -214,8 +214,6 @@ final class BrowserModel: ObservableObject {
                 self?.currentGameTitle = info["title"] as? String ?? ""
                 self?.currentRegion = info["region"] as? String ?? ""
                 self?.statusController?.refreshMenu()
-                DiscordRPC.shared.update(playing: self?.isStreaming ?? false,
-                                         title: self?.currentGameTitle ?? "")
             }
         }
     }
