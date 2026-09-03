@@ -373,21 +373,11 @@ final class BrowserModel: ObservableObject {
         // sticks, triggers and remapping. Native contributes only gyro and
         // finite macro deltas, preventing remapped shooter controls from being
         // overwritten by a stale raw native snapshot.
-        let axes: [Double]
-        if gyroSettings.mode == .raw {
-            axes = [max(-1, min(1, gyroX)), 0, 0, 0]
-        } else {
-            axes = [0, 0, max(-1, min(1, gyroX)), max(-1, min(1, gyroY))]
-        }
-        let axesData = try? JSONSerialization.data(withJSONObject: axes)
-        let axesJSON = axesData.flatMap { String(data: $0, encoding: .utf8) } ?? "[0,0,0,0]"
-        evaluateJS("try { if (window.__xcgSetNativeAxes) window.__xcgSetNativeAxes({ enabled: \(gyroSettings.mode != .off), axes: \(axesJSON) }); 'ok' } catch(e) { 'err' }")
-
         let state: [String: Any] = [
-            // Gyro is delivered by the document-start Gamepad axis wrapper;
-            // this bridge remains responsible for finite macro overlays only.
-            "enabled": !macroFields.isEmpty,
-            "gyro": [:],
+            "enabled": gyroSettings.mode != .off || !macroFields.isEmpty,
+            "gyro": gyroSettings.mode == .raw
+                ? ["LeftThumbXAxis": max(-1, min(1, gyroX))]
+                : ["RightThumbXAxis": max(-1, min(1, gyroX)), "RightThumbYAxis": max(-1, min(1, gyroY))],
             "suppressBrowserRumble": controllerFeatures.settings.haptics.mode != .standard,
             "preset": controllerFeatures.settings.categoryPreset.selectedPreset.rawValue,
             "macro": macroFields,
