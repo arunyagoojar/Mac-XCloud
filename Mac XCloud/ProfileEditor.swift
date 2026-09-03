@@ -1,6 +1,6 @@
 //
 //  ProfileEditor.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Native editors for Better xCloud's IndexedDB profile stores.
 //

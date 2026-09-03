@@ -1,6 +1,6 @@
 //
 //  LoadingViews.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Reusable presentation and state types for browser loading.
 //

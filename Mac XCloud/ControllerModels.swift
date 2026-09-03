@@ -1,6 +1,6 @@
 //
 //  ControllerModels.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Typed, persistable models used by the native controller feature layer.
 //

@@ -1,6 +1,6 @@
 //
 //  SettingsWindow.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  The native macOS settings window: categories on the left, settings on the
 //  right, frosted-transparent background. Mouse/keyboard first; controller

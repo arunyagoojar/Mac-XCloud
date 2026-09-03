@@ -1,6 +1,6 @@
 //
 //  BetterXCloud.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Injects the MIT-licensed Better xCloud userscript (https://github.com/redphx/better-xcloud)
 //  into xbox.com/play pages at document-start, and appends a small bridge

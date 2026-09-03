@@ -1,6 +1,6 @@
 //
 //  ProfileLaunchRows.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Native entry points for Better xCloud profile managers and the bundled
 //  forced-native-MKB game list.

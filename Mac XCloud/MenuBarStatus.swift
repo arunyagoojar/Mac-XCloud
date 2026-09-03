@@ -60,6 +60,29 @@ final class MenuBarStatusController {
         }
         presets.submenu = presetMenu
         menu.addItem(presets)
+
+        // Adaptive trigger mode is user-settable from the menu bar, but only
+        // while a DualSense-style controller with adaptive triggers is attached.
+        let triggersSupported = browser.controllerFeatures.capabilities.hasAdaptiveTriggers
+        let triggerSides: [(title: String, side: TriggerSide)] = [
+            ("Left Trigger", .left),
+            ("Right Trigger", .right),
+        ]
+        for side in triggerSides {
+            let header = NSMenuItem(title: side.title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for mode in AdaptiveTriggerPreset.allCases {
+                let modeItem = NSMenuItem(title: mode.htmlName, action: triggersSupported ? #selector(selectTriggerMode(_:)) : nil, keyEquivalent: "")
+                if triggersSupported { modeItem.target = self }
+                modeItem.representedObject = "\(side.side.rawValue)|\(mode.rawValue)"
+                let current = triggerMode(for: side.side)
+                modeItem.state = current == mode ? .on : .off
+                submenu.addItem(modeItem)
+            }
+            header.submenu = submenu
+            menu.addItem(header)
+        }
+        menu.addItem(.separator())
         let settings = NSMenuItem(title: "Open Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -80,6 +103,33 @@ final class MenuBarStatusController {
         let item = NSMenuItem(title: "\(label): \(value)", action: nil, keyEquivalent: "")
         item.isEnabled = false
         menu.addItem(item)
+    }
+
+    private enum TriggerSide: String {
+        case left, right
+    }
+
+    private func triggerMode(for side: TriggerSide) -> AdaptiveTriggerPreset {
+        let triggers = browser?.controllerFeatures.settings.adaptiveTriggers
+        return side == .left ? (triggers?.leftPreset ?? .off) : (triggers?.rightPreset ?? .off)
+    }
+
+    @objc private func selectTriggerMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        let parts = raw.split(separator: "|")
+        guard parts.count == 2,
+              let side = TriggerSide(rawValue: String(parts[0])),
+              let mode = AdaptiveTriggerPreset(rawValue: String(parts[1])) else { return }
+        browser?.controllerFeatures.updateSettings { settings in
+            if side == .left {
+                settings.adaptiveTriggers.leftPreset = mode
+                settings.adaptiveTriggers.leftUsesCustom = false
+            } else {
+                settings.adaptiveTriggers.rightPreset = mode
+                settings.adaptiveTriggers.rightUsesCustom = false
+            }
+        }
+        refreshMenu()
     }
 
     @objc private func selectPreset(_ sender: NSMenuItem) {

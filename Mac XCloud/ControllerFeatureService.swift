@@ -1,6 +1,6 @@
 //
 //  ControllerFeatureService.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Native GameController/CoreHaptics feature foundation. This service observes
 //  physical controller state; it never writes into a live controller snapshot or

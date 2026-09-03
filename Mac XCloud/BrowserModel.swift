@@ -1,6 +1,6 @@
 //
 //  BrowserModel.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Created by Arunya on 02/09/26.
 //
@@ -136,7 +136,6 @@ final class BrowserModel: ObservableObject {
             focusObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.recomputeControllerOwner()
-                    DispatchQueue.main.async { self?.recomputeControllerOwner() }
                 }
             })
         }
@@ -256,7 +255,13 @@ final class BrowserModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: false)
     }
 
+    private var isGamepadPollingPaused = false
+
     func setGamepadPollingPaused(_ paused: Bool) {
+        // Focus notifications can fire in bursts; repeatedly rewriting the flag
+        // in the page makes xCloud's input loop stutter. Only send real changes.
+        guard paused != isGamepadPollingPaused else { return }
+        isGamepadPollingPaused = paused
         evaluateJS("try { if (window.BxCBridge) BxCBridge.setGamepadPollingPaused(\(paused)); else if (window.BX_EXPOSED) window.BX_EXPOSED.disableGamepadPolling = \(paused); 'ok' } catch (e) { 'err' }")
     }
 
@@ -307,8 +312,13 @@ final class BrowserModel: ObservableObject {
 
     private func reconcileControllerOwnerState() {
         switch controllerInputOwner {
-        case .stream: setGamepadPollingPaused(false)
-        case .settings, .controllerTools, .profile, .none: setGamepadPollingPaused(true)
+        case .stream, .none:
+            // A transient loss of key window (fullscreen transitions, system
+            // dialogs) must not pause the page's gamepad polling; only native
+            // tooling windows take ownership of input.
+            setGamepadPollingPaused(false)
+        case .settings, .controllerTools, .profile:
+            setGamepadPollingPaused(true)
         }
         controllerFeatures.setControllerToolsActive(controllerInputOwner == .controllerTools)
     }
@@ -457,6 +467,9 @@ final class BrowserModel: ObservableObject {
         inputPresets.invalidateWebOperationsForNavigation()
         controllerFeatures.resetMacros()
         bridgeReady = false
+        // The new page starts with polling enabled; clear the cache so the
+        // next ownership reconcile re-sends the correct flag.
+        isGamepadPollingPaused = false
         isLoading = true
         loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
         loadingTimeout?.cancel()

@@ -1,6 +1,6 @@
 //
 //  BootVideoView.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 
 import AVFoundation

@@ -1,6 +1,6 @@
 //
 //  WebView.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Created by Arunya on 02/09/26.
 //

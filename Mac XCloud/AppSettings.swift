@@ -1,6 +1,6 @@
 //
 //  AppSettings.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  The app's settings catalog: every Better xCloud setting the app exposes,
 //  with labels and notes, plus the model that reads/writes them through the

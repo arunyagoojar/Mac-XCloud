@@ -11,9 +11,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		238EB1AC3048952700092F4F /* Xbox Cloud Gaming */ = {
+		238EB1AC3048952700092F4F /* Mac XCloud */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "Xbox Cloud Gaming";
+			path = "Mac XCloud";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +32,7 @@
 		238EB1A13048952700092F4F = {
 			isa = PBXGroup;
 			children = (
-				238EB1AC3048952700092F4F /* Xbox Cloud Gaming */,
+				238EB1AC3048952700092F4F /* Mac XCloud */,
 				238EB1AB3048952700092F4F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,9 +48,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		238EB1A93048952700092F4F /* Xbox Cloud Gaming */ = {
+		238EB1A93048952700092F4F /* Mac XCloud */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 238EB1B53048952900092F4F /* Build configuration list for PBXNativeTarget "Xbox Cloud Gaming" */;
+			buildConfigurationList = 238EB1B53048952900092F4F /* Build configuration list for PBXNativeTarget "Mac XCloud" */;
 			buildPhases = (
 				238EB1A63048952700092F4F /* Sources */,
 				238EB1A73048952700092F4F /* Frameworks */,
@@ -61,12 +61,12 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				238EB1AC3048952700092F4F /* Xbox Cloud Gaming */,
+				238EB1AC3048952700092F4F /* Mac XCloud */,
 			);
-			name = "Xbox Cloud Gaming";
+			name = "Mac XCloud";
 			packageProductDependencies = (
 			);
-			productName = "Xbox Cloud Gaming";
+			productName = "Mac XCloud";
 			productReference = 238EB1AA3048952700092F4F /* Mac Xcloud.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -85,7 +85,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 238EB1A53048952700092F4F /* Build configuration list for PBXProject "Xbox Cloud Gaming" */;
+			buildConfigurationList = 238EB1A53048952700092F4F /* Build configuration list for PBXProject "Mac XCloud" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -99,7 +99,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				238EB1A93048952700092F4F /* Xbox Cloud Gaming */,
+				238EB1A93048952700092F4F /* Mac XCloud */,
 			);
 		};
 /* End PBXProject section */
@@ -244,8 +244,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "Xbox Cloud Gaming.entitlements";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_ENTITLEMENTS = "Mac XCloud.entitlements";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
@@ -270,7 +270,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MARKETING_VERSION = 1;
-				PRODUCT_BUNDLE_IDENTIFIER = "cc.eu.arunya.Xbox-Cloud-Gaming";
+				PRODUCT_BUNDLE_IDENTIFIER = "cc.eu.arunya.Mac-X-cloud";
 				PRODUCT_NAME = "Mac Xcloud";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -291,8 +291,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "Xbox Cloud Gaming.entitlements";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_ENTITLEMENTS = "Mac XCloud.entitlements";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_APP_SANDBOX = YES;
@@ -317,7 +317,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MARKETING_VERSION = 1;
-				PRODUCT_BUNDLE_IDENTIFIER = "cc.eu.arunya.Xbox-Cloud-Gaming";
+				PRODUCT_BUNDLE_IDENTIFIER = "cc.eu.arunya.Mac-X-cloud";
 				PRODUCT_NAME = "Mac Xcloud";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -336,7 +336,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		238EB1A53048952700092F4F /* Build configuration list for PBXProject "Xbox Cloud Gaming" */ = {
+		238EB1A53048952700092F4F /* Build configuration list for PBXProject "Mac XCloud" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				238EB1B33048952900092F4F /* Debug */,
@@ -345,7 +345,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		238EB1B53048952900092F4F /* Build configuration list for PBXNativeTarget "Xbox Cloud Gaming" */ = {
+		238EB1B53048952900092F4F /* Build configuration list for PBXNativeTarget "Mac XCloud" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				238EB1B63048952900092F4F /* Debug */,

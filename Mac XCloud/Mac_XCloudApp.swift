@@ -1,6 +1,6 @@
 //
-//  Xbox_Cloud_GamingApp.swift
-//  Xbox Cloud Gaming
+//  Mac_XCloudApp.swift
+//  Mac XCloud
 //
 //  Created by Arunya on 02/09/26.
 //
@@ -8,7 +8,7 @@
 import SwiftUI
 
 @main
-struct Xbox_Cloud_GamingApp: App {
+struct Mac_XCloudApp: App {
     @StateObject private var browser = BrowserModel()
 
     var body: some Scene {

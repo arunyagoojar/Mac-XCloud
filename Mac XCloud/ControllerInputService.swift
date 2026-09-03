@@ -1,6 +1,6 @@
 //
 //  ControllerInputService.swift
-//  Xbox Cloud Gaming
+//  Mac XCloud
 //
 //  Polls GCController for app-level input that doesn't belong to the game:
 //  double-pressing the Home/PS button toggles the settings overlay, and while
