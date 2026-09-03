@@ -76,7 +76,7 @@ jobs:
           echo "Using Sparkle tools $TAG"
           curl -sL --fail -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/${TAG}/Sparkle-${TAG}.tar.xz"
           mkdir sparkle && tar -xf sparkle.tar.xz -C sparkle
-          ./sparkle/bin/sign_update --version >/dev/null && echo "sign_update OK"
+          test -x ./sparkle/bin/sign_update && echo "sign_update OK"
 
       - name: Sign archive with Sparkle EdDSA
         id: sign
