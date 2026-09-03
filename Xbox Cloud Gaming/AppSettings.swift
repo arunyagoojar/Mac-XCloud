@@ -85,7 +85,7 @@ struct SettingsCategory: Identifiable {
                             labels: ["Default (auto)", "720p", "1080p", "1080p (HQ)"],
                             defaultValue: "auto")),
             SettingDef(id: "stream.video.codecProfile", label: "Visual quality",
-                       note: "Higher quality uses a better H264 profile (when the browser supports it).",
+                       note: "Chooses the H.264 codec profile for new streams. High gives the best compression quality. Select it, then use Reload to Apply.",
                        scope: .global, kind: .option(
                             values: ["default", "low", "normal", "high"],
                             labels: ["Default", "Low", "Normal", "High"],
@@ -157,8 +157,11 @@ struct SettingsCategory: Identifiable {
                             defaultValue: "off")),
         ]),
         SettingsCategory(id: "clarity", title: "Clarity", icon: "sparkles.rectangle.stack", rows: [
+            SettingDef(id: "app.clarityInfo", label: "Recommended for this M1 Mac",
+                       note: "AMD FSR 1 — Retina is best for 720p or compressed streams: EASU reconstructs edges at Retina resolution, then RCAS sharpens. For native 1080p/1440p streams, WebGL 2 + AMD CAS is lighter and avoids unnecessary scaling.",
+                       scope: .stream, kind: .info(text: "FSR 1 for low-resolution · WebGL2 + CAS for high-resolution")),
             SettingDef(id: "app.clarityPipeline", label: "Clarity pipeline",
-                       note: "Selects a compatible renderer and clarity algorithm together. FSR 1 uses native Retina output; WebGL/WebGPU modes use Better xCloud post-processing.",
+                       note: "One setting selects a compatible renderer and algorithm. WebGL/WebGPU changes require Reload to Apply. FSR 1 applies live.",
                        scope: .stream, kind: .option(
                             values: ["native", "fsr1", "webgl-usm", "webgl-cas", "webgpu-usm", "webgpu-cas"],
                             labels: ["Native video (off)", "AMD FSR 1 — Retina", "WebGL 2 + Unsharp Mask", "WebGL 2 + AMD CAS", "WebGPU + Unsharp Mask (experimental)", "WebGPU + AMD CAS (experimental)"],
@@ -426,7 +429,8 @@ extension SettingsModel {
             NativeSettingsMirror.save(pipeline, for: id, scope: .global)
             NativeSettingsMirror.save(renderer, for: "video.player.type", scope: .stream)
             NativeSettingsMirror.save(processing, for: "video.processing", scope: .stream)
-            saveMessage = "Clarity pipeline saved"
+            saveMessage = "Clarity pipeline saved — reload to apply renderer changes"
+            needsReload = pipeline != "fsr1"
             objectWillChange.send()
             return
         }
@@ -470,6 +474,9 @@ extension SettingsModel {
                     NativeSettingsMirror.save(raw, for: id, scope: .stream)
                 }
                 self.saveMessage = "Saved"
+                if scope == .global || ["stream.video.codecProfile", "video.player.type", "video.processing", "userAgent.profile"].contains(id) {
+                    self.needsReload = true
+                }
                 self.objectWillChange.send()
             }
         }
@@ -497,6 +504,7 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var resolvedRegionName: String?
     @Published var saveMessage: String?
     @Published var showForcedMKBPicker = false
+    @Published var needsReload = false
     @Published var isPingingRegions = false
     @Published var bestRegionResult: RegionPingResult?
 

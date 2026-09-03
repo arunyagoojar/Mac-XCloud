@@ -55,13 +55,26 @@ struct SettingsRootView: View {
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Better xCloud engine v6.7.12")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text("MIT License · redphx/better-xcloud")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                if model.needsReload {
+                    Button {
+                        browser.reload()
+                        model.needsReload = false
+                        browser.closeSettingsWindow()
+                    } label: {
+                        Label("Reload to Apply", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Better xCloud engine v6.7.12")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("MIT License · redphx/better-xcloud")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(12)
         }

@@ -50,9 +50,57 @@ enum BetterXCloud {
 
     static let resourceURL = Bundle.main.url(forResource: "better-xcloud", withExtension: "js")
 
+    /// Safe WebKit feature shims. enumerateDevices returns an empty list until
+    /// the app ever exposes capture devices; xCloud handles an empty list but
+    /// crashes when mediaDevices itself is undefined.
+    static let compatibilityScript = #"""
+    (function () {
+      try {
+        if (!navigator.mediaDevices) {
+          var fake = {
+            enumerateDevices: function () { return Promise.resolve([]); },
+            getUserMedia: function () { return Promise.reject(new DOMException('Media capture is unavailable', 'NotAllowedError')); },
+            addEventListener: function () {}, removeEventListener: function () {}
+          };
+          Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: fake });
+        } else if (typeof navigator.mediaDevices.enumerateDevices !== 'function') {
+          navigator.mediaDevices.enumerateDevices = function () { return Promise.resolve([]); };
+        }
+      } catch (e) {}
+
+      try {
+        var original = RTCRtpReceiver.getCapabilities.bind(RTCRtpReceiver);
+        RTCRtpReceiver.getCapabilities = function (kind) {
+          var caps = original(kind) || { codecs: [], headerExtensions: [] };
+          if (kind !== 'video') return caps;
+          var codecs = Array.isArray(caps.codecs) ? caps.codecs.slice() : [];
+          var profiles = [
+            'profile-level-id=42e01f;packetization-mode=1',
+            'profile-level-id=4d401f;packetization-mode=1',
+            'profile-level-id=64001f;packetization-mode=1'
+          ];
+          profiles.forEach(function (fmtp) {
+            var prefix = fmtp.substring(0, 18).toLowerCase();
+            if (!codecs.some(function (c) { return (c.mimeType || '').toLowerCase() === 'video/h264' && (c.sdpFmtpLine || '').toLowerCase().indexOf(prefix) !== -1; })) {
+              codecs.push({ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: fmtp });
+            }
+          });
+          return Object.assign({}, caps, { codecs: codecs });
+        };
+      } catch (e) {}
+    })();
+    """#
+
     /// WKUserScripts for the main web view, in execution order.
     static func userScripts() -> [WKUserScript] {
         var scripts: [WKUserScript] = []
+
+        // 0. WebKit compatibility shims, installed before Xbox/BxC evaluate
+        //    browser features. WKWebView can omit mediaDevices entirely and
+        //    under-report decodable H.264 profiles even though AVFoundation can
+        //    decode them, which caused Xbox's error route and BxC's visual-
+        //    quality selector to normalize every choice back to Default.
+        scripts.append(WKUserScript(source: compatibilityScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         // 1. Restore the native settings mirror, then seed M1-optimized values
         //    only where neither side has a saved user choice. The app never

@@ -86,6 +86,7 @@ final class BrowserModel: ObservableObject {
     // MARK: - Main window
 
     private(set) var mainWindow: NSWindow?
+    private var escapeMonitor: Any?
 
     /// The main window is created in AppKit with its final chrome-less style
     /// mask from the start, so the game content runs edge-to-edge under the
@@ -112,6 +113,14 @@ final class BrowserModel: ObservableObject {
                 .ignoresSafeArea()
         )
         mainWindow = window
+        if escapeMonitor == nil {
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard event.keyCode == 53, let window = self?.mainWindow,
+                      window.styleMask.contains(.fullScreen) else { return event }
+                window.toggleFullScreen(nil)
+                return nil
+            }
+        }
         window.makeKeyAndOrderFront(nil)
     }
 

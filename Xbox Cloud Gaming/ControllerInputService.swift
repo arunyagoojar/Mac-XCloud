@@ -30,7 +30,8 @@ final class ControllerInputService: ObservableObject {
     @Published private(set) var batteryStateText: String?
 
     private var timer: Timer?
-    private var lastHomeEdge: TimeInterval = 0
+    private var l3r3HoldStarted: TimeInterval?
+    private var l3r3Triggered = false
     private var previous = ButtonState()
 
     private struct ButtonState {
@@ -117,15 +118,20 @@ final class ControllerInputService: ObservableObject {
 
         let now = CACurrentMediaTime()
 
-        // Double-press Home/PS toggles the overlay — works everywhere.
         let homePressed = pad.buttonHome?.isPressed ?? false
-        if homePressed, !previous.home {
-            if now - lastHomeEdge < 0.45 {
-                lastHomeEdge = 0
+
+        // Deliberate global shortcut: hold L3 + R3 together for 0.65 seconds.
+        // This avoids the PS/Home button, which Xbox reserves for its Guide.
+        let l3r3Pressed = (pad.leftThumbstickButton?.isPressed ?? false) && (pad.rightThumbstickButton?.isPressed ?? false)
+        if l3r3Pressed {
+            if l3r3HoldStarted == nil { l3r3HoldStarted = now }
+            if !l3r3Triggered, let started = l3r3HoldStarted, now - started >= 0.65 {
+                l3r3Triggered = true
                 onToggleOverlay?()
-            } else {
-                lastHomeEdge = now
             }
+        } else {
+            l3r3HoldStarted = nil
+            l3r3Triggered = false
         }
 
         // Overlay navigation, one step per press — only while UI is visible.
