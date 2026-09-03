@@ -50,6 +50,51 @@ enum BetterXCloud {
 
     static let resourceURL = Bundle.main.url(forResource: "better-xcloud", withExtension: "js")
 
+    /// Reliable axis-only overlay for native gyro/steering. It wraps
+    /// navigator.getGamepads at document-start and returns lightweight proxy
+    /// objects whose axes are adjusted; buttons and every other property are
+    /// the original browser values.
+    static let gamepadAxisOverlayScript = #"""
+    (function () {
+      'use strict';
+      try {
+        var nativeGetGamepads = navigator.getGamepads && navigator.getGamepads.bind(navigator);
+        if (!nativeGetGamepads) return;
+        var nativeAxes = [0, 0, 0, 0];
+        var enabled = false;
+        window.__xcgSetNativeAxes = function (next) {
+          enabled = !!(next && next.enabled);
+          var values = next && next.axes || [];
+          for (var i = 0; i < 4; i++) {
+            var value = Number(values[i]);
+            nativeAxes[i] = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
+          }
+        };
+        navigator.getGamepads = function () {
+          var pads = nativeGetGamepads() || [];
+          if (!enabled) return pads;
+          var output = Array.from(pads);
+          for (var i = 0; i < output.length; i++) {
+            var pad = output[i];
+            if (!pad || !pad.axes || pad.axes.length < 4) continue;
+            var axes = Array.from(pad.axes);
+            for (var axis = 0; axis < 4; axis++) {
+              axes[axis] = Math.max(-1, Math.min(1, Number(axes[axis] || 0) + nativeAxes[axis]));
+            }
+            output[i] = new Proxy(pad, {
+              get: function (target, property) {
+                if (property === 'axes') return axes;
+                var value = Reflect.get(target, property, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              }
+            });
+          }
+          return output;
+        };
+      } catch (error) { try { console.error('[XCG] gyro axis overlay failed', error); } catch (_) {} }
+    })();
+    """#
+
     /// Safe WebKit feature shims. enumerateDevices returns an empty list until
     /// the app ever exposes capture devices; xCloud handles an empty list but
     /// crashes when mediaDevices itself is undefined.
@@ -101,6 +146,11 @@ enum BetterXCloud {
         //    decode them, which caused Xbox's error route and BxC's visual-
         //    quality selector to normalize every choice back to Default.
         scripts.append(WKUserScript(source: compatibilityScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+
+        // Gyro must be visible to Xbox even if Better xCloud's minified mapping
+        // marker changes. This document-start wrapper modifies only the four
+        // standard stick axes and leaves every button/object mapping untouched.
+        scripts.append(WKUserScript(source: gamepadAxisOverlayScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         // 1. Restore the native settings mirror, then seed M1-optimized values
         //    only where neither side has a saved user choice. The app never
@@ -493,6 +543,40 @@ enum BetterXCloud {
           } catch (error) {}
           return !!__xcgNativeInput.suppressBrowserRumble;
         };
+
+        // Re-chain the gyro axis overlay after Better xCloud has initialized;
+        // its MKB emulation may replace navigator.getGamepads later.
+        try {
+          var chainedGetGamepads = navigator.getGamepads.bind(navigator);
+          var chainedAxes = [0, 0, 0, 0];
+          var chainedEnabled = false;
+          window.__xcgSetNativeAxes = function (next) {
+            chainedEnabled = !!(next && next.enabled);
+            var values = next && next.axes || [];
+            for (var i = 0; i < 4; i++) {
+              var value = Number(values[i]);
+              chainedAxes[i] = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
+            }
+          };
+          navigator.getGamepads = function () {
+            var pads = chainedGetGamepads() || [];
+            if (!chainedEnabled) return pads;
+            return Array.from(pads).map(function (pad) {
+              if (!pad || !pad.axes || pad.axes.length < 4) return pad;
+              var axes = Array.from(pad.axes);
+              for (var i = 0; i < 4; i++) axes[i] = Math.max(-1, Math.min(1, Number(axes[i] || 0) + chainedAxes[i]));
+              return new Proxy(pad, { get: function (target, property) {
+                if (property === 'axes') return axes;
+                var value = Reflect.get(target, property, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              }});
+            });
+          };
+          __xcgBridgeCapability.gyroAxisOverlay = true;
+        } catch (error) {
+          __xcgBridgeCapability.gyroAxisOverlay = false;
+          try { console.error('[XCG] chained gyro overlay failed', error); } catch (_) {}
+        }
 
         window.BxCBridge = {
           capabilities: __xcgBridgeCapability,
