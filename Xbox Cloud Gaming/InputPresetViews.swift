@@ -79,23 +79,15 @@ struct InputPresetManagerView: View {
 
     private var storageCard: some View {
         HStack {
-            Image(systemName: store.iCloudSyncEnabled ? "icloud.fill" : "externaldrive.fill")
+            Image(systemName: "externaldrive.fill")
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.storageStatus.title).font(.headline)
+                Text("Stored in this Mac").font(.headline)
                 Text(store.storageStatus.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
-            Toggle("Copy to iCloud", isOn: Binding(
-                get: { store.iCloudSyncEnabled },
-                set: { store.setICloudSyncEnabled($0) }
-            ))
-            .toggleStyle(.switch)
             Button("Reload", action: store.reloadFromDisk)
             Button("Show Local Folder", action: store.revealStorage)
                 .disabled(store.storageStatus.directoryURL == nil)
-            if store.canRevealICloudStorage {
-                Button("Show iCloud Folder", action: store.revealICloudStorage)
-            }
         }
         .padding(12)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

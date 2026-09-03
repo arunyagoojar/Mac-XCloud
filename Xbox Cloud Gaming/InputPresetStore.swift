@@ -142,13 +142,13 @@ private struct PresetIndex: Codable {
 
 enum InputPresetStorageStatus: Equatable {
     case checking
-    case local(URL, cloudDetail: String?)
+    case local(URL)
     case unavailable(String)
 
     var title: String {
         switch self {
         case .checking: "Checking storage…"
-        case .local(_, let detail): detail == nil ? "Local storage" : "Local storage · iCloud copy enabled"
+        case .local: "Local storage"
         case .unavailable: "Storage unavailable"
         }
     }
@@ -156,13 +156,13 @@ enum InputPresetStorageStatus: Equatable {
     var detail: String {
         switch self {
         case .checking: "Locating Xbox Cloud data"
-        case .local(let url, let cloudDetail): cloudDetail.map { "\(url.path) · \($0)" } ?? url.path
+        case .local(let url): url.path
         case .unavailable(let reason): reason
         }
     }
 
     var directoryURL: URL? {
-        if case .local(let url, _) = self { return url }
+        if case .local(let url) = self { return url }
         return nil
     }
 }
@@ -177,22 +177,17 @@ final class InputPresetStore: ObservableObject {
     @Published private(set) var activePresetID: UUID = InputPreset.defaultID
     @Published var operationMessage: String?
     @Published private(set) var isBusy = false
-    @Published var iCloudSyncEnabled: Bool {
-        didSet { defaults.set(iCloudSyncEnabled, forKey: "inputPresets.iCloudEnabled") }
-    }
 
     private weak var browser: BrowserModel?
     private let fileManager: FileManager
     private let defaults: UserDefaults
     private var rootURL: URL?
-    private var cloudRootURL: URL?
     private var cancellables = Set<AnyCancellable>()
     private var webAutosaveTask: Task<Void, Never>?
     private var webAutosaveGeneration: UInt64 = 0
     private var webApplyTask: Task<String, Never>?
     private var webApplyGeneration: UInt64 = 0
     private var readinessRetryTask: Task<Void, Never>?
-    private var cloudReconcileTask: Task<Void, Never>?
     private var suppressAutosave = false
 
     private var presetsURL: URL? { rootURL?.appendingPathComponent("presets", isDirectory: true) }
@@ -203,7 +198,6 @@ final class InputPresetStore: ObservableObject {
         self.browser = browser
         self.fileManager = fileManager
         self.defaults = defaults
-        iCloudSyncEnabled = defaults.bool(forKey: "inputPresets.iCloudEnabled")
         if let raw = defaults.string(forKey: "inputPresets.activeID"), let id = UUID(uuidString: raw) {
             activePresetID = id
         }
@@ -219,19 +213,13 @@ final class InputPresetStore: ObservableObject {
 
     func reloadFromDisk() {
         invalidateAsyncOperations()
-        stopCloudObserver()
         storageStatus = .checking
         do {
             let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                 .appendingPathComponent("Xbox Cloud data", isDirectory: true)
             rootURL = base
             try createLayout(at: base)
-            configureCloudMirror()
-            if cloudRootURL != nil {
-                do { try reconcileCloudAndLocal() }
-                catch { storageStatus = .local(base, cloudDetail: "iCloud sync failed; local files remain authoritative") }
-            }
-
+            storageStatus = .local(base)
             let decoder = decoder()
             var loadedPresets: [InputPreset] = []
             var loadedTriggers: [CustomAdaptiveTriggerPreset] = []
@@ -274,7 +262,6 @@ final class InputPresetStore: ObservableObject {
             if shouldMigrateDefault { defaults.set(true, forKey: migrationKey) }
             if !presets.contains(where: { $0.id == activePresetID }) { setActive(InputPreset.defaultID) }
             applyActiveNativePreset()
-            startCloudObserverIfNeeded()
         } catch {
             rootURL = nil
             storageStatus = .unavailable(error.localizedDescription)
@@ -283,11 +270,6 @@ final class InputPresetStore: ObservableObject {
         }
     }
 
-    func setICloudSyncEnabled(_ enabled: Bool) {
-        guard iCloudSyncEnabled != enabled else { return }
-        iCloudSyncEnabled = enabled
-        reloadFromDisk()
-    }
 
     private func applyActiveNativePreset() {
         guard let browser, let preset = presets.first(where: { $0.id == activePresetID }) else { return }
@@ -499,12 +481,6 @@ final class InputPresetStore: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([rootURL])
     }
 
-    var canRevealICloudStorage: Bool { cloudRootURL != nil }
-
-    func revealICloudStorage() {
-        guard let cloudRootURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([cloudRootURL])
-    }
 
     // MARK: - Adaptive trigger preset CRUD
 
@@ -621,8 +597,6 @@ final class InputPresetStore: ObservableObject {
 
     private func invalidateAsyncOperations() {
         invalidateWebOperationsForNavigation()
-        cloudReconcileTask?.cancel()
-        cloudReconcileTask = nil
     }
 
     private func autosaveWebState(for id: UUID, generation: UInt64) async {
@@ -660,78 +634,6 @@ final class InputPresetStore: ObservableObject {
         try fileManager.createDirectory(at: root.appendingPathComponent("adaptive-trigger-presets", isDirectory: true), withIntermediateDirectories: true)
     }
 
-    private func configureCloudMirror() {
-        guard let rootURL else { return }
-        guard iCloudSyncEnabled else {
-            stopCloudObserver()
-            cloudRootURL = nil
-            storageStatus = .local(rootURL, cloudDetail: nil)
-            return
-        }
-        guard let container = fileManager.url(forUbiquityContainerIdentifier: nil) else {
-            cloudRootURL = nil
-            storageStatus = .local(rootURL, cloudDetail: "iCloud unavailable; local files remain authoritative")
-            return
-        }
-        let cloud = container.appendingPathComponent("Documents", isDirectory: true).appendingPathComponent("Xbox Cloud data", isDirectory: true)
-        do {
-            try createLayout(at: cloud)
-            cloudRootURL = cloud
-            storageStatus = .local(rootURL, cloudDetail: "syncing with \(cloud.path)")
-        } catch {
-            cloudRootURL = nil
-            storageStatus = .local(rootURL, cloudDetail: "iCloud setup failed; local files remain authoritative")
-        }
-    }
-
-    private func startCloudObserverIfNeeded() {
-        guard iCloudSyncEnabled, cloudRootURL != nil, cloudReconcileTask == nil else { return }
-        cloudReconcileTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
-                guard !Task.isCancelled, let self, self.iCloudSyncEnabled,
-                      self.cloudRootURL != nil, self.rootURL != nil else { return }
-                do {
-                    try self.reconcileCloudAndLocal()
-                    self.reloadReconciledRecords()
-                } catch {
-                    if let root = self.rootURL {
-                        self.storageStatus = .local(root, cloudDetail: "iCloud sync failed; local files remain available")
-                    }
-                }
-            }
-        }
-    }
-
-    private func stopCloudObserver() {
-        cloudReconcileTask?.cancel()
-        cloudReconcileTask = nil
-    }
-
-    private func reloadReconciledRecords() {
-        guard let presetsURL, let triggersURL else { return }
-        let loadedPresets: [InputPreset] = (try? jsonFiles(in: presetsURL))?.compactMap {
-            validEnvelope(at: $0, kind: "input-preset") as PresetEnvelope<InputPreset>?
-        }.map(\.value) ?? []
-        let loadedTriggers: [CustomAdaptiveTriggerPreset] = (try? jsonFiles(in: triggersURL))?.compactMap {
-            validEnvelope(at: $0, kind: "adaptive-trigger-preset") as PresetEnvelope<CustomAdaptiveTriggerPreset>?
-        }.map(\.value) ?? []
-        let previousActive = presets.first(where: { $0.id == activePresetID })
-        presets = [loadedPresets.first(where: \.isDefault) ?? .default] + loadedPresets.filter { !$0.isDefault }
-        customTriggerPresets = loadedTriggers
-        sortPresets()
-        sortTriggerPresets()
-        if !presets.contains(where: { $0.id == activePresetID }) {
-            setActive(InputPreset.defaultID)
-            applyActiveNativePreset()
-            retryActiveWebSettings()
-        } else if previousActive != presets.first(where: { $0.id == activePresetID }) {
-            applyActiveNativePreset()
-            retryActiveWebSettings()
-        }
-        try? writeIndex()
-    }
-
     private func jsonFiles(in directory: URL) throws -> [URL] {
         try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
             .filter { $0.pathExtension.lowercased() == "json" }
@@ -758,73 +660,23 @@ final class InputPresetStore: ObservableObject {
         try writeData(encoded(PresetIndex(schemaVersion: Self.schemaVersion, generatedAt: .now, presets: entries, adaptiveTriggerPresets: triggers)), to: rootURL.appendingPathComponent("index.json"))
     }
 
-    private func writeData(_ data: Data, to localURL: URL) throws {
-        try coordinatedWrite(data, to: localURL)
-        guard let rootURL, let cloudRootURL else { return }
-        let relative = relativePath(of: localURL, under: rootURL)
-        let cloudURL = cloudRootURL.appendingPathComponent(relative)
-        do {
-            try fileManager.createDirectory(at: cloudURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try coordinatedWrite(data, to: cloudURL)
-        } catch {
-            operationMessage = "Saved locally; iCloud mirror will retry on reload"
-        }
+    private func writeData(_ data: Data, to url: URL) throws {
+        try data.write(to: url, options: .atomic)
     }
 
-    private func removeLocal(_ localURL: URL) throws {
-        if fileManager.fileExists(atPath: localURL.path) { try coordinatedRemove(localURL) }
-        guard let rootURL, let cloudRootURL else { return }
-        let cloudURL = cloudRootURL.appendingPathComponent(relativePath(of: localURL, under: rootURL))
-        do {
-            if fileManager.fileExists(atPath: cloudURL.path) { try coordinatedRemove(cloudURL) }
-        } catch {
-            operationMessage = "Deleted locally; iCloud mirror will retry on reload"
-        }
-    }
-
-    private func coordinatedRead(_ url: URL) throws -> Data {
-        var result: Result<Data, Error>!
-        var coordinationError: NSError?
-        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
-            result = Result { try Data(contentsOf: coordinatedURL) }
-        }
-        if let coordinationError { throw coordinationError }
-        return try result.get()
-    }
-
-    private func coordinatedWrite(_ data: Data, to url: URL) throws {
-        var result: Result<Void, Error>!
-        var coordinationError: NSError?
-        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { coordinatedURL in
-            result = Result { try data.write(to: coordinatedURL, options: .atomic) }
-        }
-        if let coordinationError { throw coordinationError }
-        try result.get()
-    }
-
-    private func coordinatedRemove(_ url: URL) throws {
-        var result: Result<Void, Error>!
-        var coordinationError: NSError?
-        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: url, options: .forDeleting, error: &coordinationError) { coordinatedURL in
-            result = Result { try fileManager.removeItem(at: coordinatedURL) }
-        }
-        if let coordinationError { throw coordinationError }
-        try result.get()
+    private func removeLocal(_ url: URL) throws {
+        if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
     }
 
     private func writeIfChanged(_ data: Data, to url: URL) throws {
-        if fileManager.fileExists(atPath: url.path), (try? coordinatedRead(url)) == data { return }
-        try coordinatedWrite(data, to: url)
-    }
-
-    private func relativePath(of url: URL, under root: URL) -> String {
-        String(url.path.dropFirst(root.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if fileManager.fileExists(atPath: url.path), (try? Data(contentsOf: url)) == data { return }
+        try writeData(data, to: url)
     }
 
     private func loadTombstones(at root: URL) -> [PresetTombstone] {
         let url = root.appendingPathComponent("tombstones.json")
         guard fileManager.fileExists(atPath: url.path),
-              let data = try? coordinatedRead(url),
+              let data = try? Data(contentsOf: url),
               let file = try? decoder().decode(TombstoneFile.self, from: data),
               file.schemaVersion <= Self.schemaVersion else { return [] }
         return file.tombstones
@@ -843,155 +695,6 @@ final class InputPresetStore: ObservableObject {
         all.removeAll { $0.id == id && $0.kind == kind }
         all.append(PresetTombstone(id: id, kind: kind, revision: revision, deletedAt: .now))
         try writeData(encoded(TombstoneFile(schemaVersion: Self.schemaVersion, tombstones: all)), to: tombstonesURL)
-    }
-
-    private func reconcileCloudAndLocal() throws {
-        guard let rootURL, let cloudRootURL else { return }
-        var tombstones: [String: PresetTombstone] = [:]
-        for tombstone in loadTombstones(at: rootURL) + loadTombstones(at: cloudRootURL) {
-            let key = "\(tombstone.kind):\(tombstone.id.uuidString)"
-            if let old = tombstones[key] {
-                if tombstone.deletedAt > old.deletedAt ||
-                    (tombstone.deletedAt == old.deletedAt && tombstone.revision > old.revision) {
-                    tombstones[key] = tombstone
-                }
-            } else {
-                tombstones[key] = tombstone
-            }
-        }
-        let tombstoneData = try encoded(TombstoneFile(schemaVersion: Self.schemaVersion, tombstones: Array(tombstones.values)))
-        try coordinatedWrite(tombstoneData, to: rootURL.appendingPathComponent("tombstones.json"))
-        try coordinatedWrite(tombstoneData, to: cloudRootURL.appendingPathComponent("tombstones.json"))
-
-        try reconcileRecords(kind: "input-preset", directory: "presets", tombstones: tombstones)
-        try reconcileRecords(kind: "adaptive-trigger-preset", directory: "adaptive-trigger-presets", tombstones: tombstones)
-        storageStatus = .local(rootURL, cloudDetail: "synced with \(cloudRootURL.path)")
-    }
-
-    private func reconcileRecords(kind: String, directory: String, tombstones: [String: PresetTombstone]) throws {
-        guard let rootURL, let cloudRootURL else { return }
-        let localDirectory = rootURL.appendingPathComponent(directory, isDirectory: true)
-        let cloudDirectory = cloudRootURL.appendingPathComponent(directory, isDirectory: true)
-        let localFiles = try jsonFiles(in: localDirectory)
-        let cloudFiles = try jsonFiles(in: cloudDirectory)
-        let names = Set(localFiles.map(\.lastPathComponent)).union(cloudFiles.map(\.lastPathComponent))
-
-        for name in names {
-            let localURL = localDirectory.appendingPathComponent(name)
-            let cloudURL = cloudDirectory.appendingPathComponent(name)
-            if kind == "input-preset" {
-                let local: PresetEnvelope<InputPreset>? = validEnvelope(at: localURL, kind: kind)
-                let cloud: PresetEnvelope<InputPreset>? = validEnvelope(at: cloudURL, kind: kind)
-                try reconcile(local: local, cloud: cloud, localURL: localURL, cloudURL: cloudURL,
-                              tombstones: tombstones, valueID: { $0.id }, updatedAt: { $0.updatedAt },
-                              conflictCopy: { value in
-                                  var copy = value
-                                  copy.id = UUID()
-                                  copy.name = self.uniqueConflictName(value.name, existing: localFiles + cloudFiles, kind: kind)
-                                  copy.createdAt = .now
-                                  copy.updatedAt = .now
-                                  return copy
-                              })
-            } else {
-                let local: PresetEnvelope<CustomAdaptiveTriggerPreset>? = validEnvelope(at: localURL, kind: kind)
-                let cloud: PresetEnvelope<CustomAdaptiveTriggerPreset>? = validEnvelope(at: cloudURL, kind: kind)
-                try reconcile(local: local, cloud: cloud, localURL: localURL, cloudURL: cloudURL,
-                              tombstones: tombstones, valueID: { $0.id }, updatedAt: { $0.updatedAt },
-                              conflictCopy: { value in
-                                  var copy = value
-                                  copy.id = UUID()
-                                  copy.name = self.uniqueConflictName(value.name, existing: localFiles + cloudFiles, kind: kind)
-                                  copy.createdAt = .now
-                                  copy.updatedAt = .now
-                                  return copy
-                              })
-            }
-        }
-    }
-
-    private func reconcile<Value: Codable>(
-        local: PresetEnvelope<Value>?, cloud: PresetEnvelope<Value>?, localURL: URL, cloudURL: URL,
-        tombstones: [String: PresetTombstone], valueID: (Value) -> UUID, updatedAt: (Value) -> Date,
-        conflictCopy: (Value) -> Value
-    ) throws {
-        let id = local.map { valueID($0.value) } ?? cloud.map { valueID($0.value) }
-        if let id, let tombstone = tombstones["\(local?.kind ?? cloud?.kind ?? ""):\(id.uuidString)"] {
-            let recordUpdatedAt = max(local.map { updatedAt($0.value) } ?? .distantPast,
-                                      cloud.map { updatedAt($0.value) } ?? .distantPast)
-            // Revision counters are device-local and cannot order independent
-            // edits. A deletion wins only when its timestamp is at least as new.
-            if tombstone.deletedAt >= recordUpdatedAt {
-                if fileManager.fileExists(atPath: localURL.path) { try coordinatedRemove(localURL) }
-                if fileManager.fileExists(atPath: cloudURL.path) { try coordinatedRemove(cloudURL) }
-                return
-            }
-        }
-        guard let local else {
-            if let cloud { try writeIfChanged(encoded(cloud), to: localURL) }
-            return
-        }
-        guard let cloud else {
-            try writeIfChanged(encoded(local), to: cloudURL)
-            return
-        }
-        if local.checksum == cloud.checksum {
-            let winner = local.revision >= cloud.revision ? local : cloud
-            let data = try encoded(winner)
-            try writeIfChanged(data, to: localURL)
-            try writeIfChanged(data, to: cloudURL)
-            return
-        }
-
-        let localDate = updatedAt(local.value)
-        let cloudDate = updatedAt(cloud.value)
-        if localDate == cloudDate {
-            // Equal timestamps with different payloads are unordered divergence;
-            // keep local at the original ID and preserve cloud as a conflict copy.
-            let conflict = conflictCopy(cloud.value)
-            let conflictEnvelope = PresetEnvelope(schemaVersion: Self.schemaVersion, kind: cloud.kind, revision: 1,
-                                                  checksum: try checksum(for: conflict), value: conflict)
-            let conflictName = "\(valueID(conflict).uuidString.lowercased()).json"
-            let localConflict = localURL.deletingLastPathComponent().appendingPathComponent(conflictName)
-            let cloudConflict = cloudURL.deletingLastPathComponent().appendingPathComponent(conflictName)
-            let data = try encoded(conflictEnvelope)
-            try writeIfChanged(data, to: localConflict)
-            try writeIfChanged(data, to: cloudConflict)
-            try writeIfChanged(encoded(local), to: cloudURL)
-            return
-        }
-        // Timestamp is the cross-device ordering source. Never discard a newer
-        // payload merely because the other device has a larger revision counter.
-        let winner = cloudDate > localDate ? cloud : local
-        let data = try encoded(winner)
-        try writeIfChanged(data, to: localURL)
-        try writeIfChanged(data, to: cloudURL)
-    }
-
-    private func validEnvelope<Value: Codable>(at url: URL, kind: String) -> PresetEnvelope<Value>? {
-        guard fileManager.fileExists(atPath: url.path),
-              let data = try? coordinatedRead(url),
-              let envelope = try? decoder().decode(PresetEnvelope<Value>.self, from: data),
-              envelope.schemaVersion <= Self.schemaVersion,
-              envelope.kind == kind,
-              (try? checksum(for: envelope.value)) == envelope.checksum else { return nil }
-        return envelope
-    }
-
-    private func uniqueConflictName(_ name: String, existing: [URL], kind: String) -> String {
-        let base = name + " Conflict"
-        var candidate = base
-        var suffix = 2
-        let existingNames: Set<String>
-        if kind == "input-preset" {
-            existingNames = Set(existing.compactMap { (validEnvelope(at: $0, kind: kind) as PresetEnvelope<InputPreset>?)?.value.name.lowercased() })
-        } else {
-            existingNames = Set(existing.compactMap { (validEnvelope(at: $0, kind: kind) as PresetEnvelope<CustomAdaptiveTriggerPreset>?)?.value.name.lowercased() })
-        }
-        while existingNames.contains(candidate.lowercased()) {
-            candidate = "\(base) \(suffix)"
-            suffix += 1
-        }
-        return candidate
     }
 
     private func inputRevision(at url: URL) -> Int {
