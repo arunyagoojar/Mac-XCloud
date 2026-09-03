@@ -13,24 +13,31 @@ chrome-less native window and layers on native macOS features:
   direct Left/Right adaptive-trigger mode switching
 - Xbox boot animation splash and clarity pipeline (FSR/CAS/USM)
 
-## Releasing updates (one command)
+## Releasing updates (fully automatic)
 
-Everything is automated. After changing the app, run:
+You never need to export, zip, or upload anything. **Every push to `main`
+releases by itself**: GitHub Actions builds the app, signs it, publishes a
+GitHub Release, and updates the feed that installed apps auto-update from.
 
 ```bash
-./release.sh "What I changed"
+git add -A && git commit -m "What I changed" && git push
 ```
 
-That commits, pushes, and watches GitHub Actions, which:
+(Or run `./release.sh "What I changed"` — it does exactly the above plus
+watches the build for you. Both are equivalent.)
 
-1. Builds a Release app with an auto-incrementing version (`1.<build number>`).
-2. Signs the archive with Sparkle EdDSA (no Apple Developer account needed).
-3. Publishes a GitHub Release and updates the update feed (`appcast.xml`).
+**Version numbers are optional.** Sparkle orders updates by build number,
+which increases automatically on every push — you can change code and push
+forever without touching versions. If you *do* want to name a version (say
+`1.5` or `2.0`), just change **MARKETING_VERSION** in the target's Build
+Settings before pushing; that exact number is released and displayed. Leave
+it at the default `1` and releases show as `1.<build number>`.
 
-Installed copies of Mac Xcloud check the feed hourly and update themselves
-automatically; users can also use **Check for Updates…** in the app menu or
-the menu bar. Manual workflow trigger: the *Release* workflow on GitHub →
-*Run workflow*.
+To update the version in Xcode: target *Mac XCloud* → *Signing & Capabilities*
+is not it — go to **Build Settings → Versioning → Marketing Version**. Or ask
+your assistant to bump it.
+
+Manual workflow trigger: the *Release* workflow on GitHub → *Run workflow*.
 
 The update signing key lives in the repo secret `SPARKLE_EDDSA_PRIVATE_KEY`;
 the matching public key is embedded in `Config/Info.plist`.

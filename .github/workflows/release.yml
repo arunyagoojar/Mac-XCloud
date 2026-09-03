@@ -21,7 +21,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build app (version 1.<run number>)
+      - name: Determine version
+        id: version
+        run: |
+          # Reads MARKETING_VERSION from the project. If you bumped it (e.g. to
+          # 1.2 or 2.0), that exact version is released. The default "1" is
+          # auto-suffixed with the build number. Sparkle ordering uses the
+          # build number (run number), which always increases.
+          BASE=$(xcodebuild -project "Mac XCloud.xcodeproj" -scheme "Mac XCloud" -showBuildSettings 2>/dev/null | awk '/ MARKETING_VERSION =/ {print $3; exit}')
+          BASE=${BASE:-1}
+          if [ "$BASE" = "1" ]; then SHORT="1.${{ github.run_number }}"; else SHORT="$BASE"; fi
+          BUILD=${{ github.run_number }}
+          TAG="v${SHORT}-b${BUILD}"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG"
+
+      - name: Build app
         run: |
           xcodebuild \
             -project "Mac XCloud.xcodeproj" \
@@ -29,8 +46,8 @@ jobs:
             -configuration Release \
             -destination "platform=macOS" \
             -derivedDataPath build \
-            MARKETING_VERSION=1.${{ github.run_number }} \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            MARKETING_VERSION=${{ steps.version.outputs.short }} \
+            CURRENT_PROJECT_VERSION=${{ steps.version.outputs.build }} \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=YES \
@@ -65,16 +82,20 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v1.${{ github.run_number }}
+          TAG: ${{ steps.version.outputs.tag }}
+          SHORT: ${{ steps.version.outputs.short }}
         run: |
           gh release create "$TAG" \
-            --title "Mac Xcloud 1.${{ github.run_number }}" \
+            --title "Mac Xcloud $SHORT" \
             --notes "Automatic build from commit ${{ github.sha }}." \
             MacXcloud.zip
 
       - name: Update Sparkle appcast on gh-pages
         env:
-          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/v1.${{ github.run_number }}/MacXcloud.zip
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/MacXcloud.zip
+          SHORT_VERSION: ${{ steps.version.outputs.short }}
+          BUILD_VERSION: ${{ steps.version.outputs.build }}
+          TAG_NAME: ${{ steps.version.outputs.tag }}
           REPO_NAME: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -97,18 +118,18 @@ jobs:
           url = os.environ["DOWNLOAD_URL"]
           sig = "${{ steps.sign.outputs.sig }}"
           length = "${{ steps.sign.outputs.len }}"
-          run_number = "${{ github.run_number }}"
-          version = f"1.{run_number}"
-          build = run_number
+          version = os.environ["SHORT_VERSION"]
+          build = os.environ["BUILD_VERSION"]
           repo = os.environ["REPO_NAME"]
           sha = os.environ["COMMIT_SHA"]
+          tag = os.environ["TAG_NAME"]
           date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
 
           item = f"""\t\t<item>
           \t\t\t<title>Version {version}</title>
           \t\t\t<sparkle:version>{build}</sparkle:version>
           \t\t\t<sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-          \t\t\t<link>https://github.com/{repo}/releases/tag/v{version}</link>
+          \t\t\t<link>https://github.com/{repo}/releases/tag/{tag}</link>
           \t\t\t<sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
           \t\t\t<description><![CDATA[<p>Automatic build from commit {sha}.</p>]]></description>
           \t\t\t<pubDate>{date_str}</pubDate>
@@ -146,7 +167,7 @@ jobs:
           PYEOF
 
           git add appcast.xml
-          git commit -m "Appcast: v1.${{ github.run_number }}"
+          git commit -m "Appcast: ${{ steps.version.outputs.tag }}"
           if [ "$HAS_PAGES" = true ]; then
             git push origin gh-pages
           else

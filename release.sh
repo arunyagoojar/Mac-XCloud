@@ -31,7 +31,7 @@ echo "⏳ Watching the release workflow…"
 RUN_ID=$(gh run list --branch main --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
 gh run watch "$RUN_ID" --exit-status
 
-TAG="v1.$(gh run view "$RUN_ID" --json runNumber --jq .runNumber)"
+TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
 echo
 echo "✅ Released $TAG"
 gh release view "$TAG" --web 2>/dev/null || gh release view "$TAG" --json url --jq .url
