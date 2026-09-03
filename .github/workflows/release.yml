@@ -60,9 +60,23 @@ jobs:
 
       - name: Download Sparkle signing tools
         run: |
-          LATEST_TAG=$(curl -sL https://api.github.com/repos/sparkle-project/Sparkle/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
-          curl -sL -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/${LATEST_TAG}/Sparkle-${LATEST_TAG}.tar.xz"
+          # Use the exact Sparkle version the app links (Package.resolved).
+          # Querying the GitHub API here fails when runners are rate-limited.
+          TAG=$(python3 -c '
+          import json
+          with open("Mac XCloud.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved") as f:
+              data = json.load(f)
+          for pin in data.get("pins", []):
+              if pin.get("identity", "") == "sparkle":
+                  print(pin.get("state", {}).get("version", "2.9.6"))
+                  break
+          else:
+              print("2.9.6")
+          ')
+          echo "Using Sparkle tools $TAG"
+          curl -sL --fail -o sparkle.tar.xz "https://github.com/sparkle-project/Sparkle/releases/download/${TAG}/Sparkle-${TAG}.tar.xz"
           mkdir sparkle && tar -xf sparkle.tar.xz -C sparkle
+          ./sparkle/bin/sign_update --version >/dev/null && echo "sign_update OK"
 
       - name: Sign archive with Sparkle EdDSA
         id: sign
