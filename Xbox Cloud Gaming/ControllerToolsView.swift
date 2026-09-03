@@ -5,8 +5,8 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
     case test = "Test"
     case calibration = "Calibration"
     case triggers = "Triggers & Haptics"
-    case motion = "Motion & Touchpad"
-    case presets = "Presets"
+    case touchpad = "Touchpad"
+    case presets = "Input Presets"
     case shortcuts = "Shortcuts & Macros"
     var id: String { rawValue }
     var icon: String {
@@ -15,7 +15,7 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
         case .test: "gauge.with.dots.needle.67percent"
         case .calibration: "scope"
         case .triggers: "waveform"
-        case .motion: "gyroscope"
+        case .touchpad: "hand.point.up.left"
         case .presets: "square.stack.3d.up"
         case .shortcuts: "command"
         }
@@ -38,18 +38,30 @@ struct ControllerToolsView: View {
             .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 240)
         } detail: {
             ScrollView {
-                Group {
-                    switch section {
-                    case .overview: overview
-                    case .test: test
-                    case .calibration: calibration
-                    case .triggers: triggers
-                    case .motion: motion
-                    case .presets: presets
-                    case .shortcuts: shortcuts
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        Group {
+                            switch section {
+                            case .overview: overview
+                            case .test: test
+                            case .calibration: calibration
+                            case .triggers: triggers
+                            case .touchpad: touchpad
+                            case .presets: presets
+                            case .shortcuts: shortcuts
+                            }
+                        }
+                        .padding(20)
+                    } header: {
+                        HStack {
+                            Label(section.rawValue, systemImage: section.icon).font(.headline)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(.regularMaterial)
                     }
                 }
-                .padding(20)
             }
         }
         .navigationTitle("Controller Tools")
@@ -83,10 +95,9 @@ struct ControllerToolsView: View {
                 GroupBox {
                     LabeledContent("Controller", value: d.vendorName)
                     LabeledContent("Category", value: d.productCategory)
-                    LabeledContent("In-game gyro bridge", value: browser.nativeInputMergeReady ? "Ready" : browser.nativeInputMergeReason)
+                    LabeledContent("Input preset", value: browser.inputPresets.activePreset.name)
                     LabeledContent("Battery", value: batteryText)
                     LabeledContent("Adaptive triggers", value: service.capabilities.hasAdaptiveTriggers ? "Available" : "Unavailable")
-                    LabeledContent("Motion", value: service.capabilities.hasMotion ? "Available" : "Unavailable")
                     LabeledContent("Touchpad", value: service.capabilities.hasTouchpad ? "Available" : "Unavailable")
                     LabeledContent("Haptics", value: service.capabilities.hasHaptics ? "Available" : "Unavailable")
                 }
@@ -108,12 +119,6 @@ struct ControllerToolsView: View {
                 trigger("R2", value: service.snapshot.rightTrigger)
             }
             buttonGrid
-            if let motion = service.snapshot.motion {
-                GroupBox("Motion") {
-                    LabeledContent("Rotation", value: String(format: "%.2f, %.2f, %.2f rad/s", motion.rotationRate.x, motion.rotationRate.y, motion.rotationRate.z))
-                    LabeledContent("Gravity", value: String(format: "%.2f, %.2f, %.2f g", motion.gravity.x, motion.gravity.y, motion.gravity.z))
-                }
-            }
             HStack {
                 Button("Pulse Left") { service.playTestPulse(locality: .leftHandle) }
                 Button("Pulse Right") { service.playTestPulse(locality: .rightHandle) }
@@ -153,12 +158,9 @@ struct ControllerToolsView: View {
             title("Adaptive Triggers & Haptics")
             Text("Adaptive-trigger effects are synthetic category presets. xCloud does not transmit the original PS5 game-authored trigger effects.")
                 .font(.callout).foregroundStyle(.orange)
-            Picker("Left trigger", selection: triggerPreset(.left)) {
-                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { Text($0.rawValue.humanized).tag($0) }
-            }
-            Picker("Right trigger", selection: triggerPreset(.right)) {
-                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { Text($0.rawValue.humanized).tag($0) }
-            }
+            Picker("Left trigger", selection: triggerPreset(.left)) { triggerCatalog }
+            Picker("Right trigger", selection: triggerPreset(.right)) { triggerCatalog }
+            AdaptiveTriggerPresetManager(service: service, store: browser.inputPresets)
             Divider()
             Picker("Haptic mode", selection: hapticMode) {
                 ForEach(HapticMode.allCases, id: \.self) { Text($0.rawValue.humanized).tag($0) }
@@ -173,15 +175,9 @@ struct ControllerToolsView: View {
         }
     }
 
-    private var motion: some View {
+    private var touchpad: some View {
         VStack(alignment: .leading, spacing: 18) {
-            title("Motion & Touchpad")
-            Label("Gyroscope", systemImage: "gyroscope")
-                .font(.headline)
-            Text("Gyroscope gameplay input is unavailable in this beta. Native motion remains visible in the Test page for diagnostics.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Divider()
+            title("Touchpad")
             Toggle("Enable touchpad gestures", isOn: touchpadEnabled)
             TouchpadGestureDemo()
             ForEach(TouchpadGesture.allCases, id: \.self) { gesture in
@@ -200,28 +196,7 @@ struct ControllerToolsView: View {
     }
 
     private var presets: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            title("Category Presets")
-            Text("Choose a genre-style controller profile. These are not tied to individual games.")
-                .foregroundStyle(.secondary)
-            ForEach(ControllerCategoryPreset.allCases, id: \.self) { preset in
-                Button {
-                    applyPreset(preset)
-                } label: {
-                    HStack {
-                        Image(systemName: presetIcon(preset))
-                        VStack(alignment: .leading) {
-                            Text(preset.rawValue.humanized)
-                            Text(presetDescription(preset)).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if service.settings.categoryPreset.selectedPreset == preset { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                    }
-                    .padding(8)
-                }
-                .buttonStyle(.plain)
-            }
-        }
+        InputPresetManagerView(store: browser.inputPresets)
     }
 
     private var shortcuts: some View {
@@ -292,9 +267,25 @@ struct ControllerToolsView: View {
         }
     }
 
+    @ViewBuilder
+    private var triggerCatalog: some View {
+        ForEach(AdaptiveTriggerCategory.allCases) { category in
+            Section(category.rawValue) {
+                ForEach(AdaptiveTriggerPreset.catalog(in: category), id: \.self) { preset in
+                    Text(preset.htmlName).tag(preset)
+                }
+            }
+        }
+    }
+
     private enum TriggerSide { case left, right }
     private func triggerPreset(_ side: TriggerSide) -> Binding<AdaptiveTriggerPreset> {
-        Binding(get: { side == .left ? service.settings.adaptiveTriggers.leftPreset : service.settings.adaptiveTriggers.rightPreset }, set: { new in service.updateSettings { if side == .left { $0.adaptiveTriggers.leftPreset = new } else { $0.adaptiveTriggers.rightPreset = new } } })
+        Binding(get: { side == .left ? service.settings.adaptiveTriggers.leftPreset : service.settings.adaptiveTriggers.rightPreset }, set: { new in
+            service.updateSettings {
+                if side == .left { $0.adaptiveTriggers.leftPreset = new; $0.adaptiveTriggers.leftUsesCustom = false }
+                else { $0.adaptiveTriggers.rightPreset = new; $0.adaptiveTriggers.rightUsesCustom = false }
+            }
+        })
     }
     private var hapticMode: Binding<HapticMode> { Binding(get: { service.settings.haptics.mode }, set: { value in service.updateSettings { $0.haptics.mode = value } }) }
     private var hapticGain: Binding<Double> { Binding(get: { Double(service.settings.haptics.intensityMultiplier) }, set: { value in service.updateSettings { $0.haptics.intensityMultiplier = Float(value) } }) }
@@ -315,35 +306,6 @@ struct ControllerToolsView: View {
 
     private func valueSlider(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, format: @escaping (Double) -> String) -> some View {
         HStack { Text(label); Slider(value: value, in: range); Text(format(value.wrappedValue)).frame(width: 58, alignment: .trailing) }
-    }
-
-    private func applyPreset(_ preset: ControllerCategoryPreset) {
-        service.updateSettings { settings in
-            settings.categoryPreset.selectedPreset = preset
-            switch preset {
-            case .racing:
-                settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .brakeComfort; settings.adaptiveTriggers.rightPreset = .accelerator; settings.haptics.intensityMultiplier = 1.0
-                settings.calibration.leftStick.responseCurve = .sCurve(strength: 0.28)
-            case .simulation:
-                settings.gyro.mode = .raw; settings.adaptiveTriggers.leftPreset = .bow; settings.adaptiveTriggers.rightPreset = .bow; settings.haptics.intensityMultiplier = 0.9
-                settings.calibration.leftStick.responseCurve = .sCurve(strength: 0.45)
-            case .shooter:
-                settings.gyro.mode = .pointer; settings.adaptiveTriggers.leftPreset = .softResistance; settings.adaptiveTriggers.rightPreset = .automaticRecoil; settings.haptics.intensityMultiplier = 1.15
-                settings.calibration.rightStick.responseCurve = .exponential(exponent: 1.25)
-            case .platformer:
-                settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .platformerEndStop; settings.adaptiveTriggers.rightPreset = .platformerEndStop; settings.haptics.intensityMultiplier = 0.9
-            case .story:
-                settings.gyro.mode = .off; settings.adaptiveTriggers.leftPreset = .cinematic; settings.adaptiveTriggers.rightPreset = .cinematic; settings.haptics.intensityMultiplier = 1.0
-            case .custom: break
-            }
-        }
-    }
-
-    private func presetIcon(_ preset: ControllerCategoryPreset) -> String {
-        switch preset { case .racing: "steeringwheel"; case .simulation: "airplane"; case .shooter: "scope"; case .platformer: "figure.run"; case .story: "book"; case .custom: "slider.horizontal.3" }
-    }
-    private func presetDescription(_ preset: ControllerCategoryPreset) -> String {
-        switch preset { case .racing: "Tilt steering and progressive triggers"; case .simulation: "Smooth motion and trigger resistance"; case .shooter: "Gyro aim and weapon trigger"; case .platformer: "Light feedback, no gyro"; case .story: "Balanced comfort and haptics"; case .custom: "Your current settings" }
     }
 
     private func installDefaultShortcuts() {

@@ -84,7 +84,8 @@ struct SettingsRootView: View {
 
     private func detail(_ model: SettingsModel) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                Section {
                 if !model.bridgeAvailable {
                     warningBox("Open xbox.com/play at least once, then reopen this window to load your cloud settings.")
                 }
@@ -112,8 +113,18 @@ struct SettingsRootView: View {
                         .padding(.top, 4)
                         .padding(.horizontal, 16)
                 }
+                } header: {
+                    HStack {
+                        Label(model.selectedCategory.title, systemImage: model.selectedCategory.icon)
+                            .font(.headline)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial)
+                }
             }
-            .padding(.vertical, 12)
+            .padding(.bottom, 12)
         }
         .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
             ForcedMKBPicker(model: model)

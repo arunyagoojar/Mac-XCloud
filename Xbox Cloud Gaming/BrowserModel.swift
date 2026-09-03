@@ -68,15 +68,14 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var currentGameTitle = ""
     @Published private(set) var currentRegion = ""
     @Published private(set) var telemetry = StreamTelemetry.empty
-    @Published private(set) var nativeInputMergeReady = false
-    @Published private(set) var nativeInputMergeReason = "Waiting for Xbox input bridge"
+    @Published private(set) var bridgeReady = false
 
     var statusController: MenuBarStatusController?
     let controllerInput = ControllerInputService()
     let controllerFeatures = ControllerFeatureService()
+    lazy var inputPresets = InputPresetStore(browser: self)
     private var cancellables = Set<AnyCancellable>()
     private var loadingTimeout: DispatchWorkItem?
-    private var macroFields: [String: Double] = [:]
     private(set) var controllerInputOwner: ControllerInputOwner = .none
     private var focusObservers: [NSObjectProtocol] = []
     lazy var settingsModel = SettingsModel(browser: self)
@@ -112,12 +111,17 @@ final class BrowserModel: ObservableObject {
             guard self?.controllerInputOwner == .stream else { return }
             self?.handleNativeAction(action)
         }
-        controllerFeatures.onNativeInputState = { [weak self] snapshot in self?.sendNativeInput(snapshot) }
         controllerFeatures.onMacroButtonAction = { [weak self] control, isPressed in
-            guard self?.controllerInputOwner == .stream else { return }
-            self?.setMacroField(control, isPressed: isPressed)
+            guard let self, self.controllerInputOwner == .stream,
+                  let field = Self.macroField(for: control) else { return }
+            let value = isPressed ? "1" : "null"
+            self.evaluateJS("try { window.BxCBridge && BxCBridge.updateMacroButtons({\(field):\(value)}); } catch (e) {}")
+        }
+        controllerFeatures.onMacroReset = { [weak self] in
+            self?.resetWebMacroOverlay()
         }
         controllerFeatures.startPolling(interval: 1.0 / 60.0)
+        _ = inputPresets
 
         // This app drives a website, not documents: File and Edit menus add
         // noise. Remove them once the (SwiftUI-built) main menu exists.
@@ -161,7 +165,7 @@ final class BrowserModel: ObservableObject {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        window.title = "Xbox Cloud Gaming"
+        window.title = "Mac Xcloud"
         window.identifier = NSUserInterfaceItemIdentifier("xcg-main")
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
@@ -256,6 +260,33 @@ final class BrowserModel: ObservableObject {
         evaluateJS("try { if (window.BxCBridge) BxCBridge.setGamepadPollingPaused(\(paused)); else if (window.BX_EXPOSED) window.BX_EXPOSED.disableGamepadPolling = \(paused); 'ok' } catch (e) { 'err' }")
     }
 
+    func resetWebMacroOverlay() {
+        evaluateJS("try { window.BxCBridge && BxCBridge.resetMacroButtons(); } catch (e) {}")
+    }
+
+    private static func macroField(for control: ControllerControl) -> String? {
+        switch control {
+        case .buttonA: "A"
+        case .buttonB: "B"
+        case .buttonX: "X"
+        case .buttonY: "Y"
+        case .menu: "Menu"
+        case .options: "View"
+        case .home: "Nexus"
+        case .leftShoulder: "LeftShoulder"
+        case .rightShoulder: "RightShoulder"
+        case .leftStickButton: "LeftThumb"
+        case .rightStickButton: "RightThumb"
+        case .dpadUp: "DPadUp"
+        case .dpadDown: "DPadDown"
+        case .dpadLeft: "DPadLeft"
+        case .dpadRight: "DPadRight"
+        case .touchpadButton: "Share"
+        case .leftTrigger: "LeftTrigger"
+        case .rightTrigger: "RightTrigger"
+        }
+    }
+
     private func owner(for window: NSWindow?) -> ControllerInputOwner {
         guard NSApp.isActive, let window else { return .none }
         let root = window.sheetParent ?? window
@@ -287,14 +318,9 @@ final class BrowserModel: ObservableObject {
             reconcileControllerOwnerState()
             return
         }
-        let previous = controllerInputOwner
         controllerInputOwner = next
-
-        if previous == .stream, next != .stream {
-            macroFields.removeAll()
-            evaluateJS("try { BxCBridge.updateNativeInput({ reset:true, enabled:false }); 'ok' } catch(e) { 'err' }")
-        }
         reconcileControllerOwnerState()
+        if next != .stream { controllerFeatures.resetMacros() }
         if next != .controllerTools { controllerFeatures.cancelCalibration() }
     }
 
@@ -357,66 +383,6 @@ final class BrowserModel: ObservableObject {
 
     func evaluateJS(_ script: String, completion: (@Sendable (Any?, (any Error)?) -> Void)? = nil) {
         webView?.evaluateJavaScript(script, completionHandler: completion)
-    }
-
-    private var lastNativeInputSentAt: TimeInterval = 0
-
-    func sendNativeInput(_ snapshot: ControllerInputSnapshot) {
-        guard controllerInputOwner == .stream else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastNativeInputSentAt >= (1.0 / 60.0) else { return }
-        lastNativeInputSentAt = now
-
-        let gyroSettings = controllerFeatures.settings.gyro
-        let processedGyro = controllerFeatures.processedGyroOutput
-        let gyroActive = gyroSettings.mode != .pointer || snapshot.leftTrigger > 0.15
-        let gyroX = gyroActive ? Double(processedGyro.x) : 0
-        let gyroY = gyroActive ? Double(processedGyro.y) : 0
-
-        // Browser/Better xCloud remains authoritative for physical buttons,
-        // sticks, triggers and remapping. Native contributes only gyro and
-        // finite macro deltas, preventing remapped shooter controls from being
-        // overwritten by a stale raw native snapshot.
-        let target = gyroSettings.target == .leftStick ? "left" : "right"
-        evaluateJS("try { window.__xcgUpdateGyro({ enabled: \(gyroSettings.mode != .off && gyroActive), target: '\(target)', x: \(gyroX), y: \(gyroY) }); 'ok' } catch (e) { 'err' }")
-
-        let state: [String: Any] = [
-            "enabled": !macroFields.isEmpty,
-            "gyro": [:],
-            "suppressBrowserRumble": controllerFeatures.settings.haptics.mode != .standard,
-            "preset": controllerFeatures.settings.categoryPreset.selectedPreset.rawValue,
-            "macro": macroFields,
-        ]
-        guard JSONSerialization.isValidJSONObject(state),
-              let data = try? JSONSerialization.data(withJSONObject: state),
-              let json = String(data: data, encoding: .utf8) else { return }
-        evaluateJS("try { BxCBridge.updateNativeInput(\(json)); 'ok' } catch (e) { 'err' }")
-    }
-
-    private func setMacroField(_ control: ControllerControl, isPressed: Bool) {
-        let key: String?
-        switch control {
-        case .buttonA: key = "A"
-        case .buttonB: key = "B"
-        case .buttonX: key = "X"
-        case .buttonY: key = "Y"
-        case .menu: key = "Menu"
-        case .options: key = "View"
-        case .home: key = "Nexus"
-        case .leftShoulder: key = "LeftShoulder"
-        case .rightShoulder: key = "RightShoulder"
-        case .leftStickButton: key = "LeftThumb"
-        case .rightStickButton: key = "RightThumb"
-        case .dpadUp: key = "DPadUp"
-        case .dpadDown: key = "DPadDown"
-        case .dpadLeft: key = "DPadLeft"
-        case .dpadRight: key = "DPadRight"
-        case .leftTrigger: key = "LeftTrigger"
-        case .rightTrigger: key = "RightTrigger"
-        case .touchpadButton: key = nil
-        }
-        guard let key else { return }
-        if isPressed { macroFields[key] = 1 } else { macroFields.removeValue(forKey: key) }
     }
 
     func handleNativeAction(_ action: ControllerNativeAction) {
@@ -483,6 +449,9 @@ final class BrowserModel: ObservableObject {
     // MARK: - State updates (called by WebView.Coordinator)
 
     func navigationStarted() {
+        inputPresets.invalidateWebOperationsForNavigation()
+        controllerFeatures.resetMacros()
+        bridgeReady = false
         isLoading = true
         loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
         loadingTimeout?.cancel()
@@ -534,14 +503,26 @@ final class BrowserModel: ObservableObject {
         loadPhase = .failed(BrowserLoadFailure(error: error, failingURL: url))
     }
 
+    private var webContentTerminationDates: [Date] = []
+
     func webContentTerminated() {
         loadingTimeout?.cancel()
         loadingTimeout = nil
         isLoading = false
+        bridgeReady = false
+        controllerFeatures.stopHaptics()
+        let now = Date()
+        webContentTerminationDates = webContentTerminationDates.filter { now.timeIntervalSince($0) < 60 }
+        webContentTerminationDates.append(now)
+        let repeatedlyTerminated = webContentTerminationDates.count >= 3
         loadPhase = .failed(BrowserLoadFailure(
-            title: "Connection issue",
-            message: "The Xbox web process stopped unexpectedly.",
-            recoverySuggestion: "Retry to restart the Xbox page."
+            title: repeatedlyTerminated ? "Xbox page repeatedly stopped" : "Connection issue",
+            message: repeatedlyTerminated
+                ? "The WebKit content process stopped several times. This can be caused by a private WebKit crash outside the app's control."
+                : "The Xbox web process stopped unexpectedly.",
+            recoverySuggestion: repeatedlyTerminated
+                ? "Quit and reopen the app, then retry with the default renderer."
+                : "Retry to restart the Xbox page."
         ))
     }
 
@@ -568,6 +549,11 @@ final class BrowserModel: ObservableObject {
             report.userAgent = body["ua"] as? String ?? ""
         case "gamepads":
             report.webControllerIDs = body["ids"] as? [String] ?? []
+            if !report.webControllerIDs.isEmpty {
+                inputPresets.retryActiveWebSettings()
+            } else {
+                controllerFeatures.resetMacros()
+            }
         case "gamepad-error":
             note("Gamepad polling error: \(body["detail"] as? String ?? "unknown")")
         case "app-fullscreen":
@@ -576,14 +562,12 @@ final class BrowserModel: ObservableObject {
             let readyState = body["readyState"] as? String ?? ""
             if readyState == "interactive" || readyState == "complete" {
                 pageBecameReady()
+                inputPresets.retryActiveWebSettings()
             }
         case "bridge-ready":
-            let capabilities = body["capabilities"] as? [String: Any] ?? [:]
-            nativeInputMergeReady = capabilities["inputMerge"] as? Bool ?? false
-            nativeInputMergeReason = nativeInputMergeReady
-                ? "Ready"
-                : (capabilities["inputMergeReason"] as? String ?? "Input merge unavailable")
-            note("Better xCloud bridge ready (inputMerge=\(nativeInputMergeReady))")
+            bridgeReady = true
+            inputPresets.retryActiveWebSettings()
+            note("Better xCloud bridge ready")
         case "native-rumble":
             let left = Float(body["leftMotorPercent"] as? Double ?? 0) / 100
             let right = Float(body["rightMotorPercent"] as? Double ?? 0) / 100

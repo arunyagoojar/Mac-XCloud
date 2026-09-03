@@ -33,9 +33,6 @@ struct ControllerDescriptor: Codable, Equatable, Identifiable, Sendable {
 
 struct ControllerCapabilities: Codable, Equatable, Sendable {
     var hasExtendedGamepad: Bool
-    var hasMotion: Bool
-    var hasAttitude: Bool
-    var hasRotationRate: Bool
     var hasTouchpad: Bool
     var supportsTwoFingerTouch: Bool
     var hasAdaptiveTriggers: Bool
@@ -50,9 +47,6 @@ struct ControllerCapabilities: Codable, Equatable, Sendable {
 
     static let unavailable = ControllerCapabilities(
         hasExtendedGamepad: false,
-        hasMotion: false,
-        hasAttitude: false,
-        hasRotationRate: false,
         hasTouchpad: false,
         supportsTwoFingerTouch: false,
         hasAdaptiveTriggers: false,
@@ -76,39 +70,6 @@ struct ControllerVector2: Codable, Equatable, Sendable {
     static let zero = ControllerVector2(x: 0, y: 0)
 
     var magnitude: Float { (x * x + y * y).squareRoot() }
-}
-
-struct ControllerVector3: Codable, Equatable, Sendable {
-    var x: Double
-    var y: Double
-    var z: Double
-
-    static let zero = ControllerVector3(x: 0, y: 0, z: 0)
-}
-
-struct ControllerQuaternion: Codable, Equatable, Sendable {
-    var x: Double
-    var y: Double
-    var z: Double
-    var w: Double
-
-    static let identity = ControllerQuaternion(x: 0, y: 0, z: 0, w: 1)
-}
-
-struct ControllerMotionSnapshot: Codable, Equatable, Sendable {
-    var acceleration: ControllerVector3
-    var gravity: ControllerVector3
-    var userAcceleration: ControllerVector3
-    var rotationRate: ControllerVector3
-    var attitude: ControllerQuaternion
-
-    static let zero = ControllerMotionSnapshot(
-        acceleration: .zero,
-        gravity: .zero,
-        userAcceleration: .zero,
-        rotationRate: .zero,
-        attitude: .identity
-    )
 }
 
 struct ControllerButtonState: Codable, Equatable, Sendable {
@@ -194,7 +155,6 @@ struct ControllerInputSnapshot: Codable, Equatable, Sendable {
     var buttons: ControllerButtonsSnapshot
     var primaryTouch: ControllerTouchPoint
     var secondaryTouch: ControllerTouchPoint
-    var motion: ControllerMotionSnapshot?
     var battery: ControllerBatterySnapshot?
 
     static let empty = ControllerInputSnapshot(
@@ -206,7 +166,6 @@ struct ControllerInputSnapshot: Codable, Equatable, Sendable {
         buttons: .released,
         primaryTouch: .inactive,
         secondaryTouch: .inactive,
-        motion: nil,
         battery: nil
     )
 }
@@ -359,29 +318,112 @@ struct ControllerCalibrationProgress: Codable, Equatable, Sendable {
 
 // MARK: - Adaptive triggers
 
-enum AdaptiveTriggerPreset: String, Codable, CaseIterable, Sendable {
+enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     case off
-    case softResistance
-    case firmResistance
+    case feedback
     case weapon
-    case pistolBreakpoint
-    case heavyPistol
-    case shotgunBreak
-    case hairTrigger
-    case triggerLock
-    case automaticRecoil
-    case smgRapidPulse
-    case burstPulse
-    case flamethrower
-    case bow
-    case accelerator
-    case brakeComfort
-    case brakeFirm
-    case absPulse
-    case platformerEndStop
-    case cinematic
+    case bowAndArrow
     case vibration
-    case custom
+    case acceleration
+    case deceleration
+    case engineStrain
+    case braking
+    case pistolFire
+    case shotgunFire
+    case smgFire
+    case sniperFire
+    case galloping
+    case machineGun
+    case fishing
+    case triggerJam
+    case doorResistance
+    case electricShock
+    case heartbeat
+    case rain
+
+    init(from decoder: Decoder) throws {
+        self = Self.migrated(try decoder.singleValueContainer().decode(String.self))
+    }
+
+    static func migrated(_ value: String) -> Self {
+        if let current = Self(rawValue: value) { return current }
+        // One-way migration for presets saved by earlier native builds.
+        return switch value {
+        case "softResistance": .feedback
+        case "firmResistance": .doorResistance
+        case "pistolBreakpoint", "heavyPistol": .pistolFire
+        case "shotgunBreak": .shotgunFire
+        case "hairTrigger": .triggerJam
+        case "triggerLock": .triggerJam
+        case "automaticRecoil": .machineGun
+        case "smgRapidPulse": .smgFire
+        case "burstPulse": .machineGun
+        case "flamethrower": .electricShock
+        case "bow": .bowAndArrow
+        case "accelerator": .acceleration
+        case "brakeComfort", "brakeFirm", "absPulse": .braking
+        case "platformerEndStop": .feedback
+        case "cinematic": .heartbeat
+        case "custom": .feedback
+        default: .off
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+enum AdaptiveTriggerCategory: String, CaseIterable, Identifiable, Sendable {
+    case standard = "Standard"
+    case racing = "Racing"
+    case weapons = "Weapons"
+    case specialized = "Specialized"
+    case immersive = "Immersive"
+    var id: String { rawValue }
+}
+
+extension AdaptiveTriggerPreset {
+    var htmlName: String {
+        switch self {
+        case .off: "Off"
+        case .feedback: "Feedback"
+        case .weapon: "Weapon"
+        case .bowAndArrow: "Bow & Arrow"
+        case .vibration: "Vibration"
+        case .acceleration: "Acceleration"
+        case .deceleration: "Deceleration"
+        case .engineStrain: "Engine Strain"
+        case .braking: "Braking"
+        case .pistolFire: "Pistol Fire"
+        case .shotgunFire: "Shotgun Fire"
+        case .smgFire: "SMG Fire"
+        case .sniperFire: "Sniper Fire"
+        case .galloping: "Galloping"
+        case .machineGun: "Machine Gun"
+        case .fishing: "Fishing"
+        case .triggerJam: "Trigger Jam"
+        case .doorResistance: "Door Resistance"
+        case .electricShock: "Electric Shock"
+        case .heartbeat: "Heartbeat"
+        case .rain: "Rain"
+        }
+    }
+
+    var category: AdaptiveTriggerCategory {
+        switch self {
+        case .off, .feedback, .weapon, .bowAndArrow, .vibration: .standard
+        case .acceleration, .deceleration, .engineStrain, .braking: .racing
+        case .pistolFire, .shotgunFire, .smgFire, .sniperFire: .weapons
+        case .galloping, .machineGun: .specialized
+        case .fishing, .triggerJam, .doorResistance, .electricShock, .heartbeat, .rain: .immersive
+        }
+    }
+
+    static func catalog(in category: AdaptiveTriggerCategory) -> [AdaptiveTriggerPreset] {
+        allCases.filter { $0.category == category }
+    }
 }
 
 enum AdaptiveTriggerEffectMode: String, Codable, CaseIterable, Sendable {
@@ -428,16 +470,41 @@ struct AdaptiveTriggerSettings: Codable, Equatable, Sendable {
     var rightPreset: AdaptiveTriggerPreset
     var leftCustom: AdaptiveTriggerCustomParameters
     var rightCustom: AdaptiveTriggerCustomParameters
+    var leftUsesCustom: Bool
+    var rightUsesCustom: Bool
 
     static let `default` = AdaptiveTriggerSettings(
         leftPreset: .off,
         rightPreset: .off,
         leftCustom: .default,
-        rightCustom: .default
+        rightCustom: .default,
+        leftUsesCustom: false,
+        rightUsesCustom: false
     )
+
+    private enum CodingKeys: String, CodingKey { case leftPreset, rightPreset, leftCustom, rightCustom, leftUsesCustom, rightUsesCustom }
+
+    init(leftPreset: AdaptiveTriggerPreset, rightPreset: AdaptiveTriggerPreset, leftCustom: AdaptiveTriggerCustomParameters, rightCustom: AdaptiveTriggerCustomParameters, leftUsesCustom: Bool, rightUsesCustom: Bool) {
+        self.leftPreset = leftPreset
+        self.rightPreset = rightPreset
+        self.leftCustom = leftCustom
+        self.rightCustom = rightCustom
+        self.leftUsesCustom = leftUsesCustom
+        self.rightUsesCustom = rightUsesCustom
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        leftPreset = try container.decodeIfPresent(AdaptiveTriggerPreset.self, forKey: .leftPreset) ?? .off
+        rightPreset = try container.decodeIfPresent(AdaptiveTriggerPreset.self, forKey: .rightPreset) ?? .off
+        leftCustom = try container.decodeIfPresent(AdaptiveTriggerCustomParameters.self, forKey: .leftCustom) ?? .default
+        rightCustom = try container.decodeIfPresent(AdaptiveTriggerCustomParameters.self, forKey: .rightCustom) ?? .default
+        leftUsesCustom = try container.decodeIfPresent(Bool.self, forKey: .leftUsesCustom) ?? false
+        rightUsesCustom = try container.decodeIfPresent(Bool.self, forKey: .rightUsesCustom) ?? false
+    }
 }
 
-// MARK: - Haptics and motion
+// MARK: - Haptics
 
 enum HapticMode: String, Codable, CaseIterable, Sendable {
     case off
@@ -468,54 +535,6 @@ struct HapticSettings: Codable, Equatable, Sendable {
         sharpness: 0.5,
         preferredLocality: .default
     )
-}
-
-enum GyroMode: String, Codable, CaseIterable, Sendable {
-    case off
-    case raw
-    case rightStick
-    case pointer
-}
-
-enum GyroTarget: String, Codable, CaseIterable, Sendable {
-    case leftStick
-    case rightStick
-}
-
-struct GyroSettings: Codable, Equatable, Sendable {
-    var mode: GyroMode
-    var target: GyroTarget
-    var sensitivityX: Float
-    var sensitivityY: Float
-    var deadzone: Float
-    var invertX: Bool
-    var invertY: Bool
-
-    static let `default` = GyroSettings(
-        mode: .off,
-        target: .rightStick,
-        sensitivityX: 1,
-        sensitivityY: 1,
-        deadzone: 0.02,
-        invertX: false,
-        invertY: false
-    )
-
-    private enum CodingKeys: String, CodingKey { case mode, target, sensitivityX, sensitivityY, deadzone, invertX, invertY }
-    init(mode: GyroMode, target: GyroTarget, sensitivityX: Float, sensitivityY: Float, deadzone: Float, invertX: Bool, invertY: Bool) {
-        self.mode = mode; self.target = target; self.sensitivityX = sensitivityX; self.sensitivityY = sensitivityY
-        self.deadzone = deadzone; self.invertX = invertX; self.invertY = invertY
-    }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        mode = try c.decodeIfPresent(GyroMode.self, forKey: .mode) ?? .off
-        target = try c.decodeIfPresent(GyroTarget.self, forKey: .target) ?? (mode == .raw ? .leftStick : .rightStick)
-        sensitivityX = try c.decodeIfPresent(Float.self, forKey: .sensitivityX) ?? 1
-        sensitivityY = try c.decodeIfPresent(Float.self, forKey: .sensitivityY) ?? 1
-        deadzone = try c.decodeIfPresent(Float.self, forKey: .deadzone) ?? 0.02
-        invertX = try c.decodeIfPresent(Bool.self, forKey: .invertX) ?? false
-        invertY = try c.decodeIfPresent(Bool.self, forKey: .invertY) ?? false
-    }
 }
 
 // MARK: - Touchpad gestures and actions
@@ -690,6 +709,7 @@ enum ControllerMacroValidationError: Error, LocalizedError, Equatable {
     case negativeDelay
     case durationExceeded(maximumMilliseconds: Int)
     case invalidHapticDuration
+    case nestedMacro
 
     var errorDescription: String? {
         switch self {
@@ -697,6 +717,7 @@ enum ControllerMacroValidationError: Error, LocalizedError, Equatable {
         case .negativeDelay: return "Macro step delays cannot be negative."
         case .durationExceeded(let maximum): return "A macro cannot exceed \(maximum) milliseconds."
         case .invalidHapticDuration: return "Haptic macro durations must be between 0 and 2000 milliseconds."
+        case .nestedMacro: return "Macros cannot run another macro."
         }
     }
 }
@@ -750,6 +771,9 @@ struct ControllerMacro: Codable, Equatable, Identifiable, Sendable {
             if case .haptic(_, _, let duration) = step.action,
                !(0...Self.maximumDurationMilliseconds).contains(duration) {
                 throw ControllerMacroValidationError.invalidHapticDuration
+            }
+            if case .nativeAction(.macro) = step.action {
+                throw ControllerMacroValidationError.nestedMacro
             }
         }
         guard totalDurationMilliseconds <= Self.maximumDurationMilliseconds else {
@@ -830,11 +854,32 @@ struct ControllerLEDSettings: Codable, Equatable, Sendable {
 
 // MARK: - Persisted settings root
 
+/// Settings safe to move between controllers and devices. Hardware calibration
+/// remains local because centers and ranges are specific to one physical device.
+struct PerPresetControllerSettings: Codable, Equatable, Sendable {
+    var adaptiveTriggers: AdaptiveTriggerSettings
+    var haptics: HapticSettings
+    var touchpad: TouchpadSettings
+    var categoryPreset: ControllerCategoryPresetSettings
+    var shortcuts: ControllerShortcutSchema
+    var macros: [ControllerMacro]
+    var led: ControllerLEDSettings
+
+    static let `default` = PerPresetControllerSettings(
+        adaptiveTriggers: .default,
+        haptics: .default,
+        touchpad: .default,
+        categoryPreset: .default,
+        shortcuts: .default,
+        macros: [],
+        led: .default
+    )
+}
+
 struct ControllerSettings: Codable, Equatable, Sendable {
     var calibration: ControllerCalibration
     var adaptiveTriggers: AdaptiveTriggerSettings
     var haptics: HapticSettings
-    var gyro: GyroSettings
     var touchpad: TouchpadSettings
     var categoryPreset: ControllerCategoryPresetSettings
     var shortcuts: ControllerShortcutSchema
@@ -845,11 +890,32 @@ struct ControllerSettings: Codable, Equatable, Sendable {
         calibration: .default,
         adaptiveTriggers: .default,
         haptics: .default,
-        gyro: .default,
         touchpad: .default,
         categoryPreset: .default,
         shortcuts: .default,
         macros: [],
         led: .default
     )
+
+    var perPreset: PerPresetControllerSettings {
+        PerPresetControllerSettings(
+            adaptiveTriggers: adaptiveTriggers,
+            haptics: haptics,
+            touchpad: touchpad,
+            categoryPreset: categoryPreset,
+            shortcuts: shortcuts,
+            macros: macros,
+            led: led
+        )
+    }
+
+    mutating func apply(_ preset: PerPresetControllerSettings) {
+        adaptiveTriggers = preset.adaptiveTriggers
+        haptics = preset.haptics
+        touchpad = preset.touchpad
+        categoryPreset = preset.categoryPreset
+        shortcuts = preset.shortcuts
+        macros = preset.macros
+        led = preset.led
+    }
 }

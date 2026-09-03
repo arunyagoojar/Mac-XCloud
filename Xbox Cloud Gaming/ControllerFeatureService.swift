@@ -17,6 +17,7 @@ final class ControllerFeatureService: ObservableObject {
     typealias SnapshotHandler = (ControllerInputSnapshot) -> Void
     typealias ActionHandler = (ControllerNativeAction) -> Void
     typealias MacroButtonHandler = (ControllerControl, Bool) -> Void
+    typealias MacroResetHandler = () -> Void
 
     @Published private(set) var descriptor: ControllerDescriptor?
     @Published private(set) var capabilities = ControllerCapabilities.unavailable
@@ -33,6 +34,7 @@ final class ControllerFeatureService: ObservableObject {
     var onNativeInputState: SnapshotHandler?
     var onShortcutAction: ActionHandler?
     var onMacroButtonAction: MacroButtonHandler?
+    var onMacroReset: MacroResetHandler?
 
     private let defaults: UserDefaults
     private let persistenceKey: String
@@ -47,9 +49,6 @@ final class ControllerFeatureService: ObservableObject {
     private var calibrationSession: CalibrationSession?
     private var isApplyingSettings = false
     private var controllerToolsActive = false
-    private var gyroBaselineGravityX: Double = 0
-    private var filteredGyro = ControllerVector2.zero
-    private var lastGyroTimestamp: TimeInterval?
     private var lastLEDColor: ControllerLEDColor?
 
     private struct ShortcutRuntimeState {
@@ -102,14 +101,11 @@ final class ControllerFeatureService: ObservableObject {
             if version < 2, saved.touchpad.mappings.isEmpty {
                 saved.touchpad.mappings = TouchpadSettings.default.mappings
             }
-            // v3 removes the unreliable gameplay gyro integration while keeping
-            // native motion diagnostics in the Controller Test screen.
-            if version < 3 { saved.gyro.mode = .off }
             settings = saved
         } else {
             settings = .default
         }
-        defaults.set(3, forKey: "nativeController.settingsVersion")
+        defaults.set(4, forKey: "nativeController.settingsVersion")
         registerForControllerNotifications()
         if automaticallyAttach {
             attach(to: GCController.current ?? GCController.controllers().first)
@@ -121,9 +117,6 @@ final class ControllerFeatureService: ObservableObject {
         touchRuntime.pendingTapTask?.cancel()
         macroTasks.values.forEach { $0.cancel() }
         observers.forEach(NotificationCenter.default.removeObserver)
-        if let motion = controller?.motion, motion.sensorsRequireManualActivation {
-            motion.sensorsActive = false
-        }
         if let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad {
             dualSense.leftTrigger.setModeOff()
             dualSense.rightTrigger.setModeOff()
@@ -144,7 +137,6 @@ final class ControllerFeatureService: ObservableObject {
         capabilities = makeCapabilities(for: controller)
         configureInputHandlers(for: controller)
         configureTouchpadHandlers(for: controller)
-        configureMotion(for: controller)
         rebuildHapticEngines(for: controller)
         applyAdaptiveTriggerSettings()
         applyLEDPolicy()
@@ -156,8 +148,7 @@ final class ControllerFeatureService: ObservableObject {
         pollTimer = nil
         touchRuntime.pendingTapTask?.cancel()
         touchRuntime = TouchRuntimeState()
-        macroTasks.values.forEach { $0.cancel() }
-        macroTasks.removeAll()
+        resetMacros()
         calibrationSession = nil
         calibrationProgress = nil
 
@@ -173,12 +164,6 @@ final class ControllerFeatureService: ObservableObject {
                 touchpad.touchDown = nil
                 touchpad.touchMoved = nil
                 touchpad.touchUp = nil
-            }
-            if let motion = controller.motion {
-                motion.valueChangedHandler = nil
-                if motion.sensorsRequireManualActivation {
-                    motion.sensorsActive = false
-                }
             }
         }
 
@@ -223,16 +208,7 @@ final class ControllerFeatureService: ObservableObject {
     func setControllerToolsActive(_ active: Bool) {
         controllerToolsActive = active
         if !active { cancelCalibration() }
-        configureMotion(for: controller)
     }
-
-    func recenterMotion() {
-        gyroBaselineGravityX = snapshot.motion?.gravity.x ?? 0
-        filteredGyro = .zero
-        lastGyroTimestamp = nil
-    }
-
-    var processedGyroOutput: ControllerVector2 { filteredGyro }
 
     func updateSettings(_ update: (inout ControllerSettings) -> Void) {
         var copy = settings
@@ -252,7 +228,6 @@ final class ControllerFeatureService: ObservableObject {
         guard !isApplyingSettings else { return }
         isApplyingSettings = true
         defer { isApplyingSettings = false }
-        configureMotion(for: controller)
         configureTouchpadHandlers(for: controller)
         rebuildHapticEngines(for: controller)
         applyAdaptiveTriggerSettings()
@@ -270,7 +245,7 @@ final class ControllerFeatureService: ObservableObject {
         let rawRightTrigger = gamepad.rightTrigger.value
         let dualSense = gamepad as? GCDualSenseGamepad
 
-        var next = ControllerInputSnapshot(
+        let next = ControllerInputSnapshot(
             timestamp: timestamp,
             leftStick: settings.calibration.leftStick.apply(to: rawLeftStick),
             rightStick: settings.calibration.rightStick.apply(to: rawRightStick),
@@ -279,14 +254,8 @@ final class ControllerFeatureService: ObservableObject {
             buttons: buttonsSnapshot(from: gamepad, dualSense: dualSense),
             primaryTouch: dualSense.map { touchPoint(from: $0.touchpadPrimary, index: 0) } ?? .inactive,
             secondaryTouch: dualSense.map { touchPoint(from: $0.touchpadSecondary, index: 1) } ?? .inactive,
-            motion: motionSnapshot(from: controller.motion),
             battery: batterySnapshot(from: controller)
         )
-
-        if settings.gyro.mode == .off && !controllerToolsActive {
-            next.motion = nil
-        }
-        updateFilteredGyro(from: next.motion, timestamp: timestamp)
 
         snapshot = next
         onNativeInputState?(next)
@@ -335,22 +304,6 @@ final class ControllerFeatureService: ObservableObject {
         )
     }
 
-    private func motionSnapshot(from motion: GCMotion?) -> ControllerMotionSnapshot? {
-        guard let motion else { return nil }
-        let acceleration = motion.acceleration
-        let gravity = motion.gravity
-        let userAcceleration = motion.userAcceleration
-        let rotation = motion.rotationRate
-        let attitude = motion.attitude
-        return ControllerMotionSnapshot(
-            acceleration: ControllerVector3(x: acceleration.x, y: acceleration.y, z: acceleration.z),
-            gravity: ControllerVector3(x: gravity.x, y: gravity.y, z: gravity.z),
-            userAcceleration: ControllerVector3(x: userAcceleration.x, y: userAcceleration.y, z: userAcceleration.z),
-            rotationRate: ControllerVector3(x: rotation.x, y: rotation.y, z: rotation.z),
-            attitude: ControllerQuaternion(x: attitude.x, y: attitude.y, z: attitude.z, w: attitude.w)
-        )
-    }
-
     private func batterySnapshot(from controller: GCController) -> ControllerBatterySnapshot? {
         guard let battery = controller.battery else { return nil }
         let state: ControllerBatterySnapshot.State
@@ -362,56 +315,6 @@ final class ControllerFeatureService: ObservableObject {
         @unknown default: state = .unknown
         }
         return ControllerBatterySnapshot(level: min(max(battery.batteryLevel, 0), 1), state: state)
-    }
-
-    // MARK: - Motion
-
-    func setMotionEnabled(_ enabled: Bool) {
-        updateSettings { $0.gyro.mode = enabled ? .raw : .off }
-    }
-
-    private func configureMotion(for controller: GCController?) {
-        guard let motion = controller?.motion else { return }
-        let shouldEnable = settings.gyro.mode != .off || controllerToolsActive
-        // Motion is sampled by the fixed-rate snapshot timer; no duplicate
-        // full snapshot publication from the sensor callback.
-        motion.valueChangedHandler = shouldEnable ? { _ in } : nil
-        if motion.sensorsRequireManualActivation {
-            motion.sensorsActive = shouldEnable
-        }
-    }
-
-    private func updateFilteredGyro(from motion: ControllerMotionSnapshot?, timestamp: TimeInterval) {
-        guard let motion, settings.gyro.mode != .off else {
-            filteredGyro = .zero
-            lastGyroTimestamp = timestamp
-            return
-        }
-        let dt = min(max(timestamp - (lastGyroTimestamp ?? timestamp), 1.0 / 240.0), 0.1)
-        lastGyroTimestamp = timestamp
-        let target: ControllerVector2
-        switch settings.gyro.mode {
-        case .raw:
-            target = ControllerVector2(
-                x: Float((motion.gravity.x - gyroBaselineGravityX) * Double(settings.gyro.sensitivityX)),
-                y: 0
-            )
-        case .rightStick, .pointer:
-            target = ControllerVector2(
-                x: Float(motion.rotationRate.y * Double(settings.gyro.sensitivityX) * dt * 7.5),
-                y: Float(-motion.rotationRate.x * Double(settings.gyro.sensitivityY) * dt * 7.5)
-            )
-        case .off:
-            target = .zero
-        }
-        let magnitude = target.magnitude
-        let deadzone = settings.gyro.deadzone
-        let deadzoned = magnitude < deadzone ? ControllerVector2.zero : target
-        let alpha = Float(1 - exp(-dt * 16))
-        filteredGyro.x += (deadzoned.x - filteredGyro.x) * alpha
-        filteredGyro.y += (deadzoned.y - filteredGyro.y) * alpha
-        filteredGyro.x = min(max(settings.gyro.invertX ? -filteredGyro.x : filteredGyro.x, -1), 1)
-        filteredGyro.y = min(max(settings.gyro.invertY ? -filteredGyro.y : filteredGyro.y, -1), 1)
     }
 
     // MARK: - Calibration sessions
@@ -507,80 +410,82 @@ final class ControllerFeatureService: ObservableObject {
 
     func applyAdaptiveTriggerSettings() {
         guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else { return }
-        applyAdaptiveTrigger(
-            dualSense.leftTrigger,
-            preset: settings.adaptiveTriggers.leftPreset,
-            custom: settings.adaptiveTriggers.leftCustom
-        )
-        applyAdaptiveTrigger(
-            dualSense.rightTrigger,
-            preset: settings.adaptiveTriggers.rightPreset,
-            custom: settings.adaptiveTriggers.rightCustom
-        )
+        if settings.adaptiveTriggers.leftUsesCustom {
+            applyCustomAdaptiveTrigger(dualSense.leftTrigger, parameters: settings.adaptiveTriggers.leftCustom)
+        } else {
+            applyAdaptiveTrigger(dualSense.leftTrigger, preset: settings.adaptiveTriggers.leftPreset)
+        }
+        if settings.adaptiveTriggers.rightUsesCustom {
+            applyCustomAdaptiveTrigger(dualSense.rightTrigger, parameters: settings.adaptiveTriggers.rightCustom)
+        } else {
+            applyAdaptiveTrigger(dualSense.rightTrigger, preset: settings.adaptiveTriggers.rightPreset)
+        }
     }
 
     private func applyAdaptiveTrigger(
         _ trigger: GCDualSenseAdaptiveTrigger,
-        preset: AdaptiveTriggerPreset,
-        custom: AdaptiveTriggerCustomParameters
+        preset: AdaptiveTriggerPreset
     ) {
         switch preset {
         case .off:
             trigger.setModeOff()
-        case .softResistance:
-            trigger.setModeFeedbackWithStartPosition(0.25, resistiveStrength: 0.25)
-        case .firmResistance:
-            trigger.setModeFeedbackWithStartPosition(0.2, resistiveStrength: 0.75)
+        case .feedback:
+            trigger.setModeFeedbackWithStartPosition(0.25, resistiveStrength: 0.35)
         case .weapon:
             trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.67, resistiveStrength: 0.75)
-        case .pistolBreakpoint:
-            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.55, resistiveStrength: 0.55)
-        case .heavyPistol:
-            trigger.setModeWeaponWithStartPosition(0.25, endPosition: 0.62, resistiveStrength: 0.72)
-        case .shotgunBreak:
-            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.72, resistiveStrength: 0.78)
-        case .hairTrigger:
-            trigger.setModeWeaponWithStartPosition(0.222, endPosition: 0.333, resistiveStrength: 0.38)
-        case .triggerLock:
-            trigger.setModeFeedbackWithStartPosition(0.20, resistiveStrength: 0.72)
-        case .automaticRecoil:
-            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.78, frequency: 0.72)
-        case .smgRapidPulse:
-            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.38, frequency: 0.18)
-        case .burstPulse:
-            trigger.setModeVibrationWithStartPosition(0.24, amplitude: 0.58, frequency: 0.32)
-        case .flamethrower:
-            trigger.setModeVibrationWithStartPosition(0.15, amplitude: 0.34, frequency: 0.08)
-        case .bow:
-            applyCustomAdaptiveTrigger(
-                trigger,
-                parameters: AdaptiveTriggerCustomParameters(
-                    mode: .slopeFeedback,
-                    startPosition: 0.1,
-                    endPosition: 0.9,
-                    startStrength: 0.15,
-                    endStrength: 0.95,
-                    amplitude: 0,
-                    frequency: 0
-                )
-            )
-        case .accelerator:
-            trigger.setModeSlopeFeedback(startPosition: 0.12, endPosition: 0.95, startStrength: 0.04, endStrength: 0.34)
-        case .brakeComfort:
-            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.92, startStrength: 0.06, endStrength: 0.48)
-        case .brakeFirm:
-            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.90, startStrength: 0.10, endStrength: 0.68)
-        case .absPulse:
-            trigger.setModeVibrationWithStartPosition(0.62, amplitude: 0.5, frequency: 0.82)
-        case .platformerEndStop:
-            trigger.setModeFeedbackWithStartPosition(0.78, resistiveStrength: 0.22)
-        case .cinematic:
-            trigger.setModeSlopeFeedback(startPosition: 0.15, endPosition: 0.95, startStrength: 0.03, endStrength: 0.18)
+        case .bowAndArrow:
+            applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .slopeFeedback, startPosition: 0.10, endPosition: 0.90, startStrength: 0.15, endStrength: 0.95, amplitude: 0, frequency: 0))
         case .vibration:
-            trigger.setModeVibrationWithStartPosition(0.2, amplitude: 0.6, frequency: 0.55)
-        case .custom:
-            applyCustomAdaptiveTrigger(trigger, parameters: custom)
+            trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.60, frequency: 0.55)
+        case .acceleration:
+            trigger.setModeSlopeFeedback(startPosition: 0.12, endPosition: 0.95, startStrength: 0.04, endStrength: 0.34)
+        case .deceleration:
+            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.92, startStrength: 0.30, endStrength: 0.08)
+        case .engineStrain:
+            trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.30, frequency: 0.16)
+        case .braking:
+            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.90, startStrength: 0.10, endStrength: 0.68)
+        case .pistolFire:
+            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.55, resistiveStrength: 0.55)
+        case .shotgunFire:
+            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.72, resistiveStrength: 0.78)
+        case .smgFire:
+            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.38, frequency: 0.18)
+        case .sniperFire:
+            trigger.setModeWeaponWithStartPosition(0.36, endPosition: 0.72, resistiveStrength: 0.90)
+        case .galloping:
+            trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.42, frequency: 0.24)
+        case .machineGun:
+            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.78, frequency: 0.72)
+        case .fishing:
+            trigger.setModeSlopeFeedback(startPosition: 0.18, endPosition: 0.90, startStrength: 0.12, endStrength: 0.65)
+        case .triggerJam:
+            trigger.setModeFeedbackWithStartPosition(0.20, resistiveStrength: 0.92)
+        case .doorResistance:
+            trigger.setModeSlopeFeedback(startPosition: 0.12, endPosition: 0.92, startStrength: 0.08, endStrength: 0.72)
+        case .electricShock:
+            trigger.setModeVibrationWithStartPosition(0.15, amplitude: 0.75, frequency: 0.90)
+        case .heartbeat:
+            trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.48, frequency: 0.10)
+        case .rain:
+            trigger.setModeVibrationWithStartPosition(0.12, amplitude: 0.18, frequency: 0.82)
         }
+    }
+
+    func previewAdaptiveTrigger(_ parameters: AdaptiveTriggerCustomParameters) {
+        guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else {
+            lastError = "Adaptive triggers require a connected DualSense controller."
+            return
+        }
+        applyCustomAdaptiveTrigger(dualSense.leftTrigger, parameters: parameters)
+        applyCustomAdaptiveTrigger(dualSense.rightTrigger, parameters: parameters)
+    }
+
+    func stopTriggerPreview() {
+        guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else { return }
+        dualSense.leftTrigger.setModeOff()
+        dualSense.rightTrigger.setModeOff()
+        applyAdaptiveTriggerSettings()
     }
 
     private func applyCustomAdaptiveTrigger(
@@ -710,8 +615,8 @@ final class ControllerFeatureService: ObservableObject {
             }
         } else if let dualSense = controller.extendedGamepad as? GCDualSenseGamepad {
             // Some macOS/connection combinations expose DualSense coordinates
-            // but not GCControllerTouchpad down/up events. Fall back to motion
-            // of the two contact pads and use touchpad click as an explicit tap.
+            // but not GCControllerTouchpad down/up events. Fall back to coordinate
+            // changes from the two contact pads and use click as an explicit tap.
             dualSense.touchpadPrimary.valueChangedHandler = { [weak self] pad, x, y in
                 MainActor.assumeIsolated { self?.handleFallbackTouch(index: 0, x: x, y: y, moved: pad.valueChangedHandler != nil) }
             }
@@ -933,23 +838,33 @@ final class ControllerFeatureService: ObservableObject {
             lastError = error.localizedDescription
             return
         }
-        macroTasks[id]?.cancel()
-        macroTasks[id] = Task { [weak self] in
+        resetMacros()
+        macroTasks[id] = Task { @MainActor [weak self] in
+            defer {
+                self?.macroTasks[id] = nil
+                self?.onMacroReset?()
+            }
             for step in macro.steps {
                 guard !Task.isCancelled else { return }
                 if step.delayMilliseconds > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(step.delayMilliseconds) * 1_000_000)
                 }
                 guard !Task.isCancelled else { return }
-                await MainActor.run { self?.executeMacroStep(step) }
+                self?.executeMacroStep(step)
             }
-            await MainActor.run { self?.macroTasks[id] = nil }
         }
     }
 
     func cancelMacro(id: UUID) {
         macroTasks[id]?.cancel()
         macroTasks[id] = nil
+        onMacroReset?()
+    }
+
+    func resetMacros() {
+        macroTasks.values.forEach { $0.cancel() }
+        macroTasks.removeAll()
+        onMacroReset?()
     }
 
     private func executeMacroStep(_ step: ControllerMacroStep) {
@@ -963,7 +878,11 @@ final class ControllerFeatureService: ObservableObject {
                 duration: Double(durationMilliseconds) / 1_000
             )
         case .nativeAction(let action):
-            dispatch(action: action)
+            guard case .macro = action else {
+                dispatch(action: action)
+                return
+            }
+            lastError = ControllerMacroValidationError.nestedMacro.localizedDescription
         }
     }
 
@@ -1062,7 +981,6 @@ final class ControllerFeatureService: ObservableObject {
 
     private func makeCapabilities(for controller: GCController) -> ControllerCapabilities {
         let gamepad = controller.extendedGamepad
-        let motion = controller.motion
         let dualSense = gamepad as? GCDualSenseGamepad
         let hapticLocalities = HapticLocality.allCases.filter { locality in
             guard let haptics = controller.haptics else { return false }
@@ -1070,9 +988,6 @@ final class ControllerFeatureService: ObservableObject {
         }
         return ControllerCapabilities(
             hasExtendedGamepad: gamepad != nil,
-            hasMotion: motion != nil,
-            hasAttitude: motion?.hasAttitude ?? false,
-            hasRotationRate: motion?.hasRotationRate ?? false,
             hasTouchpad: dualSense != nil,
             supportsTwoFingerTouch: dualSense != nil,
             hasAdaptiveTriggers: dualSense != nil,

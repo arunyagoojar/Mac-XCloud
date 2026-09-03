@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		238EB1AA3048952700092F4F /* Xbox Cloud Gaming.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Xbox Cloud Gaming.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		238EB1AA3048952700092F4F /* Mac Xcloud.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mac Xcloud.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -40,7 +40,7 @@
 		238EB1AB3048952700092F4F /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				238EB1AA3048952700092F4F /* Xbox Cloud Gaming.app */,
+				238EB1AA3048952700092F4F /* Mac Xcloud.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -67,7 +67,7 @@
 			packageProductDependencies = (
 			);
 			productName = "Xbox Cloud Gaming";
-			productReference = 238EB1AA3048952700092F4F /* Xbox Cloud Gaming.app */;
+			productReference = 238EB1AA3048952700092F4F /* Mac Xcloud.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -268,7 +268,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MARKETING_VERSION = 1;
 				PRODUCT_BUNDLE_IDENTIFIER = "cc.eu.arunya.Xbox-Cloud-Gaming";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				INFOPLIST_KEY_CFBundleDisplayName = "Mac Xcloud";
+				INFOPLIST_KEY_CFBundleName = "Mac Xcloud";
+				PRODUCT_NAME = "Mac Xcloud";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -312,7 +314,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 15.7;
 				MARKETING_VERSION = 1;
 				PRODUCT_BUNDLE_IDENTIFIER = "cc.eu.arunya.Xbox-Cloud-Gaming";
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				INFOPLIST_KEY_CFBundleDisplayName = "Mac Xcloud";
+				INFOPLIST_KEY_CFBundleName = "Mac Xcloud";
+				PRODUCT_NAME = "Mac Xcloud";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

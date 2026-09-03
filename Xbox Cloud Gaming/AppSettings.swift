@@ -335,7 +335,7 @@ struct SettingsCategory: Identifiable {
         ]),
         SettingsCategory(id: "controller", title: "Controller Tools", icon: "gamecontroller.fill", rows: [
             SettingDef(id: "app.controllerTools", label: "Open Controller Tools",
-                       note: "Test, calibrate, configure DualSense triggers and haptics, motion, touchpad gestures, presets, shortcuts and macros.",
+                       note: "Test, calibrate, configure DualSense triggers and haptics, touchpad gestures, input presets, shortcuts and macros.",
                        scope: .stream, kind: .controllerTools),
             SettingDef(id: "app.led", label: "LED color",
                        note: "The DualSense light bar. Pick a dot, or use the picker for any color.",
@@ -401,6 +401,7 @@ extension SettingsModel {
     /// to localStorage, and returns both its public value and raw persisted
     /// value. The native UI and mirror update only after that succeeds.
     func write(id: String, scope: SettingScope, value: Any) {
+        let intendedPresetID = browser?.inputPresets.activePresetID
         if id == "app.clarityPipeline" {
             let pipeline = (value as? String) ?? "fsr1"
             let mode = pipeline == "fsr1" ? "fsr1" : "off"
@@ -430,6 +431,7 @@ extension SettingsModel {
             NativeSettingsMirror.save(processing, for: "video.processing", scope: .stream)
             saveMessage = "Clarity pipeline saved — reload to apply renderer changes"
             needsReload = pipeline != "fsr1"
+            browser?.inputPresets.noteBetterXCloudInputChanged(for: intendedPresetID)
             objectWillChange.send()
             return
         }
@@ -473,6 +475,9 @@ extension SettingsModel {
                     NativeSettingsMirror.save(raw, for: id, scope: .stream)
                 }
                 self.saveMessage = "Saved"
+                if ["mkb.enabled", "nativeMkb.mode", "mkb.p1.slot", "mkb.p2.slot", "mkb.p1.preset.mappingId", "mkb.p2.preset.mappingId", "keyboardShortcuts.preset.inGameId", "controller.settings"].contains(id) {
+                    self.browser?.inputPresets.noteBetterXCloudInputChanged(for: intendedPresetID)
+                }
                 if scope == .global || ["stream.video.codecProfile", "video.player.type", "video.processing", "userAgent.profile"].contains(id) {
                     self.needsReload = true
                 }

@@ -121,7 +121,7 @@ struct XboxSplashView: View {
                 animatedIcon
 
                 VStack(spacing: 7) {
-                    Text("Xbox Cloud Gaming")
+                    Text("Mac Xcloud")
                         .font(.system(size: 26, weight: .semibold, design: .rounded))
                         .tracking(0.2)
 
@@ -135,7 +135,7 @@ struct XboxSplashView: View {
         }
         .ignoresSafeArea()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Xbox Cloud Gaming")
+        .accessibilityLabel("Mac Xcloud")
         .accessibilityValue("Connecting to the cloud")
         .onAppear {
             guard !reduceMotion else { return }

@@ -10,8 +10,8 @@ final class MenuBarStatusController {
     init(browser: BrowserModel) {
         self.browser = browser
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "Xbox Cloud Gaming")
-        item.button?.toolTip = "Xbox Cloud Gaming"
+        item.button?.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "Mac Xcloud")
+        item.button?.toolTip = "Mac Xcloud"
         refreshMenu()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshMenu() }
@@ -49,6 +49,17 @@ final class MenuBarStatusController {
             menu.addItem(b)
         }
         menu.addItem(.separator())
+        let presets = NSMenuItem(title: "Input Preset", action: nil, keyEquivalent: "")
+        let presetMenu = NSMenu()
+        for preset in browser.inputPresets.presets {
+            let presetItem = NSMenuItem(title: preset.name, action: #selector(selectPreset(_:)), keyEquivalent: "")
+            presetItem.target = self
+            presetItem.representedObject = preset.id.uuidString
+            presetItem.state = browser.inputPresets.activePresetID == preset.id ? .on : .off
+            presetMenu.addItem(presetItem)
+        }
+        presets.submenu = presetMenu
+        menu.addItem(presets)
         let settings = NSMenuItem(title: "Open Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -59,7 +70,7 @@ final class MenuBarStatusController {
         reload.target = self
         menu.addItem(reload)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Xbox Cloud Gaming", action: #selector(quitApp), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Mac Xcloud", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         item.menu = menu
@@ -71,6 +82,10 @@ final class MenuBarStatusController {
         menu.addItem(item)
     }
 
+    @objc private func selectPreset(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
+        Task { await browser?.inputPresets.applyPreset(id: id) }
+    }
     @objc private func openSettings() { browser?.openSettingsWindow() }
     @objc private func toggleFullscreen() { browser?.toggleFullscreen() }
     @objc private func reload() { browser?.reload() }

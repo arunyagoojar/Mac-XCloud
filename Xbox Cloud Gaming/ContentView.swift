@@ -21,7 +21,7 @@ struct MainWindowLauncher: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     for window in NSApp.windows where window.identifier?.rawValue != "xcg-main" && window.isVisible {
                         // Only close SwiftUI's empty launcher window.
-                        if window.frame.width >= 800, window.title == "Xbox Cloud Gaming" || window.title.isEmpty {
+                        if window.frame.width >= 800, window.title == "Mac Xcloud" || window.title.isEmpty {
                             window.close()
                         }
                     }

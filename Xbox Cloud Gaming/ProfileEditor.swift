@@ -33,7 +33,7 @@ enum ProfileKind: String, CaseIterable, Identifiable, Hashable {
         case .mkb: "Map keyboard and mouse input to a virtual Xbox controller."
         case .keyboard: "Assign keyboard shortcuts to Better xCloud actions."
         case .controllerShortcuts: "Assign Home/PS + button shortcuts."
-        case .controllerCustomization: "Remap buttons, deadzones, trigger ranges and rumble."
+        case .controllerCustomization: "Remap buttons and stick axes, disable controls, and tune deadzones, trigger ranges, and rumble."
         }
     }
 }
@@ -51,6 +51,8 @@ struct BxProfile: Identifiable {
 final class ProfileEditorModel: ObservableObject {
     let kind: ProfileKind
     private weak var browser: BrowserModel?
+
+    private var intendedPresetID: UUID? { browser?.inputPresets.activePresetID }
 
     @Published var profiles: [BxProfile] = []
     @Published var selectedID: Int?
@@ -139,6 +141,7 @@ final class ProfileEditorModel: ObservableObject {
     }
 
     private func create(name: String, data: [String: Any]) {
+        let presetID = intendedPresetID
         Task {
             isBusy = true
             defer { isBusy = false }
@@ -150,6 +153,7 @@ final class ProfileEditorModel: ObservableObject {
                 if let number = result as? NSNumber { selectedID = number.intValue }
                 await reload()
                 message = "Profile created"
+                browser?.inputPresets.noteBetterXCloudInputChanged(for: presetID)
             } catch {
                 message = "Could not create profile: \(error.localizedDescription)"
             }
@@ -160,6 +164,7 @@ final class ProfileEditorModel: ObservableObject {
         guard let id = selectedID, id > 0 else { return }
         let trimmed = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { message = "Profile name cannot be empty"; return }
+        let presetID = intendedPresetID
         Task {
             isBusy = true
             defer { isBusy = false }
@@ -171,6 +176,7 @@ final class ProfileEditorModel: ObservableObject {
                 )
                 message = "Saved"
                 await reload()
+                browser?.inputPresets.noteBetterXCloudInputChanged(for: presetID)
             } catch {
                 message = "Could not save: \(error.localizedDescription)"
             }
@@ -179,6 +185,7 @@ final class ProfileEditorModel: ObservableObject {
 
     func deleteSelected() {
         guard let id = selectedID, id > 0 else { return }
+        let presetID = intendedPresetID
         Task {
             isBusy = true
             defer { isBusy = false }
@@ -190,6 +197,7 @@ final class ProfileEditorModel: ObservableObject {
                 selectedID = nil
                 await reload()
                 message = "Profile deleted"
+                browser?.inputPresets.noteBetterXCloudInputChanged(for: presetID)
             } catch {
                 message = "Could not delete: \(error.localizedDescription)"
             }
@@ -198,6 +206,7 @@ final class ProfileEditorModel: ObservableObject {
 
     func makeActive() {
         guard let id = selectedID else { return }
+        let presetID = intendedPresetID
         Task {
             do {
                 _ = try await browser?.callAsyncJS(
@@ -206,6 +215,7 @@ final class ProfileEditorModel: ObservableObject {
                 )
                 activeID = id
                 message = "Active profile changed"
+                browser?.inputPresets.noteBetterXCloudInputChanged(for: presetID)
             } catch {
                 message = "Could not activate: \(error.localizedDescription)"
             }
@@ -276,13 +286,36 @@ final class ProfileEditorModel: ObservableObject {
 
     func customizationTarget(_ source: String) -> Int? {
         let mapping = draftData["mapping"] as? [String: Any] ?? [:]
-        return (mapping[source] as? NSNumber)?.intValue
+        guard let value = mapping[source] else { return nil }
+        if let enabled = value as? Bool, !enabled { return -1 }
+        return (value as? NSNumber)?.intValue
     }
 
     func setCustomizationTarget(_ source: String, target: Int?) {
         var mapping = draftData["mapping"] as? [String: Any] ?? [:]
-        if let target { mapping[source] = target } else { mapping.removeValue(forKey: source) }
+        if target == -1 { mapping[source] = false }
+        else if let target { mapping[source] = target }
+        else { mapping.removeValue(forKey: source) }
         draftData["mapping"] = mapping
+        objectWillChange.send()
+    }
+
+    func customizationRange(_ key: String) -> [Double] {
+        let settings = draftData["settings"] as? [String: Any] ?? [:]
+        let raw = settings[key] as? [Any] ?? []
+        guard raw.count >= 2,
+              let lower = raw[0] as? NSNumber,
+              let upper = raw[1] as? NSNumber else { return [0, 100] }
+        return [lower.doubleValue, upper.doubleValue]
+    }
+
+    func setCustomizationRange(_ key: String, lower: Double? = nil, upper: Double? = nil) {
+        var settings = draftData["settings"] as? [String: Any] ?? [:]
+        var value = customizationRange(key)
+        if let lower { value[0] = min(max(lower, 0), value[1]) }
+        if let upper { value[1] = max(min(upper, 100), value[0]) }
+        settings[key] = value.map { Int($0.rounded()) }
+        draftData["settings"] = settings
         objectWillChange.send()
     }
 
@@ -403,6 +436,14 @@ struct ProfileEditorView: View {
         ("3","Y"),("0","A"),("2","X"),("1","B"),("12","D-pad Up"),("13","D-pad Down"),
         ("14","D-pad Left"),("15","D-pad Right"),("8","View"),("9","Menu"),("4","LB"),("5","RB"),
         ("6","LT"),("7","RT"),("10","L3"),("11","R3")
+    ]
+
+    // Matches Better xCloud's ControllerCustomizationsManagerDialog.BUTTONS_ORDER.
+    private let customizationControls: [(String, String)] = [
+        ("0","A"),("1","B"),("2","X"),("3","Y"),("12","D-pad Up"),("15","D-pad Right"),
+        ("13","D-pad Down"),("14","D-pad Left"),("4","LB"),("5","RB"),("6","LT"),("7","RT"),
+        ("10","L3"),("11","R3"),("104","Left Stick Axes"),("204","Right Stick Axes"),
+        ("8","View"),("9","Menu"),("17","Share")
     ]
 
     var body: some View {
@@ -546,16 +587,22 @@ struct ProfileEditorView: View {
 
     private var customizationEditor: some View {
         VStack(alignment: .leading, spacing: 12) {
-            GroupBox("Button remapping") {
-                ForEach(controllerShortcutButtons, id: \.0) { source, label in
+            GroupBox("Button and axis remapping") {
+                ForEach(customizationControls, id: \.0) { source, label in
                     HStack {
-                        Text(label).frame(width: 120, alignment: .leading)
+                        Text(label).frame(width: 140, alignment: .leading)
                         Picker("", selection: Binding<Int?>(
                             get: { model.customizationTarget(source) },
                             set: { model.setCustomizationTarget(source, target: $0) }
                         )) {
                             Text("Unchanged").tag(Optional<Int>.none)
-                            ForEach(controllerShortcutButtons.compactMap { Int($0.0) == Int(source) ? nil : (Int($0.0)!, $0.1) }, id: \.0) {
+                            Text("Disabled").tag(Optional(-1))
+                            let sourceIsAxis = source == "104" || source == "204"
+                            ForEach(customizationControls.compactMap { item -> (Int, String)? in
+                                let itemIsAxis = item.0 == "104" || item.0 == "204"
+                                guard sourceIsAxis == itemIsAxis, item.0 != source, let id = Int(item.0) else { return nil }
+                                return (id, item.1)
+                            }, id: \.0) {
                                 Text($0.1).tag(Optional($0.0))
                             }
                         }
@@ -565,6 +612,10 @@ struct ProfileEditorView: View {
             }
             GroupBox("Controller response") {
                 customizationSlider("Vibration intensity", key: "vibrationIntensity", fallback: 100)
+                customizationRangeRow("Left trigger range", key: "leftTriggerRange")
+                customizationRangeRow("Right trigger range", key: "rightTriggerRange")
+                customizationRangeRow("Left stick deadzone", key: "leftStickDeadzone")
+                customizationRangeRow("Right stick deadzone", key: "rightStickDeadzone")
             }
         }
     }
@@ -584,6 +635,27 @@ struct ProfileEditorView: View {
             Slider(value: Binding(get: { model.customizationNumber(key, default: fallback) }, set: { model.setCustomizationNumber(key, value: $0) }), in: 0...100, step: 10)
                 .disabled(!model.canEdit)
             Text("\(Int(model.customizationNumber(key, default: fallback)))%").frame(width: 44)
+        }
+    }
+
+    private func customizationRangeRow(_ label: String, key: String) -> some View {
+        let range = model.customizationRange(key)
+        return HStack {
+            Text(label).frame(width: 150, alignment: .leading)
+            Text("Min")
+            Slider(value: Binding(
+                get: { model.customizationRange(key)[0] },
+                set: { model.setCustomizationRange(key, lower: $0) }
+            ), in: 0...100, step: 1)
+            .disabled(!model.canEdit)
+            Text("\(Int(range[0]))").frame(width: 30)
+            Text("Max")
+            Slider(value: Binding(
+                get: { model.customizationRange(key)[1] },
+                set: { model.setCustomizationRange(key, upper: $0) }
+            ), in: 0...100, step: 1)
+            .disabled(!model.canEdit)
+            Text("\(Int(range[1]))").frame(width: 30)
         }
     }
 }
