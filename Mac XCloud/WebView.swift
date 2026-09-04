@@ -100,20 +100,59 @@ struct WebView: NSViewRepresentable {
             new MutationObserver(sendSiteReady).observe(document.documentElement, { childList: true, subtree: true });
           } catch (e) {}
           var last = 'init';
-          setInterval(function () {
+          var seenBrowserPads = Object.create(null);
+          var startupScans = 0;
+
+          // WebKit can expose a controller to navigator.getGamepads() after the
+          // page has installed its gamepad listeners. Re-scan during startup so
+          // a controller connected before launch gets the same initialization
+          // path as one physically reconnected after launch.
+          function scanBrowserGamepads(notifyNewPads) {
             try {
-              if (typeof navigator.getGamepads !== 'function') { return; }
-              var pads = Array.from(navigator.getGamepads()).filter(Boolean);
+              if (typeof navigator.getGamepads !== 'function') { return false; }
+              var pads = Array.from(navigator.getGamepads()).filter(function (p) {
+                return p && p.connected !== false;
+              });
               var ids = pads.map(function (p) { return p.id; });
               var state = JSON.stringify(ids);
               if (state !== last) {
                 last = state;
                 send('gamepads', { count: ids.length, ids: ids });
               }
+              if (notifyNewPads) {
+                pads.forEach(function (pad) {
+                  var id = String(pad.id || pad.index);
+                  if (seenBrowserPads[id]) return;
+                  seenBrowserPads[id] = true;
+                  // Dispatch only a real browser-returned Gamepad object. The
+                  // app never fabricates or replaces navigator.getGamepads().
+                  try {
+                    if (typeof GamepadEvent === 'function') {
+                      window.dispatchEvent(new GamepadEvent('gamepadconnected', { gamepad: pad }));
+                    }
+                  } catch (e) {}
+                });
+              }
+              return pads.length > 0;
             } catch (e) {
               send('gamepad-error', { detail: String(e) });
+              return false;
             }
-          }, 1500);
+          }
+
+          window.addEventListener('gamepadconnected', function (event) {
+            if (event.gamepad) seenBrowserPads[String(event.gamepad.id || event.gamepad.index)] = true;
+          });
+          window.addEventListener('gamepaddisconnected', function (event) {
+            if (event.gamepad) delete seenBrowserPads[String(event.gamepad.id || event.gamepad.index)];
+          });
+
+          scanBrowserGamepads(true);
+          var startupRetry = setInterval(function () {
+            startupScans += 1;
+            if (scanBrowserGamepads(true) || startupScans >= 48) clearInterval(startupRetry);
+          }, 250);
+          setInterval(function () { scanBrowserGamepads(true); }, 1500);
         })();
         """#
     }
