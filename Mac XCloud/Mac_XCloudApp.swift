@@ -82,32 +82,37 @@ struct TriggerModeMenu: View {
 
     private var title: String { side == .left ? "Left Trigger" : "Right Trigger" }
 
-    private var binding: Binding<AdaptiveTriggerPreset> {
-        Binding(
-            get: { side == .left ? state.left : state.right },
-            set: { mode in
-                features.updateSettings { settings in
-                    if side == .left {
-                        settings.adaptiveTriggers.leftPreset = mode
-                        settings.adaptiveTriggers.leftUsesCustom = false
-                    } else {
-                        settings.adaptiveTriggers.rightPreset = mode
-                        settings.adaptiveTriggers.rightUsesCustom = false
-                    }
-                }
+    private var selectedMode: AdaptiveTriggerPreset {
+        side == .left ? state.left : state.right
+    }
+
+    private func select(_ mode: AdaptiveTriggerPreset) {
+        features.updateSettings { settings in
+            if side == .left {
+                settings.adaptiveTriggers.leftPreset = mode
+                settings.adaptiveTriggers.leftUsesCustom = false
+            } else {
+                settings.adaptiveTriggers.rightPreset = mode
+                settings.adaptiveTriggers.rightUsesCustom = false
             }
-        )
+        }
     }
 
     var body: some View {
+        // Plain Button items keep this as a native hierarchical menu. An inline
+        // Picker creates a transient popover that collapses while crossing it.
         Menu(title) {
-            Picker(title, selection: binding) {
-                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
-                    Text(mode.htmlName).tag(mode)
+            ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
+                Button {
+                    select(mode)
+                } label: {
+                    if selectedMode == mode {
+                        Label(mode.htmlName, systemImage: "checkmark")
+                    } else {
+                        Text(mode.htmlName)
+                    }
                 }
             }
-            .pickerStyle(.inline)
-            .labelsHidden()
         }
         .disabled(!state.supported)
     }
