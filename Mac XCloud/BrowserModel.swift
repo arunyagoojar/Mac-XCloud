@@ -612,6 +612,7 @@ final class BrowserModel: ObservableObject {
             }
         case "bridge-ready":
             bridgeReady = true
+            evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
             reconcileControllerOwnerState()
             setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
@@ -640,5 +641,8 @@ final class BrowserModel: ObservableObject {
         report.nativeControllerIDs = GCController.controllers().map { controller in
             controller.vendorName ?? "Game Controller"
         }
+        // Ask WebKit/Better xCloud to rescan its own real Gamepad list after
+        // native connect/current notifications. This does not fabricate input.
+        evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
     }
 }

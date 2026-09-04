@@ -152,6 +152,9 @@ struct WebView: NSViewRepresentable {
             startupScans += 1;
             if (scanBrowserGamepads(true) || startupScans >= 48) clearInterval(startupRetry);
           }, 250);
+          // Native GCController notifications can ask the browser side to
+          // rescan without creating or replacing any Gamepad object.
+          window.__xcgRescanBrowserGamepads = function () { return scanBrowserGamepads(true); };
           setInterval(function () { scanBrowserGamepads(true); }, 1500);
         })();
         """#

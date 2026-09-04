@@ -465,6 +465,12 @@ enum BetterXCloud {
             window.BX_EXPOSED.disableGamepadPolling = flag === true;
             return window.BX_EXPOSED.disableGamepadPolling;
           },
+          rescanGamepads: function () {
+            try {
+              return typeof window.__xcgRescanBrowserGamepads === "function"
+                ? window.__xcgRescanBrowserGamepads() : false;
+            } catch (e) { return false; }
+          },
           regions: function () { try { return STATES.serverRegions || {}; } catch (e) { return {}; } },
           selectedRegion: function () { try { return STATES.selectedRegion || {}; } catch (e) { return {}; } },
           getGlobal: function (k) {

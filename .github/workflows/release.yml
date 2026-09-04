@@ -119,6 +119,7 @@ jobs:
 
           ### Controller and triggers
           - Detects controllers that were already connected before Mac Xcloud launched.
+          - Rescans the browser Gamepad list after native connect/current notifications.
           - Retries WebKit Gamepad availability during startup and synchronizes browser controller events.
           - Keeps adaptive-trigger modes available from the Left Trigger and Right Trigger app menus.
           - Coalesces touchpad fallback work and avoids unnecessary haptic engine rebuilds.
