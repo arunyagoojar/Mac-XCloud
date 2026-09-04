@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 import Sparkle
 
 /// Shared Sparkle updater used by the app menu and the menu-bar menu.
@@ -35,22 +36,55 @@ struct CheckForUpdatesView: View {
 }
 
 /// Adaptive-trigger mode picker for one trigger side, shown in the app's
-/// main menu bar. Checkmarks follow the live controller settings.
+/// main menu bar. Observing the controller service directly would rebuild
+/// (and close) the open menu on every 60 Hz input snapshot, so this view
+/// only re-renders when the trigger selection or trigger support changes.
 struct TriggerModeMenu: View {
-    @ObservedObject var features: ControllerFeatureService
-    let side: TriggerSide
+    final class TriggerMenuState: ObservableObject {
+        @Published var left: AdaptiveTriggerPreset
+        @Published var right: AdaptiveTriggerPreset
+        @Published var supported: Bool
+        private var cancellables = Set<AnyCancellable>()
+
+        init(features: ControllerFeatureService) {
+            left = features.settings.adaptiveTriggers.leftPreset
+            right = features.settings.adaptiveTriggers.rightPreset
+            supported = features.capabilities.hasAdaptiveTriggers
+            features.$settings
+                .map { ($0.adaptiveTriggers.leftPreset, $0.adaptiveTriggers.rightPreset) }
+                .removeDuplicates { $0 == $1 }
+                .sink { [weak self] left, right in
+                    self?.left = left
+                    self?.right = right
+                }
+                .store(in: &cancellables)
+            features.$capabilities
+                .map { $0.hasAdaptiveTriggers }
+                .removeDuplicates()
+                .sink { [weak self] supported in
+                    self?.supported = supported
+                }
+                .store(in: &cancellables)
+        }
+    }
+
+    @StateObject private var state: TriggerMenuState
+    private let features: ControllerFeatureService
+    private let side: TriggerSide
 
     enum TriggerSide { case left, right }
+
+    init(features: ControllerFeatureService, side: TriggerSide) {
+        _state = StateObject(wrappedValue: TriggerMenuState(features: features))
+        self.features = features
+        self.side = side
+    }
 
     private var title: String { side == .left ? "Left Trigger" : "Right Trigger" }
 
     private var binding: Binding<AdaptiveTriggerPreset> {
         Binding(
-            get: {
-                side == .left
-                    ? features.settings.adaptiveTriggers.leftPreset
-                    : features.settings.adaptiveTriggers.rightPreset
-            },
+            get: { side == .left ? state.left : state.right },
             set: { mode in
                 features.updateSettings { settings in
                     if side == .left {
@@ -75,7 +109,7 @@ struct TriggerModeMenu: View {
             .pickerStyle(.inline)
             .labelsHidden()
         }
-        .disabled(!features.capabilities.hasAdaptiveTriggers)
+        .disabled(!state.supported)
     }
 }
 
