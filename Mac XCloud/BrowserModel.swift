@@ -79,6 +79,7 @@ final class BrowserModel: ObservableObject {
     private(set) var controllerInputOwner: ControllerInputOwner = .none
     private var focusObservers: [NSObjectProtocol] = []
     private var controllerObservers: [NSObjectProtocol] = []
+    private var browserGamepadSyncTask: Task<Void, Never>?
     lazy var settingsModel = SettingsModel(browser: self)
 
     weak var webView: WKWebView?
@@ -134,9 +135,15 @@ final class BrowserModel: ObservableObject {
 
         let center = NotificationCenter.default
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSWindow.willCloseNotification, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
-            focusObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            focusObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 MainActor.assumeIsolated {
-                    self?.recomputeControllerOwner()
+                    guard let self else { return }
+                    self.recomputeControllerOwner()
+                    if let window = notification.object as? NSWindow,
+                       window.identifier?.rawValue == "xcg-main",
+                       window.isKeyWindow {
+                        self.synchronizeBrowserGamepadIfNeeded()
+                    }
                 }
             })
         }
@@ -271,6 +278,7 @@ final class BrowserModel: ObservableObject {
         focusObservers.forEach(center.removeObserver)
         controllerObservers.forEach(center.removeObserver)
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        browserGamepadSyncTask?.cancel()
     }
 
     func setGamepadPollingPaused(_ paused: Bool, force: Bool = false) {
@@ -283,6 +291,35 @@ final class BrowserModel: ObservableObject {
 
     func resendGamepadPollingState() {
         setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
+        synchronizeBrowserGamepadIfNeeded()
+    }
+
+    /// Native GameController and WebKit expose the same physical device through
+    /// different layers. When native presence is true but the page has not yet
+    /// exposed its real Gamepad, keep the main WKWebView focused and ask the
+    /// browser layer to rescan for a bounded startup window. No fake Gamepad is
+    /// created; this only reproduces the focus transition that currently makes
+    /// switching windows repair detection.
+    private func synchronizeBrowserGamepadIfNeeded() {
+        guard !report.nativeControllerIDs.isEmpty,
+              controllerInputOwner == .stream || controllerInputOwner == .none,
+              mainWindow?.isKeyWindow == true else { return }
+        browserGamepadSyncTask?.cancel()
+        browserGamepadSyncTask = Task { [weak self] in
+            for _ in 0..<24 {
+                guard !Task.isCancelled, let self,
+                      !self.report.nativeControllerIDs.isEmpty,
+                      self.report.webControllerIDs.isEmpty else { return }
+                await MainActor.run {
+                    guard let webView = self.webView else { return }
+                    if webView.window?.firstResponder !== webView {
+                        webView.window?.makeFirstResponder(webView)
+                    }
+                    self.evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
     }
 
     func resetWebMacroOverlay() {
