@@ -120,7 +120,7 @@ jobs:
           ### Controller and triggers
           - Detects controllers that were already connected before Mac Xcloud launched.
           - Rescans the browser Gamepad list after native connect/current notifications.
-          - Refocuses the Xbox WKWebView and retries native/browser controller synchronization when the page initially misses a connected controller.
+          - Starts native/browser controller synchronization as soon as the Xbox window is visible, so launch does not depend on switching away and back.
           - Retries WebKit Gamepad availability during startup and synchronizes browser controller events.
           - Keeps adaptive-trigger modes available from the Left Trigger and Right Trigger app menus.
           - Coalesces touchpad fallback work and avoids unnecessary haptic engine rebuilds.

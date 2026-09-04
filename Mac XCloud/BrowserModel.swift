@@ -141,7 +141,7 @@ final class BrowserModel: ObservableObject {
                     self.recomputeControllerOwner()
                     if let window = notification.object as? NSWindow,
                        window.identifier?.rawValue == "xcg-main",
-                       window.isKeyWindow {
+                       window.isVisible {
                         self.synchronizeBrowserGamepadIfNeeded()
                     }
                 }
@@ -168,6 +168,9 @@ final class BrowserModel: ObservableObject {
     func openMainWindow() {
         if let mainWindow {
             mainWindow.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async { [weak self] in
+                self?.synchronizeBrowserGamepadIfNeeded()
+            }
             return
         }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -203,6 +206,9 @@ final class BrowserModel: ObservableObject {
             }
         }
         window.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.synchronizeBrowserGamepadIfNeeded()
+        }
     }
 
     // MARK: - Settings window
@@ -303,7 +309,7 @@ final class BrowserModel: ObservableObject {
     private func synchronizeBrowserGamepadIfNeeded() {
         guard !report.nativeControllerIDs.isEmpty,
               controllerInputOwner == .stream || controllerInputOwner == .none,
-              mainWindow?.isKeyWindow == true else { return }
+              mainWindow?.isVisible == true else { return }
         browserGamepadSyncTask?.cancel()
         browserGamepadSyncTask = Task { [weak self] in
             for _ in 0..<24 {
