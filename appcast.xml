@@ -55,5 +55,15 @@
 			<pubDate>Thu, 03 Sep 2026 22:03:29 +0000</pubDate>
 			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.3.2-b7/MacXcloud.zip" sparkle:edSignature="m/L3OOy8oDD50UOLVQ3H8bMR99YWCKA2zsrnnL5QiC54s+EQmruC2bxRbM/RELpF9E4+hrJsSv8PtqrmUnMWDQ==" length="3487734" type="application/octet-stream" />
 		</item>
+		<item>
+			<title>Version 1.3.3</title>
+			<sparkle:version>9</sparkle:version>
+			<sparkle:shortVersionString>1.3.3</sparkle:shortVersionString>
+			<link>https://github.com/arunyagoojar/Mac-XCloud/releases/tag/v1.3.3-b9</link>
+			<sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
+			<description><![CDATA[<p>Automatic build from commit 1ba59c0d77d83af399da3cf76b5511a68b8075e5.</p>]]></description>
+			<pubDate>Fri, 04 Sep 2026 07:01:51 +0000</pubDate>
+			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.3.3-b9/MacXcloud.zip" sparkle:edSignature="NeV2OBcHGeKMxZT8SdtLfFoH36dhK1/qfInX5NR5D4pMzTzbd92UpQNq6xJKq1oWK8jic55uHlAxjWOOiDxOBQ==" length="3483382" type="application/octet-stream" />
+		</item>
 	</channel>
 </rss>
