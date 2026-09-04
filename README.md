@@ -63,8 +63,8 @@ xcodebuild -project "Mac XCloud.xcodeproj" -scheme "Mac XCloud" \
   -configuration Release -destination "platform=macOS" build
 ```
 
-The app is sandboxed and needs no special account to build or run. Sign in with
-your Microsoft account inside the app on first launch.
+The app does not require a paid Apple Developer account to build or run locally.
+Sign in with your Microsoft account inside the app on first launch.
 
 ## Controller notes
 
