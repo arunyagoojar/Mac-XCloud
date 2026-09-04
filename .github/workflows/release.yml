@@ -16,10 +16,22 @@ concurrency:
 
 jobs:
   release:
-    runs-on: macos-15
+    # The project uses Xcode 26 / Swift 6.2 language features (default MainActor
+    # isolation, upcoming-feature flags). macos-26 runners ship Xcode 26;
+    # macos-15 tops out at Xcode 16.4, which cannot compile it.
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          xcodebuild -version
+          ls /Applications | grep -i xcode || true
+          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
 
       - name: Determine version
         id: version
