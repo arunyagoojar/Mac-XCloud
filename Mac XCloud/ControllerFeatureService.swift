@@ -22,12 +22,22 @@ final class ControllerFeatureService: ObservableObject {
     @Published private(set) var descriptor: ControllerDescriptor?
     @Published private(set) var capabilities = ControllerCapabilities.unavailable
     @Published private(set) var snapshot = ControllerInputSnapshot.empty
+
+    /// The single native controller selected for feature and app-level input.
+    /// Consumers must use this reference rather than independently choosing the
+    /// first item in GCController.controllers(), which can disagree with the
+    /// current controller during reconnects.
+    private(set) weak var selectedController: GCController?
+
+    var selectedControllerProvider: () -> GCController? {
+        { [weak self] in self?.selectedController }
+    }
     @Published private(set) var calibrationProgress: ControllerCalibrationProgress?
     @Published private(set) var lastError: String?
     @Published var settings: ControllerSettings {
         didSet {
             persistSettings()
-            applySettingsToAttachedController()
+            applySettingsToAttachedController(rebuildHaptics: settings.haptics != oldValue.haptics)
         }
     }
 
@@ -67,6 +77,7 @@ final class ControllerFeatureService: ObservableObject {
         var secondFingerSeen = false
         var lastTapAt: TimeInterval?
         var pendingTapTask: Task<Void, Never>?
+        var fallbackExpiryTasks: [Int: Task<Void, Never>] = [:]
     }
 
     private struct CalibrationSession {
@@ -127,11 +138,16 @@ final class ControllerFeatureService: ObservableObject {
     // MARK: - Attachment and lifecycle
 
     func attach(to controller: GCController?) {
-        guard self.controller !== controller else { return }
+        if self.controller === controller {
+            selectedController = controller
+            if controller != nil, pollTimer == nil { startPolling() }
+            return
+        }
         detach()
         guard let controller else { return }
 
         self.controller = controller
+        selectedController = controller
         controller.handlerQueue = .main
         descriptor = makeDescriptor(for: controller)
         capabilities = makeCapabilities(for: controller)
@@ -141,12 +157,14 @@ final class ControllerFeatureService: ObservableObject {
         applyAdaptiveTriggerSettings()
         applyLEDPolicy()
         publishCurrentSnapshot()
+        startPolling()
     }
 
     func detach() {
         pollTimer?.invalidate()
         pollTimer = nil
         touchRuntime.pendingTapTask?.cancel()
+        touchRuntime.fallbackExpiryTasks.values.forEach { $0.cancel() }
         touchRuntime = TouchRuntimeState()
         resetMacros()
         calibrationSession = nil
@@ -169,6 +187,7 @@ final class ControllerFeatureService: ObservableObject {
 
         stopHapticEngines()
         self.controller = nil
+        selectedController = nil
         descriptor = nil
         capabilities = .unavailable
         snapshot = .empty
@@ -224,12 +243,14 @@ final class ControllerFeatureService: ObservableObject {
         defaults.set(data, forKey: persistenceKey)
     }
 
-    private func applySettingsToAttachedController() {
+    private func applySettingsToAttachedController(rebuildHaptics: Bool = true) {
         guard !isApplyingSettings else { return }
         isApplyingSettings = true
         defer { isApplyingSettings = false }
         configureTouchpadHandlers(for: controller)
-        rebuildHapticEngines(for: controller)
+        if rebuildHaptics {
+            rebuildHapticEngines(for: controller)
+        }
         applyAdaptiveTriggerSettings()
         applyLEDPolicy()
     }
@@ -659,12 +680,15 @@ final class ControllerFeatureService: ObservableObject {
             touchRuntime.secondaryActive = true
             touchRuntime.secondFingerSeen = true
         }
-        // Direction-pad fallback has no true up event; expire an inferred
-        // contact shortly after coordinate changes stop.
-        Task { [weak self] in
+        // Direction-pad fallback has no true up event; coalesce expiry work per
+        // contact so a coordinate stream cannot create an unbounded task pile.
+        touchRuntime.fallbackExpiryTasks[index]?.cancel()
+        touchRuntime.fallbackExpiryTasks[index] = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 140_000_000)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self else { return }
+                self.touchRuntime.fallbackExpiryTasks[index] = nil
                 if index == 0, self.touchRuntime.primaryActive {
                     self.finishPrimaryTouch(at: ProcessInfo.processInfo.systemUptime, endPosition: self.touchRuntime.currentPosition)
                     self.touchRuntime.primaryActive = false
@@ -937,15 +961,17 @@ final class ControllerFeatureService: ObservableObject {
         observers.append(center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] note in
             guard let connected = note.object as? GCController else { return }
             MainActor.assumeIsolated {
-                if self?.controller == nil { self?.attach(to: connected) }
+                guard let self else { return }
+                if self.controller == nil { self.attach(to: connected) }
+                else if self.pollTimer == nil { self.startPolling() }
             }
         })
         observers.append(center.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] note in
             guard let disconnected = note.object as? GCController else { return }
             MainActor.assumeIsolated {
-                guard self?.controller === disconnected else { return }
-                self?.detach()
-                self?.attachFirstAvailableController()
+                guard let self, self.controller === disconnected else { return }
+                self.detach()
+                self.attachFirstAvailableController()
             }
         })
         observers.append(center.addObserver(forName: .GCControllerDidBecomeCurrent, object: nil, queue: .main) { [weak self] note in

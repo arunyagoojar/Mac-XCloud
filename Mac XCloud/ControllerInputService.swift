@@ -12,6 +12,14 @@ import GameController
 
 @MainActor
 final class ControllerInputService: ObservableObject {
+    /// Supplied by ControllerFeatureService so both native services use the same
+    /// selected controller identity during connect/current/disconnect races.
+    var controllerProvider: () -> GCController?
+
+    init(controllerProvider: @escaping () -> GCController? = { GCController.current }) {
+        self.controllerProvider = controllerProvider
+    }
+
     var onToggleOverlay: (() -> Void)?
     var onNavigate: ((Int) -> Void)?    // -1 up / +1 down
     var onAdjust: ((Int) -> Void)?      // -1 left / +1 right
@@ -36,6 +44,9 @@ final class ControllerInputService: ObservableObject {
     private var l3r3HoldStarted: TimeInterval?
     private var l3r3Triggered = false
     private var previous = ButtonState()
+    private var lastLEDColor: LEDColor?
+    private weak var lastController: GCController?
+    private var lastPresenceState = false
 
     private struct ButtonState {
         var home = false
@@ -73,13 +84,20 @@ final class ControllerInputService: ObservableObject {
     }
 
     func setLED(r: Double, g: Double, b: Double) {
-        guard let controller = GCController.controllers().first, let light = controller.light else { return }
+        let color = LEDColor(id: "custom", label: "Custom", red: r, green: g, blue: b)
+        guard color != lastLEDColor else { return }
+        guard let controller = controllerProvider(), let light = controller.light else { return }
+        lastLEDColor = color
         light.color = GCColor(red: Float(r), green: Float(g), blue: Float(b))
     }
 
     private func refreshControllerInfo() {
-        let controllers = GCController.controllers()
-        if let controller = controllers.first {
+        if let controller = controllerProvider() {
+            if lastController !== controller {
+                resetButtonState()
+                lastLEDColor = nil
+                lastController = controller
+            }
             let nextName = controller.vendorName ?? "Game Controller"
             if controllerName != nextName { controllerName = nextName }
             let nextLED = controller.light != nil
@@ -105,21 +123,22 @@ final class ControllerInputService: ObservableObject {
             if supportsLED { supportsLED = false }
             if batteryPercent != nil { batteryPercent = nil }
             if batteryStateText != nil { batteryStateText = nil }
+            lastLEDColor = nil
+            lastController = nil
         }
-        let hasController = !controllers.isEmpty
+        let hasController = controllerProvider() != nil
         if hasController != lastPresenceState {
             lastPresenceState = hasController
+            resetButtonState()
             onPresenceChange?(hasController)
         }
     }
 
-    private var lastPresenceState = false
-
     // MARK: - Polling
 
     private func poll() {
-        guard let pad = GCController.controllers().first?.extendedGamepad else {
-            previous = ButtonState()
+        guard let controller = controllerProvider(), let pad = controller.extendedGamepad else {
+            resetButtonState()
             refreshControllerInfo()
             return
         }
@@ -172,6 +191,12 @@ final class ControllerInputService: ObservableObject {
                                stickLeft: stick < -0.55, stickRight: stick > 0.55,
                                a: pad.buttonA.isPressed, b: pad.buttonB.isPressed,
                                lb: pad.leftShoulder.isPressed, rb: pad.rightShoulder.isPressed)
+    }
+
+    private func resetButtonState() {
+        previous = ButtonState()
+        l3r3HoldStarted = nil
+        l3r3Triggered = false
     }
 }
 

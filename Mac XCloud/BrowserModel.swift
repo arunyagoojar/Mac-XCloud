@@ -71,13 +71,14 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var bridgeReady = false
 
     var statusController: MenuBarStatusController?
-    let controllerInput = ControllerInputService()
     let controllerFeatures = ControllerFeatureService()
+    lazy var controllerInput = ControllerInputService(controllerProvider: controllerFeatures.selectedControllerProvider)
     lazy var inputPresets = InputPresetStore(browser: self)
     private var cancellables = Set<AnyCancellable>()
     private var loadingTimeout: DispatchWorkItem?
     private(set) var controllerInputOwner: ControllerInputOwner = .none
     private var focusObservers: [NSObjectProtocol] = []
+    private var controllerObservers: [NSObjectProtocol] = []
     lazy var settingsModel = SettingsModel(browser: self)
 
     weak var webView: WKWebView?
@@ -139,18 +140,19 @@ final class BrowserModel: ObservableObject {
                 }
             })
         }
-        center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
+        controllerObservers.append(center.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
-        }
-        center.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in
+        })
+        controllerObservers.append(center.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
-        }
+        })
         refreshNativeControllers()
     }
 
     // MARK: - Main window
 
     private(set) var mainWindow: NSWindow?
+    private var mainWindowDelegate: WindowCloseDelegate?
     private var escapeMonitor: Any?
 
     /// The main window is created in AppKit with its final chrome-less style
@@ -177,6 +179,13 @@ final class BrowserModel: ObservableObject {
                 .environmentObject(self)
                 .ignoresSafeArea()
         )
+        let mainDelegate = WindowCloseDelegate { [weak self, weak window] in
+            guard let self, let window else { return }
+            if self.mainWindow === window { self.mainWindow = nil }
+            self.recomputeControllerOwner()
+        }
+        mainWindowDelegate = mainDelegate
+        window.delegate = mainDelegate
         mainWindow = window
         if escapeMonitor == nil {
             escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -257,12 +266,23 @@ final class BrowserModel: ObservableObject {
 
     private var isGamepadPollingPaused = false
 
-    func setGamepadPollingPaused(_ paused: Bool) {
+    deinit {
+        let center = NotificationCenter.default
+        focusObservers.forEach(center.removeObserver)
+        controllerObservers.forEach(center.removeObserver)
+        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+    }
+
+    func setGamepadPollingPaused(_ paused: Bool, force: Bool = false) {
         // Focus notifications can fire in bursts; repeatedly rewriting the flag
         // in the page makes xCloud's input loop stutter. Only send real changes.
-        guard paused != isGamepadPollingPaused else { return }
+        guard force || paused != isGamepadPollingPaused else { return }
         isGamepadPollingPaused = paused
         evaluateJS("try { if (window.BxCBridge) BxCBridge.setGamepadPollingPaused(\(paused)); else if (window.BX_EXPOSED) window.BX_EXPOSED.disableGamepadPolling = \(paused); 'ok' } catch (e) { 'err' }")
+    }
+
+    func resendGamepadPollingState() {
+        setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
     }
 
     func resetWebMacroOverlay() {
@@ -317,8 +337,14 @@ final class BrowserModel: ObservableObject {
             // dialogs) must not pause the page's gamepad polling; only native
             // tooling windows take ownership of input.
             setGamepadPollingPaused(false)
-        case .settings, .controllerTools, .profile:
+        case .settings:
+            // Settings is the only native consumer that currently translates
+            // controller buttons into UI actions.
             setGamepadPollingPaused(true)
+        case .controllerTools, .profile:
+            // These windows use mouse/keyboard only. Keep the browser's
+            // Gamepad authority active while they are open.
+            setGamepadPollingPaused(false)
         }
         controllerFeatures.setControllerToolsActive(controllerInputOwner == .controllerTools)
     }
@@ -471,6 +497,7 @@ final class BrowserModel: ObservableObject {
         // next ownership reconcile re-sends the correct flag.
         isGamepadPollingPaused = false
         isLoading = true
+        reconcileControllerOwnerState()
         loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
         loadingTimeout?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -585,6 +612,8 @@ final class BrowserModel: ObservableObject {
             }
         case "bridge-ready":
             bridgeReady = true
+            reconcileControllerOwnerState()
+            setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
             if isSettingsWindowOpen { settingsModel.load() }
             note("Better xCloud bridge ready")

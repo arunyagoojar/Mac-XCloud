@@ -6,7 +6,6 @@
 //  with labels and notes, plus the model that reads/writes them through the
 //  BxCBridge and drives the native Settings window from a controller.
 //
-
 import Combine
 import GameController
 import SwiftUI

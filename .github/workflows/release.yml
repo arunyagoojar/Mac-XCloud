@@ -156,7 +156,7 @@ jobs:
           \t\t\t<sparkle:version>{build}</sparkle:version>
           \t\t\t<sparkle:shortVersionString>{version}</sparkle:shortVersionString>
           \t\t\t<link>https://github.com/{repo}/releases/tag/{tag}</link>
-          \t\t\t<sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
+          \t\t\t<sparkle:minimumSystemVersion>14.6</sparkle:minimumSystemVersion>
           \t\t\t<description><![CDATA[<p>Automatic build from commit {sha}.</p>]]></description>
           \t\t\t<pubDate>{date_str}</pubDate>
           \t\t\t<enclosure url="{url}" sparkle:edSignature="{sig}" length="{length}" type="application/octet-stream" />
