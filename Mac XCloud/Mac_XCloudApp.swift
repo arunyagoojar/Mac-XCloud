@@ -35,89 +35,6 @@ struct CheckForUpdatesView: View {
     }
 }
 
-/// Adaptive-trigger mode picker for one trigger side, shown in the app's
-/// main menu bar. Observing the controller service directly would rebuild
-/// (and close) the open menu on every 60 Hz input snapshot, so this view
-/// only re-renders when the trigger selection or trigger support changes.
-struct TriggerModeMenu: View {
-    final class TriggerMenuState: ObservableObject {
-        @Published var left: AdaptiveTriggerPreset
-        @Published var right: AdaptiveTriggerPreset
-        @Published var supported: Bool
-        private var cancellables = Set<AnyCancellable>()
-
-        init(features: ControllerFeatureService) {
-            left = features.settings.adaptiveTriggers.leftPreset
-            right = features.settings.adaptiveTriggers.rightPreset
-            supported = features.capabilities.hasAdaptiveTriggers
-            features.$settings
-                .map { ($0.adaptiveTriggers.leftPreset, $0.adaptiveTriggers.rightPreset) }
-                .removeDuplicates { $0 == $1 }
-                .sink { [weak self] left, right in
-                    self?.left = left
-                    self?.right = right
-                }
-                .store(in: &cancellables)
-            features.$capabilities
-                .map { $0.hasAdaptiveTriggers }
-                .removeDuplicates()
-                .sink { [weak self] supported in
-                    self?.supported = supported
-                }
-                .store(in: &cancellables)
-        }
-    }
-
-    @StateObject private var state: TriggerMenuState
-    private let features: ControllerFeatureService
-    private let side: TriggerSide
-
-    enum TriggerSide { case left, right }
-
-    init(features: ControllerFeatureService, side: TriggerSide) {
-        _state = StateObject(wrappedValue: TriggerMenuState(features: features))
-        self.features = features
-        self.side = side
-    }
-
-    private var title: String { side == .left ? "Left Trigger" : "Right Trigger" }
-
-    private var selectedMode: AdaptiveTriggerPreset {
-        side == .left ? state.left : state.right
-    }
-
-    private func select(_ mode: AdaptiveTriggerPreset) {
-        features.updateSettings { settings in
-            if side == .left {
-                settings.adaptiveTriggers.leftPreset = mode
-                settings.adaptiveTriggers.leftUsesCustom = false
-            } else {
-                settings.adaptiveTriggers.rightPreset = mode
-                settings.adaptiveTriggers.rightUsesCustom = false
-            }
-        }
-    }
-
-    var body: some View {
-        // Plain Button items keep this as a native hierarchical menu. An inline
-        // Picker creates a transient popover that collapses while crossing it.
-        Menu(title) {
-            ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
-                Button {
-                    select(mode)
-                } label: {
-                    if selectedMode == mode {
-                        Label(mode.htmlName, systemImage: "checkmark")
-                    } else {
-                        Text(mode.htmlName)
-                    }
-                }
-            }
-        }
-        .disabled(!state.supported)
-    }
-}
-
 @main
 struct Mac_XCloudApp: App {
     @StateObject private var browser = BrowserModel()
@@ -142,9 +59,27 @@ struct Mac_XCloudApp: App {
                 Button("Open Settings…") { browser.openSettingsWindow() }
                     .keyboardShortcut(",", modifiers: .command)
             }
-            CommandMenu("Triggers") {
-                TriggerModeMenu(features: browser.controllerFeatures, side: .left)
-                TriggerModeMenu(features: browser.controllerFeatures, side: .right)
+            // Keep these as two independent static top-level menus. Do not
+            // observe controller state or nest a SwiftUI Menu/Picker here.
+            CommandMenu("Left Trigger") {
+                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
+                    Button(mode.htmlName) {
+                        browser.controllerFeatures.updateSettings { settings in
+                            settings.adaptiveTriggers.leftPreset = mode
+                            settings.adaptiveTriggers.leftUsesCustom = false
+                        }
+                    }
+                }
+            }
+            CommandMenu("Right Trigger") {
+                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
+                    Button(mode.htmlName) {
+                        browser.controllerFeatures.updateSettings { settings in
+                            settings.adaptiveTriggers.rightPreset = mode
+                            settings.adaptiveTriggers.rightUsesCustom = false
+                        }
+                    }
+                }
             }
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
