@@ -189,6 +189,16 @@ final class InputPresetStore: ObservableObject {
     private var webApplyGeneration: UInt64 = 0
     private var readinessRetryTask: Task<Void, Never>?
     private var suppressAutosave = false
+    private var nativeAutosaveGeneration: UInt64 = 0
+    private var explicitSaveToken: UUID?
+    private var webSettingsReady = false
+    private var unreadablePresetIDs = Set<UUID>()
+
+    private struct NativeSaveIntent {
+        let id: UUID
+        let generation: UInt64
+        let controller: PerPresetControllerSettings
+    }
 
     private var presetsURL: URL? { rootURL?.appendingPathComponent("presets", isDirectory: true) }
     private var triggersURL: URL? { rootURL?.appendingPathComponent("adaptive-trigger-presets", isDirectory: true) }
@@ -204,8 +214,17 @@ final class InputPresetStore: ObservableObject {
         reloadFromDisk()
         browser.controllerFeatures.$settings
             .dropFirst()
+            .compactMap { [weak self] settings -> NativeSaveIntent? in
+                guard let self, !self.suppressAutosave else { return nil }
+                // @Published emits before settings is assigned: capture the emitted
+                // portable value and its owner here, never after the debounce.
+                self.nativeAutosaveGeneration &+= 1
+                return NativeSaveIntent(id: self.activePresetID,
+                                        generation: self.nativeAutosaveGeneration,
+                                        controller: settings.perPreset)
+            }
             .debounce(for: .milliseconds(700), scheduler: RunLoop.main)
-            .sink { [weak self] settings in self?.autosaveActivePreset(controller: settings.perPreset) }
+            .sink { [weak self] intent in self?.autosaveActivePreset(intent) }
             .store(in: &cancellables)
     }
 
@@ -222,26 +241,29 @@ final class InputPresetStore: ObservableObject {
             try createLayout(at: base)
             storageStatus = .local(base)
             let decoder = decoder()
+            unreadablePresetIDs.removeAll()
             var loadedPresets: [InputPreset] = []
             var loadedTriggers: [CustomAdaptiveTriggerPreset] = []
             if let presetsURL {
                 for url in try jsonFiles(in: presetsURL) {
                     do {
-                        let envelope = try decoder.decode(PresetEnvelope<InputPreset>.self, from: Data(contentsOf: url))
-                        guard envelope.schemaVersion <= Self.schemaVersion,
-                              envelope.kind == "input-preset",
-                              try checksum(for: envelope.value) == envelope.checksum else { continue }
+                        let data = try Data(contentsOf: url)
+                        try validateEnvelope(data, kind: "input-preset")
+                        let envelope = try decoder.decode(PresetEnvelope<InputPreset>.self, from: data)
                         loadedPresets.append(envelope.value)
-                    } catch { operationMessage = "Skipped unreadable file: \(url.lastPathComponent)" }
+                    } catch {
+                        let id = url.lastPathComponent == "default.json" ? InputPreset.defaultID : UUID(uuidString: url.deletingPathExtension().lastPathComponent)
+                        if let id { unreadablePresetIDs.insert(id) }
+                        operationMessage = "Skipped unreadable file (left unchanged): \(url.lastPathComponent)"
+                    }
                 }
             }
             if let triggersURL {
                 for url in try jsonFiles(in: triggersURL) {
                     do {
-                        let envelope = try decoder.decode(PresetEnvelope<CustomAdaptiveTriggerPreset>.self, from: Data(contentsOf: url))
-                        guard envelope.schemaVersion <= Self.schemaVersion,
-                              envelope.kind == "adaptive-trigger-preset",
-                              try checksum(for: envelope.value) == envelope.checksum else { continue }
+                        let data = try Data(contentsOf: url)
+                        try validateEnvelope(data, kind: "adaptive-trigger-preset")
+                        let envelope = try decoder.decode(PresetEnvelope<CustomAdaptiveTriggerPreset>.self, from: data)
                         loadedTriggers.append(envelope.value)
                     } catch { operationMessage = "Skipped unreadable file: \(url.lastPathComponent)" }
                 }
@@ -280,24 +302,37 @@ final class InputPresetStore: ObservableObject {
     }
 
     func createPreset(named proposedName: String) async {
-        guard let browser else { return }
-        let name = uniqueName(from: proposedName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "New Preset")
-        isBusy = true
-        defer { isBusy = false }
+        guard let browser, !isBusy, presets.contains(where: { $0.id == activePresetID }) else { return }
+        let sourceID = activePresetID
+        let controller = browser.controllerFeatures.settings.perPreset
+        let token = beginExplicitSave()
+        let generation = nativeAutosaveGeneration
+        defer { finishExplicitSave(token) }
+        let web = webSettingsReady ? try? await captureBetterXCloudSettings() : nil
+        guard explicitSaveIsCurrent(token, sourceID: sourceID, generation: generation),
+              let source = presets.first(where: { $0.id == sourceID }) else { return }
         do {
+            // Flush only native settings. Capturing the page during a switch can
+            // attach the outgoing web selection to the incoming profile.
+            try saveNativeSettings(controller, for: sourceID)
+            let name = uniqueName(from: proposedName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "New Profile")
             let now = Date()
             let preset = InputPreset(
                 id: UUID(), name: name, createdAt: now, updatedAt: now,
-                controller: browser.controllerFeatures.settings.perPreset,
-                betterXCloud: try await captureBetterXCloudSettings()
+                controller: controller, betterXCloud: web ?? source.betterXCloud
             )
             try write(preset)
             presets.append(preset)
             sortPresets()
-            try writeIndex()
-            await applyPreset(id: preset.id)
-            operationMessage = "Created and selected \(name)"
-        } catch { operationMessage = "Could not create preset: \(error.localizedDescription)" }
+            // These are already the live settings; do not reapply them to WebKit.
+            let ready = webSettingsReady
+            invalidateAsyncOperations()
+            setActive(preset.id)
+            webSettingsReady = ready
+            operationMessage = "Created and selected \(name)" + retainedWebNotice(web, source: source.name)
+            updateIndexAfterSave()
+            browser.statusController?.refreshMenu()
+        } catch { operationMessage = "Could not create profile: \(error.localizedDescription)" }
     }
 
     func saveCurrentAsDefault() async { await updatePreset(id: InputPreset.defaultID) }
@@ -322,20 +357,68 @@ final class InputPresetStore: ObservableObject {
     }
 
     func updatePreset(id: UUID) async {
-        guard let browser, let index = presets.firstIndex(where: { $0.id == id }) else { return }
-        isBusy = true
-        defer { isBusy = false }
+        guard let browser, !isBusy, presets.contains(where: { $0.id == id }) else { return }
+        let sourceID = activePresetID
+        let controller = browser.controllerFeatures.settings.perPreset
+        let token = beginExplicitSave()
+        let generation = nativeAutosaveGeneration
+        defer { finishExplicitSave(token) }
+        let web = webSettingsReady ? try? await captureBetterXCloudSettings() : nil
+        // Never keep an array index or a mutable preset across the suspension.
+        // Rename/reorder can happen while capturing; deletion must not resurrect it.
+        guard explicitSaveIsCurrent(token, sourceID: sourceID, generation: generation),
+              let index = presets.firstIndex(where: { $0.id == id }) else { return }
+        var preset = presets[index]
+        preset.controller = controller
+        preset.betterXCloud = web ?? preset.betterXCloud
+        preset.updatedAt = .now
         do {
-            var preset = presets[index]
-            preset.controller = browser.controllerFeatures.settings.perPreset
-            preset.betterXCloud = try await captureBetterXCloudSettings()
-            preset.updatedAt = .now
             try write(preset)
             presets[index] = preset
             sortPresets()
-            try writeIndex()
-            operationMessage = preset.isDefault ? "Saved current settings as Default" : "Updated \(preset.name)"
-        } catch { operationMessage = "Could not update preset: \(error.localizedDescription)" }
+            operationMessage = "Saved \(preset.name)" + retainedWebNotice(web, source: preset.name)
+            updateIndexAfterSave()
+        } catch { operationMessage = "Could not save profile: \(error.localizedDescription)" }
+    }
+
+    private func beginExplicitSave() -> UUID {
+        cancelPendingWebAutosave()
+        readinessRetryTask?.cancel()
+        readinessRetryTask = nil
+        let token = UUID()
+        explicitSaveToken = token
+        isBusy = true
+        return token
+    }
+
+    private func finishExplicitSave(_ token: UUID) {
+        guard explicitSaveToken == token else { return }
+        explicitSaveToken = nil
+        isBusy = false
+    }
+
+    private func explicitSaveIsCurrent(_ token: UUID, sourceID: UUID, generation: UInt64) -> Bool {
+        guard explicitSaveToken == token else { return false }
+        guard !Task.isCancelled, activePresetID == sourceID,
+              nativeAutosaveGeneration == generation,
+              presets.contains(where: { $0.id == sourceID }) else {
+            operationMessage = "Save cancelled because the current profile or controller settings changed. Save Current Profile to try again."
+            return false
+        }
+        return true
+    }
+
+    private func retainedWebNotice(_ captured: BetterXCloudInputSettings?, source: String) -> String {
+        captured == nil
+            ? " · Native/controller settings saved. MKB/web selections were not captured because the Xbox bridge was unavailable or not ready; retained the last saved web snapshot from \(source)."
+            : ""
+    }
+
+    private func updateIndexAfterSave() {
+        // The preset file is authoritative. An index failure must not roll back
+        // memory to a value older than the successful atomic preset write.
+        do { try writeIndex() }
+        catch { operationMessage = (operationMessage ?? "Profile saved") + " · Local index could not be refreshed: \(error.localizedDescription)" }
     }
 
     func duplicatePreset(id: UUID) {
@@ -368,21 +451,27 @@ final class InputPresetStore: ObservableObject {
     }
 
     func applyPreset(id: UUID) async {
-        guard let browser, let preset = presets.first(where: { $0.id == id }) else { return }
-        cancelPendingWebAutosave()
-        webApplyTask?.cancel()
-        webApplyTask = nil
-        readinessRetryTask?.cancel()
-        readinessRetryTask = nil
-        webApplyGeneration &+= 1
+        guard let browser, presets.contains(where: { $0.id == id }) else { return }
+        do {
+            // Save the last edit even when the 700 ms debounce has not fired.
+            // A deleted outgoing profile is deliberately not recreated.
+            try saveNativeSettings(browser.controllerFeatures.settings.perPreset, for: activePresetID)
+        } catch {
+            operationMessage = "Could not switch profiles; current controller settings were not saved: \(error.localizedDescription)"
+            return
+        }
+        guard let preset = presets.first(where: { $0.id == id }) else { return }
+        invalidateAsyncOperations()
         let generation = webApplyGeneration
         browser.controllerFeatures.resetMacros()
         isBusy = true
-        suppressAutosave = true
 
-        // Preserve hardware-specific calibration while applying only portable settings.
+        // Suppress only the synchronous native apply, not user edits made while
+        // WebKit is awaiting readiness. Web autosave has its own readiness gate.
+        suppressAutosave = true
         setActive(id)
         browser.controllerFeatures.updateSettings { $0.apply(preset.controller) }
+        suppressAutosave = false
         let task = Task { [weak self] in
             await self?.applyWebSettings(for: preset, generation: generation)
                 ?? " · Better xCloud settings will apply when the page is ready"
@@ -465,13 +554,16 @@ final class InputPresetStore: ObservableObject {
                 arguments: ["bundle": object, "presetName": preset.name, "applyToken": token]
             )
             guard !Task.isCancelled, generation == webApplyGeneration, activePresetID == preset.id else { return "" }
-            if let text = result as? String,
-               let data = text.data(using: .utf8),
-               let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let warnings = response["warnings"] as? [String], !warnings.isEmpty {
-                return " · " + warnings.joined(separator: "; ")
+            guard let text = result as? String,
+                  let data = text.data(using: .utf8),
+                  let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                webSettingsReady = false
+                return " · The Xbox page did not confirm the input settings"
             }
-            return ""
+            let warnings = response["warnings"] as? [String] ?? []
+            webSettingsReady = response["ok"] as? Bool == true && warnings.isEmpty
+            if !warnings.isEmpty { return " · " + warnings.joined(separator: "; ") }
+            return webSettingsReady ? "" : " · Xbox input settings are waiting for confirmation"
         } catch {
             return Task.isCancelled ? "" : " · Better xCloud settings will apply when the page is ready"
         }
@@ -542,23 +634,25 @@ final class InputPresetStore: ObservableObject {
 
     // MARK: - Autosave
 
-    private func autosaveActivePreset(controller: PerPresetControllerSettings) {
-        guard !suppressAutosave, let index = presets.firstIndex(where: { $0.id == activePresetID }) else { return }
+    private func autosaveActivePreset(_ intent: NativeSaveIntent) {
+        guard !suppressAutosave, activePresetID == intent.id,
+              nativeAutosaveGeneration == intent.generation else { return }
+        do {
+            try saveNativeSettings(intent.controller, for: intent.id)
+        } catch { operationMessage = "Autosave failed: \(error.localizedDescription)" }
+        scheduleWebAutosave(for: intent.id)
+    }
+
+    private func saveNativeSettings(_ controller: PerPresetControllerSettings, for id: UUID) throws {
+        guard let index = presets.firstIndex(where: { $0.id == id }),
+              presets[index].controller != controller else { return }
         var preset = presets[index]
-        guard preset.controller != controller else { return }
         preset.controller = controller
         preset.updatedAt = .now
-        do {
-            try write(preset)
-            presets[index] = preset
-            try writeIndex()
-            operationMessage = "Autosaved \(preset.name)"
-        } catch { operationMessage = "Autosave failed: \(error.localizedDescription)" }
-
-        // Web preferences live outside the native settings publisher. Capture
-        // them after native changes when the bridge is available, without ever
-        // serializing live ControllerInputSnapshot values.
-        scheduleWebAutosave(for: preset.id)
+        try write(preset)
+        presets[index] = preset
+        operationMessage = "Autosaved native/controller settings for \(preset.name); retained saved MKB/web selections"
+        updateIndexAfterSave()
     }
 
     func noteBetterXCloudInputChanged(for intendedPresetID: UUID? = nil) {
@@ -568,7 +662,8 @@ final class InputPresetStore: ObservableObject {
     }
 
     private func scheduleWebAutosave(for id: UUID) {
-        guard !suppressAutosave, activePresetID == id else { return }
+        guard !suppressAutosave, explicitSaveToken == nil, webSettingsReady,
+              webApplyTask == nil, activePresetID == id else { return }
         webAutosaveTask?.cancel()
         webAutosaveGeneration &+= 1
         let generation = webAutosaveGeneration
@@ -586,6 +681,8 @@ final class InputPresetStore: ObservableObject {
     }
 
     func invalidateWebOperationsForNavigation() {
+        explicitSaveToken = nil
+        webSettingsReady = false
         cancelPendingWebAutosave()
         webApplyTask?.cancel()
         webApplyTask = nil
@@ -597,6 +694,7 @@ final class InputPresetStore: ObservableObject {
     }
 
     private func invalidateAsyncOperations() {
+        nativeAutosaveGeneration &+= 1
         invalidateWebOperationsForNavigation()
     }
 
@@ -657,6 +755,9 @@ final class InputPresetStore: ObservableObject {
     }
 
     private func write(_ preset: InputPreset) throws {
+        guard rootURL != nil, !unreadablePresetIDs.contains(preset.id) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         let revision = max(inputRevision(at: presetURL(for: preset.id)),
                            tombstoneRevision(id: preset.id, kind: "input-preset")) + 1
         let envelope = PresetEnvelope(schemaVersion: Self.schemaVersion, kind: "input-preset", revision: revision, checksum: try checksum(for: preset), value: preset)
@@ -664,6 +765,7 @@ final class InputPresetStore: ObservableObject {
     }
 
     private func write(_ preset: CustomAdaptiveTriggerPreset) throws {
+        guard rootURL != nil else { throw CocoaError(.fileWriteUnknown) }
         let revision = max(triggerRevision(at: triggerURL(for: preset.id)),
                            tombstoneRevision(id: preset.id, kind: "adaptive-trigger-preset")) + 1
         let envelope = PresetEnvelope(schemaVersion: Self.schemaVersion, kind: "adaptive-trigger-preset", revision: revision, checksum: try checksum(for: preset), value: preset)
@@ -730,6 +832,24 @@ final class InputPresetStore: ObservableObject {
     }
 
     private func triggerURL(for id: UUID) -> URL { triggersURL!.appendingPathComponent("\(id.uuidString.lowercased()).json") }
+
+    private func validateEnvelope(_ data: Data, kind: String) throws {
+        if kind == "input-preset" {
+            let envelope = try decoder().decode(PresetEnvelope<InputPreset>.self, from: data)
+            guard (1...Self.schemaVersion).contains(envelope.schemaVersion),
+                  envelope.kind == kind,
+                  try checksum(for: envelope.value) == envelope.checksum else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        } else {
+            let envelope = try decoder().decode(PresetEnvelope<CustomAdaptiveTriggerPreset>.self, from: data)
+            guard (1...Self.schemaVersion).contains(envelope.schemaVersion),
+                  envelope.kind == kind,
+                  try checksum(for: envelope.value) == envelope.checksum else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+    }
 
     private func checksum<T: Encodable>(for value: T) throws -> String {
         SHA256.hash(data: try encoded(value)).map { String(format: "%02x", $0) }.joined()

@@ -33,7 +33,14 @@ enum SettingKind {
     case profileLauncher(ProfileKind)
     case forcedMKBGames
     case pingTest
-    case controllerTools
+}
+
+/// Settings owns its own same-window history instead of relying on a split-view
+/// selection. Controller tools are first-class destinations in the same history.
+enum SettingsRoute: Equatable {
+    case home
+    case category(String)
+    case controllerSection(ControllerToolSection)
 }
 
 struct SettingDef: Identifiable {
@@ -332,20 +339,21 @@ struct SettingsCategory: Identifiable {
                             labels: ["Default", "Normal", "Smart TV"],
                             defaultValue: "default")),
         ]),
-        SettingsCategory(id: "controller", title: "Controller Tools", icon: "gamecontroller.fill", rows: [
-            SettingDef(id: "app.controllerTools", label: "Open Controller Tools",
-                       note: "Test, calibrate, configure DualSense triggers and haptics, touchpad gestures, input presets, shortcuts and macros.",
-                       scope: .stream, kind: .controllerTools),
-            SettingDef(id: "app.led", label: "LED color",
-                       note: "The DualSense light bar. Pick a dot, or use the picker for any color.",
-                       scope: .stream, kind: .ledColor),
-            SettingDef(id: "controller.pollingRate", label: "Polling rate",
-                       note: "How often input is sent to the cloud. Higher = lower latency, more CPU.",
-                       scope: .stream, kind: .range(min: 4, max: 60, step: 4, defaultValue: 4, format: { "\((1000.0 / $0).rounded()) Hz" })),
-            SettingDef(id: "localCoOp.enabled", label: "Enable local co-op support",
-                       note: "Two controllers as two players in the same stream. Only works with some games.",
-                       scope: .stream, kind: .toggle(defaultValue: false)),
-        ]),
+    ]
+
+    /// Controller preferences formerly lived in an extra Controller Tools
+    /// category. They now appear in Controller Overview, leaving nine primary
+    /// Settings categories and seven first-class Controller destinations.
+    static let controllerRows: [SettingDef] = [
+        SettingDef(id: "app.led", label: "LED color",
+                   note: "The DualSense light bar. Pick a dot, or use the picker for any color.",
+                   scope: .stream, kind: .ledColor),
+        SettingDef(id: "controller.pollingRate", label: "Polling rate",
+                   note: "How often input is sent to the cloud. Higher = lower latency, more CPU.",
+                   scope: .stream, kind: .range(min: 4, max: 60, step: 4, defaultValue: 4, format: { "\((1000.0 / $0).rounded()) Hz" })),
+        SettingDef(id: "localCoOp.enabled", label: "Enable local co-op support",
+                   note: "Two controllers as two players in the same stream. Only works with some games.",
+                   scope: .stream, kind: .toggle(defaultValue: false)),
     ]
 }
 
@@ -541,6 +549,11 @@ extension SettingsModel {
                    let index = self.regions.firstIndex(where: { $0.value == selected }) {
                     self.regionIndex = index
                 }
+                if id == "stats.showWhenPlaying", let visible = response["readback"] as? Bool {
+                    // Update the overlay immediately instead of waiting for the
+                    // page's own setting.changed listener to run.
+                    self.browser?.evaluateJS("window.postMessage({ type: 'xcg-stats-visibility', visible: \(visible) }, '*')")
+                }
                 // Surface normalization: if Better xCloud stored a different
                 // value than requested (e.g. unsupported quality), say so.
                 if let readback = response["readback"], !(readback is [Any] || readback is [String: Any]),
@@ -563,9 +576,13 @@ final class SettingsModel: ObservableObject {
     enum Pane { case sidebar, rows }
 
     @Published var selectedCategoryId = SettingsCategory.all[0].id
+    @Published var route: SettingsRoute = .home
+    @Published private(set) var backStack: [SettingsRoute] = []
+    @Published private(set) var forwardStack: [SettingsRoute] = []
     @Published var pane: Pane = .sidebar
     @Published var sidebarFocus = 0
     @Published var rowFocus = 0
+    @Published var homeFocus = 0
     @Published var ledColorIndex: Int {
         didSet {
             UserDefaults.standard.set(ledColorIndex, forKey: "ledColorIndex")
@@ -714,12 +731,64 @@ final class SettingsModel: ObservableObject {
         SettingsCategory.all.first { $0.id == selectedCategoryId } ?? SettingsCategory.all[0]
     }
 
-    func selectCategory(_ id: String) {
-        selectedCategoryId = id
-        sidebarFocus = SettingsCategory.all.firstIndex { $0.id == id } ?? 0
-        pane = .rows
+    var canGoBackInSettings: Bool { !backStack.isEmpty }
+    var canGoForwardInSettings: Bool { !forwardStack.isEmpty }
+
+    func navigate(to destination: SettingsRoute) {
+        guard destination != route else { return }
+        backStack.append(route)
+        forwardStack.removeAll()
+        applyRoute(destination)
+    }
+
+    func navigateBack() {
+        guard let destination = backStack.popLast() else {
+            if route != .home { navigate(to: .home) }
+            return
+        }
+        forwardStack.append(route)
+        applyRoute(destination)
+    }
+
+    func navigateForward() {
+        guard let destination = forwardStack.popLast() else { return }
+        backStack.append(route)
+        applyRoute(destination)
+    }
+
+    func navigateHome() {
+        navigate(to: .home)
+    }
+
+    func openControllerTools(_ section: ControllerToolSection = .overview) {
+        navigate(to: .controllerSection(section))
+    }
+
+    private func applyRoute(_ destination: SettingsRoute) {
+        route = destination
         rowFocus = 0
+        switch destination {
+        case .home:
+            pane = .sidebar
+            homeFocus = min(homeFocus, max(0, homeDestinationCount - 1))
+        case .category(let id):
+            selectedCategoryId = SettingsCategory.all.first(where: { $0.id == id })?.id ?? SettingsCategory.all[0].id
+            sidebarFocus = SettingsCategory.all.firstIndex { $0.id == selectedCategoryId } ?? 0
+            pane = .rows
+        case .controllerSection(let section):
+            homeFocus = SettingsCategory.all.count + (ControllerToolSection.allCases.firstIndex(of: section) ?? 0)
+            pane = .sidebar
+        }
+        browser?.settingsRouteDidChange()
         objectWillChange.send()
+    }
+
+    func selectCategory(_ id: String) {
+        navigate(to: .category(id))
+    }
+
+    private var homeDestinationCount: Int {
+        SettingsCategory.all.count + ControllerToolSection.allCases.count
     }
 
     // MARK: - Load
@@ -997,35 +1066,47 @@ extension SettingDef {
 
 extension SettingsModel {
     func moveFocus(_ direction: Int) {
-        switch pane {
-        case .sidebar:
-            let count = SettingsCategory.all.count
-            sidebarFocus = wrap(sidebarFocus + direction, count)
-        case .rows:
-            let count = selectedCategory.rows.count
+        switch route {
+        case .home:
+            homeFocus = wrap(homeFocus + direction, homeDestinationCount)
+        case .category:
+            let count = rows.count
             guard count > 0 else { return }
             rowFocus = wrap(rowFocus + direction, count)
+        case .controllerSection:
+            // Controller detail controls retain native focus. Do not route d-pad
+            // input into a hidden settings row.
+            return
         }
         objectWillChange.send()
     }
 
     func adjustFocused(_ delta: Int) {
-        switch pane {
-        case .sidebar:
+        switch route {
+        case .home:
             moveFocus(delta)
-        case .rows:
-            if rows.indices.contains(rowFocus) {
-                adjust(rows[rowFocus], delta: delta)
-            }
+        case .category:
+            guard rows.indices.contains(rowFocus) else { return }
+            adjust(rows[rowFocus], delta: delta)
+        case .controllerSection:
+            // Let native focused controls handle keyboard/controller activation;
+            // never mutate rows from a category that is not visible.
+            return
         }
     }
 
     func activateFocused() {
-        switch pane {
-        case .sidebar:
-            let category = SettingsCategory.all[sidebarFocus]
-            selectCategory(category.id)
-        case .rows:
+        switch route {
+        case .home:
+            guard homeDestinationCount > 0 else { return }
+            if homeFocus < SettingsCategory.all.count {
+                navigate(to: .category(SettingsCategory.all[homeFocus].id))
+            } else {
+                let sectionIndex = homeFocus - SettingsCategory.all.count
+                guard ControllerToolSection.allCases.indices.contains(sectionIndex) else { return }
+                navigate(to: .controllerSection(ControllerToolSection.allCases[sectionIndex]))
+            }
+        case .category:
             guard rows.indices.contains(rowFocus) else { return }
             let def = rows[rowFocus]
             if case .toggle = def.kind {
@@ -1033,14 +1114,48 @@ extension SettingsModel {
             } else {
                 adjust(def, delta: 1)
             }
+        case .controllerSection:
+            return
         }
     }
 
-    func closeWindow() {
-        browser?.closeSettingsWindow()
+    func handleCancel() {
+        if route == .home {
+            browser?.closeSettingsWindow()
+        } else {
+            navigateBack()
+        }
+    }
+
+    func switchDestination(_ delta: Int) {
+        switch route {
+        case .home:
+            moveFocus(delta)
+        case .category(let id):
+            guard let current = SettingsCategory.all.firstIndex(where: { $0.id == id }) else { return }
+            let destinations = SettingsCategory.all.count + ControllerToolSection.allCases.count
+            let next = wrap(current + delta, destinations)
+            if next < SettingsCategory.all.count {
+                navigate(to: .category(SettingsCategory.all[next].id))
+            } else {
+                navigate(to: .controllerSection(ControllerToolSection.allCases[next - SettingsCategory.all.count]))
+            }
+        case .controllerSection(let section):
+            let categoryCount = SettingsCategory.all.count
+            guard let sectionIndex = ControllerToolSection.allCases.firstIndex(of: section) else { return }
+            let destinations = categoryCount + ControllerToolSection.allCases.count
+            let next = wrap(categoryCount + sectionIndex + delta, destinations)
+            if next < categoryCount {
+                navigate(to: .category(SettingsCategory.all[next].id))
+            } else {
+                navigate(to: .controllerSection(ControllerToolSection.allCases[next - categoryCount]))
+            }
+        }
     }
 
     var rows: [SettingDef] {
-        selectedCategory.rows
+        guard case .category(let id) = route,
+              let category = SettingsCategory.all.first(where: { $0.id == id }) else { return [] }
+        return category.rows
     }
 }

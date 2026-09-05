@@ -340,6 +340,9 @@ enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     case electricShock
     case heartbeat
     case rain
+    case twoStagePull
+    case softDetent
+    case progressiveRecoil
 
     init(from decoder: Decoder) throws {
         self = Self.migrated(try decoder.singleValueContainer().decode(String.self))
@@ -408,6 +411,9 @@ extension AdaptiveTriggerPreset {
         case .electricShock: "Electric Shock"
         case .heartbeat: "Heartbeat"
         case .rain: "Rain"
+        case .twoStagePull: "Two-stage Pull"
+        case .softDetent: "Soft Detent"
+        case .progressiveRecoil: "Progressive Recoil"
         }
     }
 
@@ -415,7 +421,7 @@ extension AdaptiveTriggerPreset {
         switch self {
         case .off, .feedback, .weapon, .bowAndArrow, .vibration: .standard
         case .acceleration, .deceleration, .engineStrain, .braking: .racing
-        case .pistolFire, .shotgunFire, .smgFire, .sniperFire: .weapons
+        case .pistolFire, .shotgunFire, .smgFire, .sniperFire, .twoStagePull, .softDetent, .progressiveRecoil: .weapons
         case .galloping, .machineGun: .specialized
         case .fishing, .triggerJam, .doorResistance, .electricShock, .heartbeat, .rain: .immersive
         }
@@ -432,6 +438,36 @@ enum AdaptiveTriggerEffectMode: String, Codable, CaseIterable, Sendable {
     case weapon
     case vibration
     case slopeFeedback
+    case resistanceCurve
+    case vibrationRamp
+
+    var hasEndPosition: Bool {
+        self == .weapon || self == .slopeFeedback || self == .resistanceCurve || self == .vibrationRamp
+    }
+
+    var displayName: String {
+        switch self {
+        case .off: return "Off"
+        case .feedback: return "Constant resistance"
+        case .weapon: return "Break & release"
+        case .vibration: return "Vibration"
+        case .slopeFeedback: return "Linear resistance"
+        case .resistanceCurve: return "Smooth resistance curve"
+        case .vibrationRamp: return "Travel-based vibration"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .off: return "No motor resistance; the trigger keeps its physical spring."
+        case .feedback: return "Constant resistance after the start position, held through full pull."
+        case .weapon: return "Resistance between two positions, then a deliberate release at the breakpoint."
+        case .vibration: return "A steady vibration after the start position. Frequency is relative, not Hz."
+        case .slopeFeedback: return "Linear resistance between start and end; feedback ends beyond the end position."
+        case .resistanceCurve: return "Smoothly builds resistance across ten travel zones and holds the ending force through full pull."
+        case .vibrationRamp: return "Vibration grows with trigger travel and holds its peak beyond the ramp end. Frequency is relative, not Hz."
+        }
+    }
 }
 
 struct AdaptiveTriggerCustomParameters: Codable, Equatable, Sendable {
@@ -455,13 +491,66 @@ struct AdaptiveTriggerCustomParameters: Codable, Equatable, Sendable {
 
     var clamped: AdaptiveTriggerCustomParameters {
         var value = self
-        value.startPosition = min(max(value.startPosition, 0), 0.99)
-        value.endPosition = min(max(value.endPosition, value.startPosition + 0.01), 1)
-        value.startStrength = min(max(value.startStrength, 0), 1)
-        value.endStrength = min(max(value.endStrength, 0), 1)
-        value.amplitude = min(max(value.amplitude, 0), 1)
-        value.frequency = min(max(value.frequency, 0), 1)
+        func unit(_ input: Float, fallback: Float) -> Float {
+            min(max(input.isFinite ? input : fallback, 0), 1)
+        }
+        value.startPosition = unit(startPosition, fallback: Self.default.startPosition)
+        value.endPosition = unit(endPosition, fallback: Self.default.endPosition)
+        // Only bounded effects require end > start. Leave room for a valid end.
+        if mode.hasEndPosition {
+            value.startPosition = min(value.startPosition, 0.99)
+            value.endPosition = max(value.endPosition, value.startPosition + 0.01)
+        }
+        value.startStrength = unit(startStrength, fallback: Self.default.startStrength)
+        value.endStrength = unit(endStrength, fallback: Self.default.endStrength)
+        value.amplitude = unit(amplitude, fallback: Self.default.amplitude)
+        value.frequency = unit(frequency, fallback: Self.default.frequency)
         return value
+    }
+
+    func level(at position: Float) -> Float {
+        let value = clamped
+        guard position >= value.startPosition else { return 0 }
+        let progress = min(max((position - value.startPosition) / max(0.01, value.endPosition - value.startPosition), 0), 1)
+        switch value.mode {
+        case .off: return 0
+        case .feedback: return value.startStrength
+        case .weapon: return position < value.endPosition ? value.startStrength : 0
+        case .vibration: return value.amplitude
+        case .slopeFeedback:
+            return position <= value.endPosition ? value.startStrength + (value.endStrength - value.startStrength) * progress : 0
+        case .resistanceCurve:
+            let smooth = progress * progress * (3 - 2 * progress)
+            return value.startStrength + (value.endStrength - value.startStrength) * smooth
+        case .vibrationRamp:
+            return value.amplitude * progress
+        }
+    }
+
+    var travelLevels: [Float] { (0..<10).map { level(at: Float($0) / 9) } }
+}
+
+enum AdaptiveTriggerSide: String, CaseIterable, Sendable {
+    case left, right
+}
+
+/// A library reference is selection metadata; the applied effect is always a snapshot.
+enum AdaptiveTriggerSelection: Hashable, Sendable {
+    case builtIn(AdaptiveTriggerPreset)
+    case custom(UUID)
+    case currentCustomSnapshot
+}
+
+extension AdaptiveTriggerPreset {
+    /// Ten feedback zones, including the final zone: unlike slope feedback these
+    /// do not terminate resistance before full pull. Braking is deliberately lighter.
+    var pedalStrengths: [Float]? {
+        switch self {
+        case .acceleration: [0.04, 0.06, 0.09, 0.12, 0.16, 0.20, 0.24, 0.28, 0.31, 0.34]
+        case .braking: [0.03, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.18, 0.21, 0.24]
+        case .deceleration: [0.03, 0.05, 0.07, 0.09, 0.11, 0.14, 0.17, 0.20, 0.23, 0.26]
+        default: nil
+        }
     }
 }
 
@@ -472,6 +561,8 @@ struct AdaptiveTriggerSettings: Codable, Equatable, Sendable {
     var rightCustom: AdaptiveTriggerCustomParameters
     var leftUsesCustom: Bool
     var rightUsesCustom: Bool
+    var leftCustomPresetID: UUID?
+    var rightCustomPresetID: UUID?
 
     static let `default` = AdaptiveTriggerSettings(
         leftPreset: .off,
@@ -482,25 +573,82 @@ struct AdaptiveTriggerSettings: Codable, Equatable, Sendable {
         rightUsesCustom: false
     )
 
-    private enum CodingKeys: String, CodingKey { case leftPreset, rightPreset, leftCustom, rightCustom, leftUsesCustom, rightUsesCustom }
+    private enum CodingKeys: String, CodingKey {
+        case leftPreset, rightPreset, leftCustom, rightCustom, leftUsesCustom, rightUsesCustom
+        case leftCustomPresetID, rightCustomPresetID
+    }
 
-    init(leftPreset: AdaptiveTriggerPreset, rightPreset: AdaptiveTriggerPreset, leftCustom: AdaptiveTriggerCustomParameters, rightCustom: AdaptiveTriggerCustomParameters, leftUsesCustom: Bool, rightUsesCustom: Bool) {
+    init(leftPreset: AdaptiveTriggerPreset, rightPreset: AdaptiveTriggerPreset, leftCustom: AdaptiveTriggerCustomParameters, rightCustom: AdaptiveTriggerCustomParameters, leftUsesCustom: Bool, rightUsesCustom: Bool, leftCustomPresetID: UUID? = nil, rightCustomPresetID: UUID? = nil) {
         self.leftPreset = leftPreset
         self.rightPreset = rightPreset
         self.leftCustom = leftCustom
         self.rightCustom = rightCustom
         self.leftUsesCustom = leftUsesCustom
         self.rightUsesCustom = rightUsesCustom
+        self.leftCustomPresetID = leftCustomPresetID
+        self.rightCustomPresetID = rightCustomPresetID
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         leftPreset = try container.decodeIfPresent(AdaptiveTriggerPreset.self, forKey: .leftPreset) ?? .off
         rightPreset = try container.decodeIfPresent(AdaptiveTriggerPreset.self, forKey: .rightPreset) ?? .off
+        // Preserve encoded snapshots verbatim, including during checksum validation.
         leftCustom = try container.decodeIfPresent(AdaptiveTriggerCustomParameters.self, forKey: .leftCustom) ?? .default
         rightCustom = try container.decodeIfPresent(AdaptiveTriggerCustomParameters.self, forKey: .rightCustom) ?? .default
         leftUsesCustom = try container.decodeIfPresent(Bool.self, forKey: .leftUsesCustom) ?? false
         rightUsesCustom = try container.decodeIfPresent(Bool.self, forKey: .rightUsesCustom) ?? false
+        leftCustomPresetID = try container.decodeIfPresent(UUID.self, forKey: .leftCustomPresetID)
+        rightCustomPresetID = try container.decodeIfPresent(UUID.self, forKey: .rightCustomPresetID)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(leftPreset, forKey: .leftPreset)
+        try container.encode(rightPreset, forKey: .rightPreset)
+        try container.encode(leftCustom, forKey: .leftCustom)
+        try container.encode(rightCustom, forKey: .rightCustom)
+        try container.encode(leftUsesCustom, forKey: .leftUsesCustom)
+        try container.encode(rightUsesCustom, forKey: .rightUsesCustom)
+        // Omitting absent IDs keeps existing preset checksums stable.
+        try container.encodeIfPresent(leftCustomPresetID, forKey: .leftCustomPresetID)
+        try container.encodeIfPresent(rightCustomPresetID, forKey: .rightCustomPresetID)
+    }
+
+    func selection(for side: AdaptiveTriggerSide, library: [CustomAdaptiveTriggerPreset]) -> AdaptiveTriggerSelection {
+        let usesCustom = side == .left ? leftUsesCustom : rightUsesCustom
+        guard usesCustom else { return .builtIn(side == .left ? leftPreset : rightPreset) }
+        let id = side == .left ? leftCustomPresetID : rightCustomPresetID
+        let snapshot = side == .left ? leftCustom : rightCustom
+        if let id, let saved = library.first(where: { $0.id == id }), saved.parameters.clamped == snapshot.clamped {
+            return .custom(id)
+        }
+        // Deleted or edited library entries never rewrite an applied/saved snapshot.
+        return .currentCustomSnapshot
+    }
+
+    mutating func select(_ selection: AdaptiveTriggerSelection, for side: AdaptiveTriggerSide, library: [CustomAdaptiveTriggerPreset]) {
+        switch selection {
+        case .builtIn(let preset):
+            if side == .left {
+                leftPreset = preset; leftUsesCustom = false; leftCustomPresetID = nil
+            } else {
+                rightPreset = preset; rightUsesCustom = false; rightCustomPresetID = nil
+            }
+        case .custom(let id):
+            guard let saved = library.first(where: { $0.id == id }) else { return }
+            applySnapshot(saved.parameters, for: side, presetID: id)
+        case .currentCustomSnapshot:
+            break
+        }
+    }
+
+    mutating func applySnapshot(_ parameters: AdaptiveTriggerCustomParameters, for side: AdaptiveTriggerSide, presetID: UUID? = nil) {
+        if side == .left {
+            leftCustom = parameters.clamped; leftUsesCustom = true; leftCustomPresetID = presetID
+        } else {
+            rightCustom = parameters.clamped; rightUsesCustom = true; rightCustomPresetID = presetID
+        }
     }
 }
 
@@ -679,6 +827,30 @@ struct ControllerShortcut: Codable, Equatable, Identifiable, Sendable {
         self.action = action
         self.isEnabled = isEnabled
     }
+
+    /// Validate edited shortcuts without changing the legacy Codable layout.
+    func validate() throws {
+        guard !controls.isEmpty else { throw ControllerShortcutValidationError.emptyChord }
+        switch activation {
+        case .press, .release: break
+        case .hold(let seconds), .doublePress(let seconds):
+            guard seconds.isFinite, (0.05...60).contains(seconds) else {
+                throw ControllerShortcutValidationError.invalidTiming
+            }
+        }
+    }
+}
+
+enum ControllerShortcutValidationError: Error, LocalizedError, Equatable {
+    case emptyChord
+    case invalidTiming
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyChord: return "Select at least one controller button."
+        case .invalidTiming: return "Hold and double-press timing must be a finite number from 0.05 to 60 seconds."
+        }
+    }
 }
 
 struct ControllerShortcutSchema: Codable, Equatable, Sendable {
@@ -709,6 +881,7 @@ enum ControllerMacroValidationError: Error, LocalizedError, Equatable {
     case negativeDelay
     case durationExceeded(maximumMilliseconds: Int)
     case invalidHapticDuration
+    case invalidHapticParameters
     case nestedMacro
 
     var errorDescription: String? {
@@ -717,6 +890,7 @@ enum ControllerMacroValidationError: Error, LocalizedError, Equatable {
         case .negativeDelay: return "Macro step delays cannot be negative."
         case .durationExceeded(let maximum): return "A macro cannot exceed \(maximum) milliseconds."
         case .invalidHapticDuration: return "Haptic macro durations must be between 0 and 2000 milliseconds."
+        case .invalidHapticParameters: return "Haptic intensity and sharpness must be finite numbers between 0 and 1."
         case .nestedMacro: return "Macros cannot run another macro."
         }
     }
@@ -767,17 +941,29 @@ struct ControllerMacro: Codable, Equatable, Identifiable, Sendable {
         guard steps.allSatisfy({ $0.delayMilliseconds >= 0 }) else {
             throw ControllerMacroValidationError.negativeDelay
         }
+        // Bound each component before adding it, including decoded values such as Int.max.
+        var remaining = Self.maximumDurationMilliseconds
         for step in steps {
-            if case .haptic(_, _, let duration) = step.action,
-               !(0...Self.maximumDurationMilliseconds).contains(duration) {
-                throw ControllerMacroValidationError.invalidHapticDuration
+            guard step.delayMilliseconds <= remaining else {
+                throw ControllerMacroValidationError.durationExceeded(maximumMilliseconds: Self.maximumDurationMilliseconds)
+            }
+            remaining -= step.delayMilliseconds
+            if case .haptic(let intensity, let sharpness, let duration) = step.action {
+                guard intensity.isFinite, sharpness.isFinite,
+                      (0...1).contains(intensity), (0...1).contains(sharpness) else {
+                    throw ControllerMacroValidationError.invalidHapticParameters
+                }
+                guard (0...Self.maximumDurationMilliseconds).contains(duration) else {
+                    throw ControllerMacroValidationError.invalidHapticDuration
+                }
+                guard duration <= remaining else {
+                    throw ControllerMacroValidationError.durationExceeded(maximumMilliseconds: Self.maximumDurationMilliseconds)
+                }
+                remaining -= duration
             }
             if case .nativeAction(.macro) = step.action {
                 throw ControllerMacroValidationError.nestedMacro
             }
-        }
-        guard totalDurationMilliseconds <= Self.maximumDurationMilliseconds else {
-            throw ControllerMacroValidationError.durationExceeded(maximumMilliseconds: Self.maximumDurationMilliseconds)
         }
     }
 

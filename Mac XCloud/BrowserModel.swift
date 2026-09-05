@@ -29,7 +29,6 @@ enum ControllerInputOwner: Equatable {
     case none
     case stream
     case settings
-    case controllerTools
     case profile(ProfileKind)
 }
 
@@ -97,10 +96,8 @@ final class BrowserModel: ObservableObject {
         controllerInput.onToggleOverlay = { [weak self] in
             self?.openSettingsWindow()
         }
-        // UI controller input is routed only to the active/key native window.
-        controllerInput.isUIInputEnabled = { [weak self] in
-            self?.controllerInputOwner == .settings
-        }
+        // Native Settings uses mouse/keyboard navigation, not gamepad UI input.
+        controllerInput.isUIInputEnabled = { false }
         controllerInput.isSettingsShortcutEnabled = { [weak self] in
             self?.controllerInputOwner == .stream
         }
@@ -227,14 +224,20 @@ final class BrowserModel: ObservableObject {
 
     /// Opens the settings as a real, separate NSWindow that we fully control
     /// (the SwiftUI Settings scene's responder action proved unreliable).
-    func openSettingsWindow() {
+    func openSettingsWindow(route: SettingsRoute = .home) {
+        if settingsModel.route != route {
+            settingsModel.navigate(to: route)
+        }
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 720),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                   backing: .buffered, defer: false)
             window.title = "Mac Xcloud"
             window.identifier = NSUserInterfaceItemIdentifier("xcg-settings")
-            window.titlebarAppearsTransparent = true
+            window.contentMinSize = NSSize(width: 800, height: 620)
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .hidden
+            window.toolbarStyle = .unifiedCompact
             window.isReleasedWhenClosed = false
             window.center()
             window.contentView = NSHostingView(rootView:
@@ -258,11 +261,21 @@ final class BrowserModel: ObservableObject {
         settingsWindow?.performClose(nil)
     }
 
-    /// Legacy entry point retained for source compatibility. Controller Tools
-    /// now lives inside Settings and the settings window owns controller input.
-    func openControllerTools() {
-        settingsModel.selectCategory("controller")
-        openSettingsWindow()
+    /// Deep-links Controller Tools into Settings. Repeated opens participate in
+    /// Settings history and never create a standalone controller-tools window.
+    func openControllerTools(section: ControllerToolSection = .overview) {
+        openSettingsWindow(route: .controllerSection(section))
+    }
+
+    func settingsRouteDidChange() {
+        reconcileControllerOwnerState()
+        // Keep the throttle in sync when navigation happens without a window
+        // focus change (sidebar clicks while Settings is already key).
+        if case .controllerSection(let section) = settingsModel.route {
+            controllerFeatures.setHighRateUIDetail(section == .test || section == .calibration)
+        } else {
+            controllerFeatures.setHighRateUIDetail(false)
+        }
     }
 
     private var isGamepadPollingPaused = false
@@ -349,7 +362,6 @@ final class BrowserModel: ObservableObject {
         switch root.identifier?.rawValue {
         case "xcg-main": return .stream
         case "xcg-settings": return .settings
-        case "xcg-controller-tools": return .controllerTools
         case let value? where value.hasPrefix("xcg-profile-"):
             let raw = String(value.dropFirst("xcg-profile-".count))
             return ProfileKind(rawValue: raw).map(ControllerInputOwner.profile) ?? .none
@@ -369,14 +381,24 @@ final class BrowserModel: ObservableObject {
             // tooling windows take ownership of input.
             setGamepadPollingPaused(false)
         case .settings:
-            // Settings is the only native consumer that currently translates
-            // controller buttons into UI actions.
+            // Keep controller tests and calibration isolated from gameplay,
+            // even though native Settings does not use gamepad UI navigation.
             setGamepadPollingPaused(true)
-        case .controllerTools, .profile:
+        case .profile:
             // Profile editors remain separate and do not consume controller UI.
             setGamepadPollingPaused(false)
         }
-        controllerFeatures.setControllerToolsActive(controllerInputOwner == .settings && settingsModel.selectedCategoryId == "controller")
+        let controllerRouteIsVisible: Bool
+        if case .controllerSection(let section) = settingsModel.route {
+            controllerRouteIsVisible = true
+            // Live test/calibration pages need per-frame snapshots; everywhere
+            // else the published snapshot is throttled so Settings never lags.
+            controllerFeatures.setHighRateUIDetail(section == .test || section == .calibration)
+        } else {
+            controllerRouteIsVisible = false
+            controllerFeatures.setHighRateUIDetail(false)
+        }
+        controllerFeatures.setControllerToolsActive(controllerInputOwner == .settings && controllerRouteIsVisible)
     }
 
     private func transitionControllerOwner(to next: ControllerInputOwner) {
@@ -387,7 +409,7 @@ final class BrowserModel: ObservableObject {
         controllerInputOwner = next
         reconcileControllerOwnerState()
         if next != .stream { controllerFeatures.resetMacros() }
-        if next != .controllerTools { controllerFeatures.cancelCalibration() }
+        if next != .settings { controllerFeatures.cancelCalibration() }
     }
 
     func openProfileEditor(_ kind: ProfileKind) {
@@ -463,7 +485,18 @@ final class BrowserModel: ObservableObject {
         case .toggleSettings: openSettingsWindow()
         case .toggleFullscreen: toggleFullscreen()
         case .screenshot: evaluateJS("try { ShortcutHandler.runAction('stream.screenshot.capture'); 'ok' } catch(e) { 'err' }")
-        case .toggleStats: evaluateJS("try { ShortcutHandler.runAction('stream.stats.toggle'); 'ok' } catch(e) { 'err' }")
+        case .toggleStats:
+            // Native toggle: flip the Better xCloud preference and sync the bar
+            // immediately, instead of relying on the page's shortcut handler.
+            evaluateJS("""
+                try {
+                  var next = BxCBridge.getStream('stats.showWhenPlaying') !== true;
+                  BxCBridge.setStream('stats.showWhenPlaying', next, 'ui');
+                  var bar = document.querySelector('.bx-stats-bar, #bx-stats-bar');
+                  if (bar) bar.classList.toggle('bx-gone', !next);
+                  'ok'
+                } catch (e) { 'err' }
+                """)
         case .volumeUp: evaluateJS("try { ShortcutHandler.runAction('stream.volume.inc'); 'ok' } catch(e) { 'err' }")
         case .volumeDown: evaluateJS("try { ShortcutHandler.runAction('stream.volume.dec'); 'ok' } catch(e) { 'err' }")
         case .mute: evaluateJS("try { ShortcutHandler.runAction('stream.sound.toggle'); 'ok' } catch(e) { 'err' }")

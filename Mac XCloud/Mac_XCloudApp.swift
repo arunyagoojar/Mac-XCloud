@@ -58,28 +58,7 @@ struct Mac_XCloudApp: App {
                 Button("Open Settings…") { browser.openSettingsWindow() }
                     .keyboardShortcut(",", modifiers: .command)
             }
-            // Keep these as two independent static top-level menus. Do not
-            // observe controller state or nest a SwiftUI Menu/Picker here.
-            CommandMenu("Left Trigger") {
-                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
-                    Button(mode.htmlName) {
-                        browser.controllerFeatures.updateSettings { settings in
-                            settings.adaptiveTriggers.leftPreset = mode
-                            settings.adaptiveTriggers.leftUsesCustom = false
-                        }
-                    }
-                }
-            }
-            CommandMenu("Right Trigger") {
-                ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { mode in
-                    Button(mode.htmlName) {
-                        browser.controllerFeatures.updateSettings { settings in
-                            settings.adaptiveTriggers.rightPreset = mode
-                            settings.adaptiveTriggers.rightUsesCustom = false
-                        }
-                    }
-                }
-            }
+            AdaptiveTriggerCommands(service: browser.controllerFeatures, store: browser.inputPresets)
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
                     .keyboardShortcut("r", modifiers: .command)

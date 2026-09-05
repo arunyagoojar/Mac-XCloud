@@ -2,9 +2,8 @@
 //  SettingsWindow.swift
 //  Mac XCloud
 //
-//  The native macOS settings window: categories on the left, settings on the
-//  right, frosted-transparent background. Mouse/keyboard first; controller
-//  navigation layered on top.
+//  Same-window settings home and detail routes with mouse/keyboard navigation.
+//  SettingsModel continues to own Better xCloud values and readback.
 //
 
 import AppKit
@@ -13,68 +12,239 @@ import SwiftUI
 struct SettingsRootView: View {
     @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var model: SettingsModel
-    @State private var controllerSection: ControllerToolSection = .overview
+    @State private var supportFailure: String?
 
     var body: some View {
-        content(model)
+        HStack(spacing: 0) {
+            sidebar.frame(width: 208)
+            Divider()
+            VStack(spacing: 0) {
+                settingsHeader
+                Divider()
+                routeContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
             .onAppear {
                 browser.isSettingsWindowOpen = true
                 model.load()
-                bindController()
             }
             .onDisappear {
                 browser.isSettingsWindowOpen = false
-                unbindController()
             }
-            .frame(minWidth: 900, minHeight: 620)
+            .frame(minWidth: 800, minHeight: 620)
+            .alert("Could Not Open Ko-fi", isPresented: Binding(
+                get: { supportFailure != nil },
+                set: { if !$0 { supportFailure = nil } }
+            )) {
+                Button("OK", role: .cancel) { supportFailure = nil }
+            } message: {
+                Text(supportFailure ?? "")
+            }
             .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private func content(_ model: SettingsModel) -> some View {
-        NavigationView {
-            sidebar(model)
-                .frame(minWidth: 210, idealWidth: 225, maxWidth: 250)
-            detail(model)
-        }
-        .navigationViewStyle(.columns)
-        .navigationTitle("Mac Xcloud")
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                appHeader
+            .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
+                ForcedMKBPicker(model: model)
             }
+    }
+
+    @ViewBuilder
+    private var routeContent: some View {
+        switch model.route {
+        case .home:
+            settingsHome
+        case .category:
+            settingsDetail(model)
+        case .controllerSection(let section):
+            ControllerToolsView(service: browser.controllerFeatures, section: section)
         }
     }
 
-    private var appHeader: some View {
+    private var settingsHeader: some View {
         HStack(spacing: 10) {
-            Image(nsImage: NSApplication.shared.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 30, height: 30)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
-                     ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
-                     ?? "Mac Xcloud")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(versionLabel)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+            Button(action: model.navigateBack) {
+                Image(systemName: "chevron.left")
             }
+            .help("Back")
+            .accessibilityLabel("Back")
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(!model.canGoBackInSettings && model.route == .home)
 
-            Button {
-                guard let url = URL(string: "https://ko-fi.com/arunyagoojar") else { return }
-                NSWorkspace.shared.open(url)
-            } label: {
-                Label("Buy Me a Coffee", systemImage: "cup.and.saucer.fill")
-                    .font(.system(size: 11, weight: .medium))
+            Button(action: model.navigateForward) {
+                Image(systemName: "chevron.right")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Support Mac Xcloud")
+            .help("Forward")
+            .accessibilityLabel("Forward")
+            .keyboardShortcut("]", modifiers: .command)
+            .disabled(!model.canGoForwardInSettings)
+
+            Button(action: model.navigateHome) {
+                Image(systemName: "house")
+            }
+            .help("Settings Home")
+            .accessibilityLabel("Settings Home")
+            .keyboardShortcut("h", modifiers: [.command, .shift])
+            .disabled(model.route == .home)
         }
-        .padding(.vertical, 2)
+
+            Text(routeTitle)
+                .font(.system(size: 15, weight: .semibold))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if model.needsReload {
+                Button {
+                    browser.reload()
+                    model.needsReload = false
+                    browser.closeSettingsWindow()
+                } label: {
+                    Label("Reload to Apply", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.horizontal, 16)
+        .frame(height: 48)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .zIndex(1)
+    }
+
+    private var routeTitle: String {
+        switch model.route {
+        case .home:
+            return "Settings"
+        case .category(let id):
+            return SettingsCategory.all.first(where: { $0.id == id })?.title ?? "Settings"
+        case .controllerSection(let section):
+            return section.rawValue
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 36, height: 36)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(appName).font(.system(size: 13, weight: .semibold))
+                    Text(versionLabel).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 6)
+
+            Button(action: openSupportPage) {
+                Label("Buy me a coffee?", systemImage: SettingsSymbol.available("cup.and.saucer.fill"))
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.75), in: RoundedRectangle(cornerRadius: 6))
+            .help("Support the developer on Ko-fi (opens in your browser)")
+            .accessibilityLabel("Buy me a coffee? Open Ko-fi in browser")
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        sidebarRow("About", symbol: "info.circle", color: .gray, route: .home)
+                        ForEach(Array(SettingsCategory.all.enumerated()), id: \.element.id) { index, category in
+                            if index == 0 || category.id == "mkb" || category.id == "site" {
+                                Spacer().frame(height: 8)
+                            }
+                            sidebarRow(category.title, symbol: category.icon, color: categoryColor(category.id),
+                                       route: .category(category.id))
+                        }
+                        Spacer().frame(height: 8)
+                        ForEach(ControllerToolSection.allCases) { section in
+                            sidebarRow(section.rawValue, symbol: section.icon, color: .purple,
+                                       route: .controllerSection(section))
+                        }
+                    }
+                    .padding(.bottom, 4)
+                }
+                .onChange(of: model.route) { route in
+                    proxy.scrollTo(route == .home ? "About" : routeTitle)
+                }
+            }
+        }
+        .padding(10)
+        .background(.regularMaterial)
+    }
+
+    private func sidebarRow(_ title: String, symbol: String, color: Color,
+                            route: SettingsRoute) -> some View {
+        let selected = model.route == route
+        return Button { model.navigate(to: route) } label: {
+            HStack(spacing: 8) {
+                SettingsSymbol(name: symbol, color: color)
+                Text(title).font(.system(size: 12)).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? Color.white : Color.primary)
+        .background(selected ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+        .help(title)
+        .id(title)
+    }
+
+    private func categoryColor(_ id: String) -> Color {
+        switch id {
+        case "server", "stream", "remote": return .blue
+        case "stats": return .green
+        case "clarity", "video": return .indigo
+        case "mkb": return .orange
+        default: return .gray
+        }
+    }
+
+    private var settingsHome: some View {
+        SettingsPage {
+            SettingsGroup("About \(appName)") {
+                Text("A native macOS home for Xbox Cloud Gaming, powered by Better xCloud.")
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 8)
+                SettingsRow("Version") { Text(versionLabel).foregroundStyle(.secondary) }
+                Divider()
+                SettingsRow("Engine") { Text("Better xCloud v6.7.12").foregroundStyle(.secondary) }
+                Divider()
+                SettingsRow("License") { Text("MIT · redphx/better-xcloud").foregroundStyle(.secondary) }
+            }
+            SettingsGroup("Settings Summary") {
+                SettingsRow("Cloud preferences", note: "Choose a category in the sidebar to configure streaming, video, and input.") {
+                    Text(model.bridgeAvailable ? "Ready" : "Not loaded").foregroundStyle(.secondary)
+                }
+                Divider()
+                SettingsRow("Controller tools", note: "Test, calibrate, and customize your controller in this window.") {
+                    Text("7 sections").foregroundStyle(.secondary)
+                }
+            }
+            suggestedButton
+            if let message = model.saveMessage {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Stream and region changes apply to your next game. Overlay and video changes apply live. Use Back, Forward, or Home to revisit pages.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var appName: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? "Mac Xcloud"
     }
 
     private var versionLabel: String {
@@ -83,116 +253,58 @@ struct SettingsRootView: View {
         return "Version \(version) (Build \(build))"
     }
 
-    // MARK: - Sidebar
-
-    private func sidebar(_ model: SettingsModel) -> some View {
-        List(selection: Binding(
-            get: { model.selectedCategoryId },
-            set: { id in
-                if let id { model.selectCategory(id) }
-            }
-        )) {
-            Section("Settings") {
-                ForEach(SettingsCategory.all) { category in
-                    Label {
-                        Text(category.title)
-                            .font(.system(size: 13, weight: model.selectedCategoryId == category.id ? .semibold : .regular))
-                    } icon: {
-                        Image(systemName: category.icon)
-                            .font(.system(size: 14, weight: .medium))
-                            .frame(width: 20, height: 20)
-                            .foregroundStyle(model.selectedCategoryId == category.id ? Color.accentColor : Color.secondary)
-                    }
-                    .tag(category.id)
-                    .padding(.vertical, 3)
-                }
-            }
+    private func openSupportPage() {
+        supportFailure = nil
+        guard let url = URL(string: "https://ko-fi.com/arunyagoojar"),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "ko-fi.com" else {
+            supportFailure = "The support link is invalid."
+            return
         }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 10) {
-                if model.needsReload {
-                    Button {
-                        browser.reload()
-                        model.needsReload = false
-                        browser.closeSettingsWindow()
-                    } label: {
-                        Label("Reload to Apply", systemImage: "arrow.clockwise")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Better xCloud engine v6.7.12")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("MIT License · redphx/better-xcloud")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(12)
+        guard NSWorkspace.shared.open(url) else {
+            supportFailure = "Could not open ko-fi.com in your browser."
+            return
         }
     }
 
-    // MARK: - Detail
-
-    private func detail(_ model: SettingsModel) -> some View {
-        Group {
-            if model.selectedCategoryId == "controller" {
-                ControllerToolsView(service: browser.controllerFeatures, embedded: true, section: $controllerSection)
-            } else {
-                settingsDetail(model)
-            }
-        }
-        .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
-            ForcedMKBPicker(model: model)
+    private func categorySubtitle(_ category: SettingsCategory) -> String {
+        switch category.id {
+        case "server": return "Regions, latency, and language"
+        case "stream": return "Resolution, bitrate, and stream audio"
+        case "stats": return "Performance overlay and game bar"
+        case "clarity": return "Upscaling and sharpening pipeline"
+        case "video": return "Rendering, color, aspect, and audio"
+        case "remote": return "Streaming from your own Xbox"
+        case "mkb": return "Mouse, keyboard, and profiles"
+        case "site": return "Xbox site appearance and behavior"
+        case "advanced": return "Privacy, layout, and hidden sections"
+        case "controller": return "LED, polling rate, and local co-op"
+        default: return "\(category.rows.count) preferences"
         }
     }
 
     private func settingsDetail(_ model: SettingsModel) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                Section {
-                if !model.bridgeAvailable {
-                    warningBox("Open xbox.com/play at least once, then reopen this window to load your cloud settings.")
-                }
-
-                suggestedButton
-
+        SettingsPage {
+            Text(categorySubtitle(model.selectedCategory))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !model.bridgeAvailable {
+                warningBox("Open xbox.com/play at least once, then reopen this window to load your cloud settings.")
+            }
+            SettingsGroup(model.selectedCategory.title) {
                 let rows = model.rows
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, def in
-                    settingRow(model, def: def, index: index)
-                    if index < rows.count - 1 {
-                        Divider().padding(.leading, 16)
-                    }
-                }
-
-                Text("Stream & region settings apply when you start your next game. Overlay and video settings apply live.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 18)
-                    .padding(.horizontal, 16)
-
-                if let message = model.saveMessage {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                        .padding(.top, 4)
-                        .padding(.horizontal, 16)
-                }
-                } header: {
-                    HStack {
-                        Label(model.selectedCategory.title, systemImage: model.selectedCategory.icon)
-                            .font(.headline)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(.regularMaterial)
+                    settingRow(model, def: def)
+                    if index < rows.count - 1 { Divider() }
                 }
             }
-            .padding(.bottom, 12)
+            Text("Stream & region settings apply when you start your next game. Overlay and video settings apply live.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let message = model.saveMessage {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -204,8 +316,6 @@ struct SettingsRootView: View {
                 .font(.system(size: 13, weight: .medium))
         }
         .buttonStyle(.bordered)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 10)
     }
 
     private func warningBox(_ text: String) -> some View {
@@ -215,59 +325,20 @@ struct SettingsRootView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.15)))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.4)))
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
     }
 
-    @ViewBuilder
-    private func settingRow(_ model: SettingsModel, def: SettingDef, index: Int) -> some View {
-        let isFocused = model.pane == .rows && model.rowFocus == index
-
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(def.label)
-                    .font(.system(size: 13, weight: isFocused ? .semibold : .regular))
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let note = def.note {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 16)
+    private func settingRow(_ model: SettingsModel, def: SettingDef) -> some View {
+        SettingsRow(def.label, note: def.note) {
             control(model, def: def)
-                .frame(width: 180, alignment: .trailing)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isFocused ? Color.accentColor.opacity(0.14) : .clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(isFocused ? Color.accentColor.opacity(0.8) : .clear, lineWidth: 1.5)
-                .padding(.horizontal, 4)
-        )
-        .padding(.horizontal, 8)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            if hovering {
-                model.pane = .rows
-                model.rowFocus = index
-            }
+                .frame(width: 168, alignment: .trailing)
         }
     }
-
-    // MARK: - Controls
 
     @ViewBuilder
     private func control(_ model: SettingsModel, def: SettingDef) -> some View {
         switch def.kind {
         case .toggle:
-            Toggle("", isOn: Binding(
+            Toggle(def.label, isOn: Binding(
                 get: { model.isOn(def) },
                 set: { desired in model.setToggle(def, desired: desired) }
             ))
@@ -296,23 +367,16 @@ struct SettingsRootView: View {
             }
 
         case .range(let min, let max, let step, _, let format):
-            HStack(spacing: 10) {
-                if let value = model.rangeValue(def) {
-                    Text(format(value))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .frame(minWidth: 64, alignment: .trailing)
-                        .lineLimit(1)
-                }
-                Slider(
-                    value: Binding(
-                        get: { model.rangeValue(def) ?? min },
-                        set: { model.setRange(def, value: $0) }
-                    ),
-                    in: min...max,
-                    step: step
-                )
-                .frame(width: 170)
+            VStack(alignment: .trailing, spacing: 3) {
+                Slider(value: Binding(
+                    get: { model.rangeValue(def) ?? min },
+                    set: { model.setRange(def, value: $0) }
+                ), in: min...max, step: step)
+                .accessibilityLabel(def.label)
+                .accessibilityValue(model.rangeValue(def).map(format) ?? "—")
+                Text(model.rangeValue(def).map(format) ?? "—")
+                    .font(.system(size: 12).monospacedDigit())
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
         case .multi(let options):
@@ -333,15 +397,18 @@ struct SettingsRootView: View {
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
             }
-            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .accessibilityLabel(def.label)
+            .accessibilityValue(multiSummary(model, def: def))
 
         case .ledColor:
             ledControl(model)
 
         case .profileLauncher(let kind):
-            ProfileLaunchButton(kind: kind,
-                                title: kind.title,
-                                note: "Opens the native \(kind.title.lowercased()) manager")
+            Button("Open…") { browser.openProfileEditor(kind) }
+                .buttonStyle(.bordered)
+                .help("Opens the native \(kind.title.lowercased()) manager")
+                .accessibilityLabel("Open \(kind.title)")
 
         case .forcedMKBGames:
             Button {
@@ -357,17 +424,34 @@ struct SettingsRootView: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(def.label)
+            .accessibilityValue("\(model.forcedNativeMKBGames.count) selected")
 
         case .pingTest:
-            PingTestControl(model: model)
-
-        case .controllerTools:
-            Button {
-                browser.openControllerTools()
-            } label: {
-                Label("Open Controller Tools…", systemImage: "arrow.up.right.square")
+            VStack(alignment: .trailing, spacing: 6) {
+                if model.isPingingRegions {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Testing…").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else if let best = model.bestRegionResult {
+                    Text("\(best.name) · \(best.averageMs) ms")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("best of \(best.samples) samples")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 6) {
+                    if model.bestRegionResult != nil, !model.isPingingRegions {
+                        Button("Use Best") { model.useBestRegion() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    Button(model.isPingingRegions ? "Stop" : "Test") {
+                        model.isPingingRegions ? model.stopRegionPing() : model.testRegions()
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityLabel(model.isPingingRegions ? "Stop region latency test" : "Test region latency")
+                }
             }
-            .buttonStyle(.borderedProminent)
 
         case .info(let text):
             Text(text)
@@ -387,9 +471,7 @@ struct SettingsRootView: View {
                     HStack {
                         label(index)
                         Spacer()
-                        if model.optionIndex(def) == index {
-                            Image(systemName: "checkmark")
-                        }
+                        if model.optionIndex(def) == index { Image(systemName: "checkmark") }
                     }
                 }
             }
@@ -414,6 +496,9 @@ struct SettingsRootView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityLabel(def.label)
+        .accessibilityValue(model.optionIndex(def).map { pickerLabel(model, def: def, index: $0) }
+                            ?? model.defaultValueLabel(def))
     }
 
     private func pickerLabel(_ model: SettingsModel, def: SettingDef, index: Int) -> String {
@@ -424,64 +509,41 @@ struct SettingsRootView: View {
         let selection = model.multiSelection(def)
         if selection.isEmpty { return "None" }
         if let options = def.multiOptions() {
-            let labels = options.filter { selection.contains($0.value) }.map(\.label)
-            return labels.joined(separator: ", ")
+            return options.filter { selection.contains($0.value) }.map(\.label).joined(separator: ", ")
         }
         return "\(selection.count) selected"
     }
 
     private func ledControl(_ model: SettingsModel) -> some View {
         HStack(spacing: 8) {
-            ForEach(Array(LEDColor.all.enumerated()), id: \.offset) { index, color in
-                Circle()
-                    .fill(Color(red: color.red, green: color.green, blue: color.blue))
-                    .frame(width: 20, height: 20)
-                    .overlay(
-                        Circle().strokeBorder(
-                            model.ledColorIndex == index ? Color.primary : Color.primary.opacity(0.25),
-                            lineWidth: model.ledColorIndex == index ? 2 : 1
-                        )
-                        .padding(-3)
-                    )
-                    .onTapGesture {
+            Menu {
+                ForEach(Array(LEDColor.all.enumerated()), id: \.offset) { index, color in
+                    Button {
                         model.ledColorIndex = index
+                    } label: {
+                        if model.ledColorIndex == index {
+                            Label(color.label, systemImage: "checkmark")
+                        } else {
+                            Text(color.label)
+                        }
                     }
-                    .help(color.label)
+                }
+            } label: {
+                Text(LEDColor.all.indices.contains(model.ledColorIndex) ? LEDColor.all[model.ledColorIndex].label : "LED")
+                    .lineLimit(1)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
 
-            ColorPicker("", selection: Binding(
+            ColorPicker("Custom LED color", selection: Binding(
                 get: { model.customLEDColor },
                 set: { model.customLEDColor = $0 }
             ), supportsOpacity: false)
             .labelsHidden()
             .fixedSize()
-            .frame(width: 180, alignment: .trailing)
             .help("Custom color")
         }
     }
 
-    // MARK: - Controller wiring
-
-    private func bindController() {
-        browser.controllerInput.onNavigate = { model.moveFocus($0) }
-        browser.controllerInput.onAdjust = { model.adjustFocused($0) }
-        browser.controllerInput.onActivate = { model.activateFocused() }
-        browser.controllerInput.onCancel = { model.closeWindow() }
-        browser.controllerInput.onSwitchCategory = { delta in
-            let count = SettingsCategory.all.count
-            let currentIndex = SettingsCategory.all.firstIndex { $0.id == model.selectedCategoryId } ?? 0
-            let newIndex = ((currentIndex + delta) % count + count) % count
-            model.selectCategory(SettingsCategory.all[newIndex].id)
-        }
-    }
-
-    private func unbindController() {
-        browser.controllerInput.onNavigate = nil
-        browser.controllerInput.onAdjust = nil
-        browser.controllerInput.onActivate = nil
-        browser.controllerInput.onCancel = nil
-        browser.controllerInput.onSwitchCategory = nil
-    }
 }
 
 extension SettingDef {

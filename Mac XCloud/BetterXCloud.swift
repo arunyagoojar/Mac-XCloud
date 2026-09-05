@@ -810,59 +810,24 @@ enum BetterXCloud {
         '.bx-keyboard-shortcuts-manager-container { display: none !important; }',
         '.bx-toast { display: none !important; }',
         '#bx-game-bar { display: none !important; }',
-        /* Stats bar — match the app's dark material cards, not the Xbox HUD. */
+        /* Stats bar — slim single-line macOS pill. Position is owned by the
+           Better xCloud "stats position" setting, so it is not overridden here. */
         '.bx-stats-bar, #bx-stats-bar {',
-        '  position: fixed !important;',
-        '}',
-        '.bx-stats-bar.bx-gone, #bx-stats-bar.bx-gone { display: none !important; }',
-        '.bx-stats-bar:not(.bx-gone), #bx-stats-bar:not(.bx-gone) {',
-        '  top: 16px !important;',
-        '  right: 16px !important;',
-        '  left: auto !important;',
-        '  bottom: auto !important;',
-        '  width: max-content !important;',
-        '  min-width: 168px !important;',
-        '  max-width: min(300px, calc(100vw - 32px)) !important;',
-        '  box-sizing: border-box !important;',
-        '  display: flex !important;',
-        '  flex-direction: column !important;',
-        '  align-items: stretch !important;',
-        '  gap: 5px !important;',
-        '  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Rounded", "SF Pro Text", sans-serif !important;',
+        '  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif !important;',
         '  font-size: 11px !important;',
         '  font-weight: 500 !important;',
         '  line-height: 1.2 !important;',
-        '  letter-spacing: 0.01em !important;',
-        '  color: rgba(245, 247, 250, 0.94) !important;',
-        '  text-align: left !important;',
-        '  border: 1px solid rgba(255, 255, 255, 0.16) !important;',
-        '  border-radius: 14px !important;',
-        '  background: linear-gradient(145deg, rgba(38, 43, 52, 0.86), rgba(18, 21, 27, 0.82)) !important;',
-        '  -webkit-backdrop-filter: blur(28px) saturate(1.45) !important;',
-        '  backdrop-filter: blur(28px) saturate(1.45) !important;',
-        '  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;',
-        '  margin: 0 !important;',
-        '  padding: 11px 13px !important;',
+        '  color: rgba(245, 247, 250, 0.95) !important;',
+        '  border: 1px solid rgba(255, 255, 255, 0.14) !important;',
+        '  border-radius: 999px !important;',
+        '  background-color: rgba(16, 18, 22, 0.62) !important;',
+        '  -webkit-backdrop-filter: blur(22px) saturate(1.4) !important;',
+        '  backdrop-filter: blur(22px) saturate(1.4) !important;',
+        '  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32) !important;',
+        '  padding: 5px 14px !important;',
         '  z-index: 2147483000 !important;',
         '}',
-        '.bx-stats-bar::before, #bx-stats-bar::before {',
-        '  content: "LIVE STREAM" !important;',
-        '  display: block !important;',
-        '  padding-bottom: 4px !important;',
-        '  color: rgba(105, 178, 255, 0.95) !important;',
-        '  font-size: 9px !important;',
-        '  font-weight: 700 !important;',
-        '  letter-spacing: 0.12em !important;',
-        '}',
-        '.bx-stats-bar > *, #bx-stats-bar > * {',
-        '  display: flex !important;',
-        '  align-items: baseline !important;',
-        '  justify-content: space-between !important;',
-        '  gap: 12px !important;',
-        '  margin: 0 !important;',
-        '  padding: 2px 0 !important;',
-        '  white-space: nowrap !important;',
-        '}',
+        '.bx-stats-bar > *, #bx-stats-bar > * { display: inline !important; margin: 0 4px !important; }',
         '.bx-stats-bar * {',
         '  box-sizing: border-box !important;',
         '  font-family: inherit !important;',
@@ -909,6 +874,40 @@ enum BetterXCloud {
         observer.observe(document.documentElement, { childList: true, subtree: true });
         setInterval(removeBxButtons, 1500);
       } catch (e) {}
+
+      /* Keep the stats bar's visibility in sync with stats.showWhenPlaying and
+         with explicit native commands. Runs once Better xCloud is present. */
+      function statsBar() { return document.querySelector('.bx-stats-bar, #bx-stats-bar'); }
+      function applyStatsVisibility(visible) {
+        try { var bar = statsBar(); if (bar) bar.classList.toggle('bx-gone', !visible); } catch (e) {}
+      }
+      function syncStatsVisibility() {
+        try {
+          if (typeof BxCBridge === 'undefined') return;
+          applyStatsVisibility(BxCBridge.getStream('stats.showWhenPlaying') === true);
+        } catch (e) {}
+      }
+      window.addEventListener('message', function (event) {
+        if (event.data && event.data.type === 'xcg-stats-visibility') {
+          applyStatsVisibility(event.data.visible === true);
+        }
+      });
+      function bindStatsSync() {
+        try {
+          if (typeof BxEventBus === 'undefined') return false;
+          BxEventBus.Stream.on('setting.changed', function (data) {
+            if (data.settingKey === 'stats.showWhenPlaying') syncStatsVisibility();
+          });
+          setInterval(syncStatsVisibility, 2000);
+          syncStatsVisibility();
+          return true;
+        } catch (e) { return false; }
+      }
+      if (!bindStatsSync()) {
+        var statsSyncTimer = setInterval(function () {
+          if (bindStatsSync()) clearInterval(statsSyncTimer);
+        }, 500);
+      }
     })();
     """#
 

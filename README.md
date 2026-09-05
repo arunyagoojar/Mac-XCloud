@@ -37,19 +37,20 @@ You still need the Xbox/Game Pass access required to use Xbox Cloud Gaming.
 * macOS menu bar controls
 * Persistent Microsoft sign-in
 * Automatic cursor hiding while using a controller
-* Unified native Settings window
+* Compact, grouped Settings sidebar with mouse and keyboard navigation
+* Suggested settings available from About; controller input remains available for gameplay and testing
 * Xbox-style startup animation
 * Persistent connection and loading states
 
 ### Stream & picture settings
 
-* 720p and 1080p resolution options
+* Auto, 720p, 1080p, and 1080p HQ resolution options
 * Bitrate controls
 * Default, Low, Normal, and High quality presets
 * Sharpness and image-processing options
 * FSR, WebGL, and WebGPU processing options
 * Frame-rate and renderer controls
-* H.264 codec support
+* H.264 profile selection, subject to system and WebKit support
 * Live stream information
 * Region latency testing
 
@@ -57,14 +58,18 @@ You still need the Xbox/Game Pass access required to use Xbox Cloud Gaming.
 
 * DualSense adaptive triggers
 * 21 built-in adaptive-trigger modes
-* Custom trigger presets
+* Saved custom trigger presets in both left/right selectors and trigger menus
+* Editable vibration amplitude and normalized frequency
+* Sustained pedal resistance through full trigger travel (positional feedback on macOS 12.3+, constant-feedback fallback on 12.0–12.2)
+* Travel-based custom effects: smooth resistance curves and vibration ramps, with a live force preview
 * Haptic feedback controls
 * Controller LED controls
 * Touchpad gestures and mappings
 * Controller testing
 * Stick and trigger calibration
 * Controller shortcuts
-* Finite macros
+* Editable macros: up to 16 steps and 2 seconds, with button presses/releases, waits, haptics, and native actions
+* Button or chord bindings for saved macros, with press/release/hold/double-press activation
 * Controller reconnect recovery
 * Native/browser controller mismatch diagnostics
 
@@ -146,7 +151,7 @@ Mac Xcloud is not notarized, so macOS may show a Gatekeeper warning on first lau
 
 ## Build from source
 
-Requires **macOS 12+** and Xcode.
+The app targets **macOS 12+**. Building the current source requires **Xcode 26 or newer** and a macOS version that can run that Xcode release; the build-machine requirement is separate from the app's deployment target.
 
 ```bash
 git clone https://github.com/arunyagoojar/Mac-XCloud.git
@@ -174,7 +179,7 @@ xcodebuild -project "Mac XCloud.xcodeproj" \
 
 ## Automatic updates
 
-Every push to `main` builds and publishes a signed GitHub Release through GitHub Actions. Installed copies check for updates through Sparkle automatically.
+Every push to `main` builds and publishes a GitHub Release through GitHub Actions. The app is ad-hoc signed, and its update archive carries a separate Sparkle EdDSA signature; this is not Developer ID signing or Apple notarization. Installed copies check for updates through Sparkle.
 
 ## Credits
 

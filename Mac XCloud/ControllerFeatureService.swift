@@ -207,6 +207,16 @@ final class ControllerFeatureService: ObservableObject {
         }
     }
 
+    /// High-rate SwiftUI updates are only needed while a live test page is
+    /// visible. Elsewhere the published snapshot is throttled so the Settings
+    /// window is not re-rendered dozens of times per second.
+    private(set) var highRateUIDetail = false
+    private var lastPublishedAt: TimeInterval = 0
+
+    func setHighRateUIDetail(_ enabled: Bool) {
+        highRateUIDetail = enabled
+    }
+
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
@@ -278,7 +288,11 @@ final class ControllerFeatureService: ObservableObject {
             battery: batterySnapshot(from: controller)
         )
 
-        snapshot = next
+        let shouldPublishToUI = highRateUIDetail || (timestamp - lastPublishedAt) >= (1.0 / 15.0)
+        if shouldPublishToUI {
+            snapshot = next
+            lastPublishedAt = timestamp
+        }
         onNativeInputState?(next)
         processShortcuts(current: next, previous: previousSnapshot)
         sampleCalibration(
@@ -289,7 +303,7 @@ final class ControllerFeatureService: ObservableObject {
             rightTrigger: rawRightTrigger
         )
         previousSnapshot = next
-        applyLEDPolicy()
+        if shouldPublishToUI { applyLEDPolicy() }
     }
 
     private func buttonsSnapshot(from gamepad: GCExtendedGamepad, dualSense: GCDualSenseGamepad?) -> ControllerButtonsSnapshot {
@@ -447,6 +461,10 @@ final class ControllerFeatureService: ObservableObject {
         _ trigger: GCDualSenseAdaptiveTrigger,
         preset: AdaptiveTriggerPreset
     ) {
+        if let strengths = preset.pedalStrengths {
+            applyResistanceZones(trigger, levels: strengths, fallback: strengths.last ?? 0.2)
+            return
+        }
         switch preset {
         case .off:
             trigger.setModeOff()
@@ -458,22 +476,20 @@ final class ControllerFeatureService: ObservableObject {
             applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .slopeFeedback, startPosition: 0.10, endPosition: 0.90, startStrength: 0.15, endStrength: 0.95, amplitude: 0, frequency: 0))
         case .vibration:
             trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.60, frequency: 0.55)
-        case .acceleration:
-            applySlopeFeedback(trigger, start: 0.12, end: 0.95, startStrength: 0.04, endStrength: 0.34)
-        case .deceleration:
-            applySlopeFeedback(trigger, start: 0.08, end: 0.92, startStrength: 0.30, endStrength: 0.08)
+        case .acceleration, .deceleration:
+            break // Sustained positional feedback is applied above.
         case .engineStrain:
             trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.30, frequency: 0.16)
         case .braking:
-            applySlopeFeedback(trigger, start: 0.08, end: 0.90, startStrength: 0.10, endStrength: 0.68)
+            break // Sustained positional feedback is applied above.
         case .pistolFire:
-            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.55, resistiveStrength: 0.55)
+            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.36, resistiveStrength: 0.42)
         case .shotgunFire:
-            trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.72, resistiveStrength: 0.78)
+            trigger.setModeWeaponWithStartPosition(0.25, endPosition: 0.65, resistiveStrength: 0.78)
         case .smgFire:
-            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.38, frequency: 0.18)
+            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.32, frequency: 0.48)
         case .sniperFire:
-            trigger.setModeWeaponWithStartPosition(0.36, endPosition: 0.72, resistiveStrength: 0.90)
+            trigger.setModeWeaponWithStartPosition(0.38, endPosition: 0.48, resistiveStrength: 0.86)
         case .galloping:
             trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.42, frequency: 0.24)
         case .machineGun:
@@ -490,6 +506,25 @@ final class ControllerFeatureService: ObservableObject {
             trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.48, frequency: 0.10)
         case .rain:
             trigger.setModeVibrationWithStartPosition(0.12, amplitude: 0.18, frequency: 0.82)
+        case .twoStagePull:
+            applyResistanceZones(trigger, levels: [0.05, 0.08, 0.10, 0.12, 0.14, 0.52, 0.60, 0.66, 0.70, 0.70], fallback: 0.45)
+        case .softDetent:
+            applyResistanceZones(trigger, levels: [0.04, 0.06, 0.10, 0.34, 0.50, 0.30, 0.14, 0.10, 0.10, 0.10], fallback: 0.20)
+        case .progressiveRecoil:
+            applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .vibrationRamp, startPosition: 0.18, endPosition: 0.85, startStrength: 0, endStrength: 0, amplitude: 0.72, frequency: 0.42))
+        }
+    }
+
+    private func applyResistanceZones(_ trigger: GCDualSenseAdaptiveTrigger, levels: [Float], fallback: Float) {
+        guard levels.count == 10 else { trigger.setModeOff(); return }
+        if #available(macOS 12.3, *) {
+            let zones = GCDualSenseAdaptiveTrigger.PositionalResistiveStrengths(values: (
+                levels[0], levels[1], levels[2], levels[3], levels[4],
+                levels[5], levels[6], levels[7], levels[8], levels[9]
+            ))
+            trigger.setModeFeedback(resistiveStrengths: zones)
+        } else {
+            trigger.setModeFeedbackWithStartPosition(0, resistiveStrength: min(max(fallback, 0), 1))
         }
     }
 
@@ -539,6 +574,19 @@ final class ControllerFeatureService: ObservableObject {
                 amplitude: value.amplitude,
                 frequency: value.frequency
             )
+        case .resistanceCurve:
+            applyResistanceZones(trigger, levels: value.travelLevels, fallback: value.startStrength)
+        case .vibrationRamp:
+            if #available(macOS 12.3, *) {
+                let levels = value.travelLevels
+                let zones = GCDualSenseAdaptiveTrigger.PositionalAmplitudes(values: (
+                    levels[0], levels[1], levels[2], levels[3], levels[4],
+                    levels[5], levels[6], levels[7], levels[8], levels[9]
+                ))
+                trigger.setModeVibration(amplitudes: zones, frequency: value.frequency)
+            } else {
+                trigger.setModeVibrationWithStartPosition(value.startPosition, amplitude: value.amplitude, frequency: value.frequency)
+            }
         case .slopeFeedback:
             if #available(macOS 12.3, iOS 15.4, tvOS 15.4, visionOS 1.0, *) {
                 trigger.setModeSlopeFeedback(
@@ -855,12 +903,14 @@ final class ControllerFeatureService: ObservableObject {
         switch action {
         case .none:
             return
-        case .macro(let id):
-            runMacro(id: id)
         default:
             onShortcutAction?(action)
         }
     }
+
+    /// Identifies an execution, not a saved macro: restarting the same UUID must
+    /// not let the cancelled task clear the replacement task or its button output.
+    private var macroExecutionToken: UUID?
 
     func runMacro(id: UUID) {
         guard let macro = settings.macros.first(where: { $0.id == id }) else { return }
@@ -871,29 +921,42 @@ final class ControllerFeatureService: ObservableObject {
             return
         }
         resetMacros()
+        let token = UUID()
+        macroExecutionToken = token
         macroTasks[id] = Task { @MainActor [weak self] in
             defer {
-                self?.macroTasks[id] = nil
-                self?.onMacroReset?()
+                if self?.macroExecutionToken == token {
+                    self?.macroExecutionToken = nil
+                    self?.macroTasks[id] = nil
+                    self?.onMacroReset?()
+                }
             }
             for step in macro.steps {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self?.macroExecutionToken == token else { return }
                 if step.delayMilliseconds > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(step.delayMilliseconds) * 1_000_000)
+                    do { try await Task.sleep(nanoseconds: UInt64(step.delayMilliseconds) * 1_000_000) }
+                    catch { return }
                 }
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self?.macroExecutionToken == token else { return }
                 self?.executeMacroStep(step)
+                // Haptic durations count toward the two-second sequence budget.
+                if case .haptic(_, _, let duration) = step.action, duration > 0 {
+                    do { try await Task.sleep(nanoseconds: UInt64(duration) * 1_000_000) }
+                    catch { return }
+                }
             }
         }
     }
 
     func cancelMacro(id: UUID) {
-        macroTasks[id]?.cancel()
-        macroTasks[id] = nil
+        guard let task = macroTasks.removeValue(forKey: id) else { return }
+        macroExecutionToken = nil
+        task.cancel()
         onMacroReset?()
     }
 
     func resetMacros() {
+        macroExecutionToken = nil
         macroTasks.values.forEach { $0.cancel() }
         macroTasks.removeAll()
         onMacroReset?()

@@ -25,104 +25,30 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
 struct ControllerToolsView: View {
     @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var service: ControllerFeatureService
-    /// Embedded in Settings for the 1.3.5 route. The standalone window path is
-    /// intentionally retained only as a compatibility shell and is no longer
-    /// opened by any app action.
-    var embedded = false
-    @Binding private var section: ControllerToolSection
-
-    init(service: ControllerFeatureService, embedded: Bool = false, section: Binding<ControllerToolSection> = .constant(.presets)) {
-        self.service = service
-        self.embedded = embedded
-        self._section = section
-    }
+    let section: ControllerToolSection
 
     var body: some View {
-        Group {
-            if embedded {
-                embeddedContent
-            } else {
-                NavigationView {
-                    sectionSidebar
-                sectionDetail
+        sectionDetail
+            .background(Color(nsColor: .windowBackgroundColor))
+            .onAppear {
+                service.setControllerToolsActive(true)
+                service.startPolling()
             }
-                .navigationViewStyle(.columns)
-                .navigationTitle("Controller Tools")
-                .frame(minWidth: 860, minHeight: 600)
+            .onDisappear {
+                service.setControllerToolsActive(false)
             }
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear {
-            service.setControllerToolsActive(true)
-            service.startPolling()
-        }
-        .onDisappear {
-            service.setControllerToolsActive(false)
-        }
-    }
-
-    private var embeddedContent: some View {
-        HStack(spacing: 0) {
-            sectionSidebar
-                .frame(minWidth: 190, idealWidth: 205, maxWidth: 225)
-            Divider()
-            sectionDetail
-        }
-    }
-
-    private var sectionSidebar: some View {
-        List {
-            Section("Controller") {
-                ForEach(ControllerToolSection.allCases) { item in
-                    Button { section = item } label: {
-                        Label {
-                            Text(item.rawValue)
-                                .font(.system(size: 13, weight: section == item ? .semibold : .regular))
-                        } icon: {
-                            Image(systemName: item.icon)
-                                .font(.system(size: 14, weight: .medium))
-                                .frame(width: 20, height: 20)
-                        }
-                        .foregroundStyle(section == item ? Color.accentColor : Color.primary)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.vertical, 3)
-                }
-            }
-        }
-        .listStyle(.sidebar)
     }
 
     private var sectionDetail: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                Section {
-                    Group {
-                        switch section {
-                        case .overview: overview
-                        case .test: test
-                        case .calibration: calibration
-                        case .triggers: triggers
-                        case .touchpad: touchpad
-                        case .presets: presets
-                        case .shortcuts: shortcuts
-                        }
-                    }
-                    .padding(embedded ? 18 : 22)
-                } header: {
-                    HStack(spacing: 8) {
-                        Image(systemName: section.icon)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 20, height: 20)
-                        Text(section.rawValue)
-                            .font(.system(size: 15, weight: .semibold))
-                        Spacer()
-                    }
-                    .padding(.horizontal, embedded ? 18 : 22)
-                    .padding(.vertical, 12)
-                    .background(.regularMaterial)
-                }
+        SettingsPage {
+            switch section {
+            case .overview: overview
+            case .test: test
+            case .calibration: calibration
+            case .triggers: triggers
+            case .touchpad: touchpad
+            case .presets: presets
+            case .shortcuts: shortcuts
             }
         }
     }
@@ -141,108 +67,167 @@ struct ControllerToolsView: View {
 
     private var overview: some View {
         VStack(alignment: .leading, spacing: 16) {
-            title("Controller Overview")
-            if let d = service.descriptor {
-                GroupBox {
-                    HStack { Text("Controller"); Spacer(); Text(d.vendorName) }
-                    HStack { Text("Category"); Spacer(); Text(d.productCategory) }
-                    HStack { Text("Input preset"); Spacer(); Text(browser.inputPresets.activePreset.name) }
-                    HStack { Text("Battery"); Spacer(); Text(batteryText) }
-                    HStack { Text("Adaptive triggers"); Spacer(); Text(service.capabilities.hasAdaptiveTriggers ? "Available" : "Unavailable") }
-                    HStack { Text("Touchpad"); Spacer(); Text(service.capabilities.hasTouchpad ? "Available" : "Unavailable") }
-                    HStack { Text("Haptics"); Spacer(); Text(service.capabilities.hasHaptics ? "Available" : "Unavailable") }
+            SettingsGroup("Controller Overview") {
+                if let d = service.descriptor {
+                    SettingsRow("Controller") { Text(d.vendorName).foregroundStyle(.secondary) }
+                    Divider()
+                    SettingsRow("Category") { Text(d.productCategory).foregroundStyle(.secondary) }
+                    Divider()
+                    SettingsRow("Input preset") { Text(browser.inputPresets.activePreset.name).foregroundStyle(.secondary) }
+                    Divider()
+                    SettingsRow("Battery") { Text(batteryText).foregroundStyle(.secondary) }
+                    Divider()
+                    SettingsRow("Adaptive triggers") { Text(service.capabilities.hasAdaptiveTriggers ? "Available" : "Unavailable").foregroundStyle(.secondary) }
+                    Divider()
+                    SettingsRow("Touchpad") { Text(service.capabilities.hasTouchpad ? "Available" : "Unavailable").foregroundStyle(.secondary) }
+                    Divider()
+                    SettingsRow("Haptics") { Text(service.capabilities.hasHaptics ? "Available" : "Unavailable").foregroundStyle(.secondary) }
+                } else {
+                    SettingsRow("No Controller", note: "Connect a controller to use these tools.") {
+                        SettingsSymbol(name: "gamecontroller", color: .purple)
+                    }
                 }
-            } else {
-                VStack { Image(systemName: "gamecontroller").font(.largeTitle); Text("No Controller"); Text("Connect a controller to use these tools.").font(.caption).foregroundStyle(.secondary) }
+            }
+            SettingsGroup("Controller Settings") {
+                ForEach(Array(SettingsCategory.controllerRows.enumerated()), id: \.element.id) { index, def in
+                    ControllerSettingRow(model: browser.settingsModel, def: def)
+                    if index < SettingsCategory.controllerRows.count - 1 { Divider() }
+                }
             }
         }
     }
 
     private var test: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            title("Native Controller Test")
-            HStack(spacing: 30) {
-                stick("Left Stick", value: service.snapshot.leftStick)
-                stick("Right Stick", value: service.snapshot.rightStick)
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsGroup("Native Controller Test") {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 30) {
+                        stick("Left Stick", value: service.snapshot.leftStick)
+                        stick("Right Stick", value: service.snapshot.rightStick)
+                    }
+                    HStack(spacing: 20) {
+                        trigger("L2", value: service.snapshot.leftTrigger)
+                        trigger("R2", value: service.snapshot.rightTrigger)
+                    }
+                    buttonGrid
+                }
             }
-            HStack(spacing: 20) {
-                trigger("L2", value: service.snapshot.leftTrigger)
-                trigger("R2", value: service.snapshot.rightTrigger)
-            }
-            buttonGrid
-            HStack {
-                Button("Pulse Left") { service.playTestPulse(locality: .leftHandle) }
-                Button("Pulse Right") { service.playTestPulse(locality: .rightHandle) }
-                Button("Pulse Both") { service.playTestPulse(locality: .handles) }
-                Button("Reset Outputs") { service.stopHaptics(); service.updateSettings { $0.adaptiveTriggers = .default } }
+            SettingsGroup("Test Outputs") {
+                HStack {
+                    Button("Pulse Left") { service.playTestPulse(locality: .leftHandle) }
+                    Button("Pulse Right") { service.playTestPulse(locality: .rightHandle) }
+                    Button("Pulse Both") { service.playTestPulse(locality: .handles) }
+                    Spacer()
+                    Button("Reset Outputs") { service.stopHaptics(); service.updateSettings { $0.adaptiveTriggers = .default } }
+                }.settingsRow()
             }
         }
     }
 
     private var calibration: some View {
         VStack(alignment: .leading, spacing: 16) {
-            title("Calibration & Drift Correction")
             Text("Calibrate with the game paused. Center sampling measures drift, full range measures stick travel, and trigger calibration measures resting and maximum values.")
                 .foregroundStyle(.secondary)
-            if let p = service.calibrationProgress {
-                ProgressView(value: p.progress) { Text(p.kind.rawValue.capitalized) }
-                Text("Samples: \(p.sampleCount)").font(.caption).foregroundStyle(.secondary)
-                Button("Cancel", action: service.cancelCalibration)
-            } else {
-                HStack {
-                    Button("1. Calibrate Centers") { service.beginCalibration(.stickCenters, duration: 3) }
-                    Button("2. Calibrate Full Range") { service.beginCalibration(.stickFullRange, duration: 5) }
-                    Button("3. Calibrate Triggers") { service.beginCalibration(.triggers, duration: 4) }
+            SettingsGroup("Calibration & Drift Correction") {
+                if let p = service.calibrationProgress {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: p.progress) { Text(p.kind.rawValue.capitalized) }
+                        Text("Samples: \(p.sampleCount)").font(.caption).foregroundStyle(.secondary)
+                        Button("Cancel", action: service.cancelCalibration)
+                    }
+                } else {
+                    SettingsRow("1. Stick centers") {
+                        Button("Calibrate Centers") { service.beginCalibration(.stickCenters, duration: 3) }
+                    }
+                    Divider()
+                    SettingsRow("2. Stick travel") {
+                        Button("Calibrate Full Range") { service.beginCalibration(.stickFullRange, duration: 5) }
+                    }
+                    Divider()
+                    SettingsRow("3. Trigger range") {
+                        Button("Calibrate Triggers") { service.beginCalibration(.triggers, duration: 4) }
+                    }
                 }
             }
-            GroupBox("Current correction") {
+            SettingsGroup("Current Correction") {
                 calibrationSummary("Left", service.settings.calibration.leftStick)
                 Divider()
                 calibrationSummary("Right", service.settings.calibration.rightStick)
+                Divider()
+                HStack {
+                    Spacer()
+                    Button("Reset Calibration") { service.updateSettings { $0.calibration = .default } }
+                }.settingsRow()
             }
-            Button("Reset Calibration") { service.updateSettings { $0.calibration = .default } }
         }
     }
 
     private var triggers: some View {
         VStack(alignment: .leading, spacing: 16) {
-            title("Adaptive Triggers & Haptics")
             Text("Adaptive-trigger effects are synthetic category presets. xCloud does not transmit the original PS5 game-authored trigger effects.")
-                .font(.callout).foregroundStyle(.orange)
-            Picker("Left trigger", selection: triggerPreset(.left)) { triggerCatalog }
-            Picker("Right trigger", selection: triggerPreset(.right)) { triggerCatalog }
-            AdaptiveTriggerPresetManager(service: service, store: browser.inputPresets)
-            Divider()
-            Picker("Haptic mode", selection: hapticMode) {
-                ForEach(HapticMode.allCases, id: \.self) { Text($0.rawValue.humanized).tag($0) }
+                .font(.callout).foregroundStyle(.secondary)
+            SettingsGroup("Adaptive Triggers") {
+                SettingsRow("Left trigger") {
+                    AdaptiveTriggerPresetSelector(title: "Left trigger", side: .left, service: service, store: browser.inputPresets)
+                }
+                Divider()
+                SettingsRow("Right trigger") {
+                    AdaptiveTriggerPresetSelector(title: "Right trigger", side: .right, service: service, store: browser.inputPresets)
+                }
             }
-            valueSlider("Haptic gain", value: hapticGain, range: 0...2, format: { String(format: "%.1fx", $0) })
-            valueSlider("Sharpness", value: hapticSharpness, range: 0...1, format: { String(format: "%.0f%%", $0 * 100) })
-            HStack {
-                Button("Test Soft") { service.playTestPulse(intensity: 0.35, sharpness: 0.15) }
-                Button("Test Strong") { service.playTestPulse(intensity: 1, sharpness: 0.75, duration: 0.25) }
-                Button("Stop", action: service.stopHaptics)
+            Text("Pedal presets hold resistance through full pull; braking is lighter than acceleration. Built-in effects are approximations, not vehicle telemetry. Custom selections keep a snapshot even if their library entry changes or is deleted.")
+                .font(.caption).foregroundStyle(.secondary)
+            AdaptiveTriggerPresetManager(service: service, store: browser.inputPresets)
+            SettingsGroup("Haptics") {
+                SettingsRow("Haptic mode") {
+                    Picker("Haptic mode", selection: hapticMode) {
+                        ForEach(HapticMode.allCases, id: \.self) { Text($0.rawValue.humanized).tag($0) }
+                    }.settingsPicker()
+                }
+                Divider()
+                valueSlider("Haptic gain", value: hapticGain, range: 0...2, format: { String(format: "%.1fx", $0) })
+                Divider()
+                valueSlider("Sharpness", value: hapticSharpness, range: 0...1, format: { String(format: "%.0f%%", $0 * 100) })
+                Divider()
+                HStack {
+                    Button("Test Soft") { service.playTestPulse(intensity: 0.35, sharpness: 0.15) }
+                    Button("Test Strong") { service.playTestPulse(intensity: 1, sharpness: 0.75, duration: 0.25) }
+                    Spacer()
+                    Button("Stop", action: service.stopHaptics)
+                }.settingsRow()
             }
         }
     }
 
     private var touchpad: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            title("Touchpad")
-            Toggle("Enable touchpad gestures", isOn: touchpadEnabled)
-            TouchpadGestureDemo()
-            ForEach(TouchpadGesture.allCases, id: \.self) { gesture in
-                Picker(gesture.rawValue.humanized, selection: touchpadAction(for: gesture)) {
-                    Text("None").tag(ControllerNativeAction.none)
-                    Text("Open Settings").tag(ControllerNativeAction.toggleSettings)
-                    Text("Toggle Fullscreen").tag(ControllerNativeAction.toggleFullscreen)
-                    Text("Toggle Stats").tag(ControllerNativeAction.toggleStats)
-                    Text("Screenshot").tag(ControllerNativeAction.screenshot)
-                    Text("Mute").tag(ControllerNativeAction.mute)
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsGroup("Touchpad") {
+                SettingsRow("Enable touchpad gestures") {
+                    Toggle("Enable touchpad gestures", isOn: touchpadEnabled).labelsHidden().toggleStyle(.switch)
+                }
+                Divider()
+                TouchpadGestureDemo()
+                    .frame(maxWidth: 300)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                Text("The animation demonstrates two-finger swipe behavior. Gestures are recognized natively and mapped to the selected action.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SettingsGroup("Gesture Actions") {
+                ForEach(Array(TouchpadGesture.allCases.enumerated()), id: \.element) { index, gesture in
+                    if index > 0 { Divider() }
+                    SettingsRow(gesture.rawValue.humanized) {
+                        Picker(gesture.rawValue.humanized, selection: touchpadAction(for: gesture)) {
+                            Text("None").tag(ControllerNativeAction.none)
+                            Text("Open Settings").tag(ControllerNativeAction.toggleSettings)
+                            Text("Toggle Fullscreen").tag(ControllerNativeAction.toggleFullscreen)
+                            Text("Toggle Stats").tag(ControllerNativeAction.toggleStats)
+                            Text("Screenshot").tag(ControllerNativeAction.screenshot)
+                            Text("Mute").tag(ControllerNativeAction.mute)
+                        }.settingsPicker()
+                    }
                 }
             }
-            Text("The animation demonstrates two-finger swipe behavior. Gestures are recognized natively and mapped to the selected action.")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -251,29 +236,8 @@ struct ControllerToolsView: View {
     }
 
     private var shortcuts: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            title("Shortcuts & Macros")
-            Text("Shortcuts support chords, holds and double-presses. Macros are limited to 16 finite steps and two seconds—no loops or turbo.")
-                .foregroundStyle(.secondary)
-            GroupBox("Suggested native shortcuts") {
-                HStack { Text("Open Settings"); Spacer(); Text("Hold L3 + R3") }
-                HStack { Text("Touchpad gesture"); Spacer(); Text("Two-finger tap") }
-            }
-            Button("Create Default Shortcuts") { installDefaultShortcuts() }
-            Divider()
-            Text("Macros").font(.headline)
-            if service.settings.macros.isEmpty {
-                Text("No macros configured.").foregroundStyle(.secondary)
-            } else {
-                ForEach(service.settings.macros) { macro in
-                    HStack { Text(macro.name); Spacer(); Text("\(macro.steps.count) steps · \(macro.totalDurationMilliseconds) ms").foregroundStyle(.secondary) }
-                }
-            }
-            Button("Create Basic Double-Tap Macro") { createSampleMacro() }
-        }
+        ShortcutMacroEditor(service: service, installDefaults: installDefaultShortcuts)
     }
-
-    private func title(_ text: String) -> some View { Text(text).font(.system(size: 24, weight: .semibold, design: .rounded)) }
 
     private func stick(_ label: String, value: ControllerVector2) -> some View {
         VStack {
@@ -310,34 +274,14 @@ struct ControllerToolsView: View {
     }
 
     private func calibrationSummary(_ label: String, _ c: StickCalibration) -> some View {
-        VStack(alignment: .leading) {
-            Text(label).font(.headline)
-            HStack { Text("Center"); Spacer(); Text(String(format: "%.4f, %.4f", c.center.x, c.center.y)) }
-            HStack { Text("Inner deadzone"); Spacer(); Text(String(format: "%.2f", c.innerDeadzone)) }
-            HStack { Text("Outer deadzone"); Spacer(); Text(String(format: "%.2f", c.outerDeadzone)) }
+        VStack(alignment: .leading, spacing: 0) {
+            Text(label).font(.system(size: 13, weight: .semibold)).padding(.vertical, 8)
+            SettingsRow("Center") { Text(String(format: "%.4f, %.4f", c.center.x, c.center.y)).monospacedDigit() }
+            SettingsRow("Inner deadzone") { Text(String(format: "%.2f", c.innerDeadzone)).monospacedDigit() }
+            SettingsRow("Outer deadzone") { Text(String(format: "%.2f", c.outerDeadzone)).monospacedDigit() }
         }
     }
 
-    @ViewBuilder
-    private var triggerCatalog: some View {
-        ForEach(AdaptiveTriggerCategory.allCases) { category in
-            Section(category.rawValue) {
-                ForEach(AdaptiveTriggerPreset.catalog(in: category), id: \.self) { preset in
-                    Text(preset.htmlName).tag(preset)
-                }
-            }
-        }
-    }
-
-    private enum TriggerSide { case left, right }
-    private func triggerPreset(_ side: TriggerSide) -> Binding<AdaptiveTriggerPreset> {
-        Binding(get: { side == .left ? service.settings.adaptiveTriggers.leftPreset : service.settings.adaptiveTriggers.rightPreset }, set: { new in
-            service.updateSettings {
-                if side == .left { $0.adaptiveTriggers.leftPreset = new; $0.adaptiveTriggers.leftUsesCustom = false }
-                else { $0.adaptiveTriggers.rightPreset = new; $0.adaptiveTriggers.rightUsesCustom = false }
-            }
-        })
-    }
     private var hapticMode: Binding<HapticMode> { Binding(get: { service.settings.haptics.mode }, set: { value in service.updateSettings { $0.haptics.mode = value } }) }
     private var hapticGain: Binding<Double> { Binding(get: { Double(service.settings.haptics.intensityMultiplier) }, set: { value in service.updateSettings { $0.haptics.intensityMultiplier = Float(value) } }) }
     private var hapticSharpness: Binding<Double> { Binding(get: { Double(service.settings.haptics.sharpness) }, set: { value in service.updateSettings { $0.haptics.sharpness = Float(value) } }) }
@@ -356,22 +300,100 @@ struct ControllerToolsView: View {
     }
 
     private func valueSlider(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, format: @escaping (Double) -> String) -> some View {
-        HStack { Text(label); Slider(value: value, in: range); Text(format(value.wrappedValue)).frame(width: 58, alignment: .trailing) }
+        SettingsRow(label) {
+            HStack(spacing: 8) {
+                Slider(value: value, in: range).frame(width: 168).accessibilityLabel(label)
+                Text(format(value.wrappedValue)).monospacedDigit().frame(width: 64, alignment: .trailing)
+            }
+        }
     }
 
     private func installDefaultShortcuts() {
         let shortcut = ControllerShortcut(name: "Open Settings", controls: [.leftStickButton, .rightStickButton], activation: .hold(seconds: 0.65), action: .toggleSettings)
-        service.updateSettings { $0.shortcuts.shortcuts = [shortcut] }
+        service.updateSettings { settings in
+            // Never replace user mappings or install a conflicting duplicate chord.
+            guard !settings.shortcuts.shortcuts.contains(where: {
+                $0.controls == shortcut.controls && $0.activation == shortcut.activation
+            }) else { return }
+            settings.shortcuts.shortcuts.append(shortcut)
+        }
+    }
+}
+
+/// Compact renderer for the three Better xCloud controller preferences that
+/// moved from the obsolete Controller Tools settings category to Overview.
+private struct ControllerSettingRow: View {
+    @ObservedObject var model: SettingsModel
+    let def: SettingDef
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(def.label).font(.system(size: 13))
+                if let note = def.note {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 16)
+            control.frame(width: controlWidth, alignment: .trailing).accessibilityLabel(def.label)
+        }
+        .settingsRow()
     }
 
-    private func createSampleMacro() {
-        guard let macro = try? ControllerMacro(name: "Double A", steps: [
-            ControllerMacroStep(delayMilliseconds: 0, action: .button(control: .buttonA, isPressed: true)),
-            ControllerMacroStep(delayMilliseconds: 70, action: .button(control: .buttonA, isPressed: false)),
-            ControllerMacroStep(delayMilliseconds: 110, action: .button(control: .buttonA, isPressed: true)),
-            ControllerMacroStep(delayMilliseconds: 70, action: .button(control: .buttonA, isPressed: false)),
-        ]) else { return }
-        service.updateSettings { $0.macros.append(macro) }
+    private var controlWidth: CGFloat {
+        if case .range = def.kind { return 240 }
+        return 180
+    }
+
+    @ViewBuilder
+    private var control: some View {
+        switch def.kind {
+        case .toggle:
+            Toggle("", isOn: Binding(
+                get: { model.isOn(def) },
+                set: { model.setToggle(def, desired: $0) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+        case .range(let minimum, let maximum, let step, _, let format):
+            HStack(spacing: 8) {
+                Slider(value: Binding(
+                    get: { model.rangeValue(def) ?? minimum },
+                    set: { model.setRange(def, value: $0) }
+                ), in: minimum...maximum, step: step)
+                .frame(width: 168)
+                Text(format(model.rangeValue(def) ?? minimum))
+                    .font(.system(size: 12).monospacedDigit())
+                    .frame(width: 64, alignment: .trailing)
+            }
+        case .ledColor:
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(Array(LEDColor.all.enumerated()), id: \.offset) { index, color in
+                        Button {
+                            model.ledColorIndex = index
+                        } label: {
+                            if model.ledColorIndex == index {
+                                Label(color.label, systemImage: "checkmark")
+                            } else {
+                                Text(color.label)
+                            }
+                        }
+                    }
+                } label: {
+                    Text(LEDColor.all.indices.contains(model.ledColorIndex) ? LEDColor.all[model.ledColorIndex].label : "LED")
+                        .lineLimit(1)
+                }
+                ColorPicker("", selection: Binding(
+                    get: { model.customLEDColor },
+                    set: { model.customLEDColor = $0 }
+                ), supportsOpacity: false)
+                .labelsHidden()
+                .fixedSize()
+            }
+        default:
+            EmptyView()
+        }
     }
 }
 
