@@ -7,6 +7,7 @@
 //  navigation layered on top.
 //
 
+import AppKit
 import SwiftUI
 
 struct SettingsRootView: View {
@@ -25,18 +26,61 @@ struct SettingsRootView: View {
                 browser.isSettingsWindowOpen = false
                 unbindController()
             }
-            .frame(minWidth: 820, minHeight: 560)
-            .background(.ultraThinMaterial)
+            .frame(minWidth: 900, minHeight: 620)
+            .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func content(_ model: SettingsModel) -> some View {
         NavigationView {
             sidebar(model)
-                .frame(minWidth: 190, idealWidth: 210, maxWidth: 240)
+                .frame(minWidth: 210, idealWidth: 225, maxWidth: 250)
             detail(model)
         }
         .navigationViewStyle(.columns)
-        .navigationTitle("Settings")
+        .navigationTitle("Mac Xcloud")
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                appHeader
+            }
+        }
+    }
+
+    private var appHeader: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 30, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                     ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+                     ?? "Mac Xcloud")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(versionLabel)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                guard let url = URL(string: "https://ko-fi.com/arunyagoojar") else { return }
+                NSWorkspace.shared.open(url)
+            } label: {
+                Label("Buy Me a Coffee", systemImage: "cup.and.saucer.fill")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Support Mac Xcloud")
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var versionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return "Version \(version) (Build \(build))"
     }
 
     // MARK: - Sidebar
@@ -48,9 +92,20 @@ struct SettingsRootView: View {
                 if let id { model.selectCategory(id) }
             }
         )) {
-            ForEach(SettingsCategory.all) { category in
-                Label(category.title, systemImage: category.icon)
+            Section("Settings") {
+                ForEach(SettingsCategory.all) { category in
+                    Label {
+                        Text(category.title)
+                            .font(.system(size: 13, weight: model.selectedCategoryId == category.id ? .semibold : .regular))
+                    } icon: {
+                        Image(systemName: category.icon)
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: 20, height: 20)
+                            .foregroundStyle(model.selectedCategoryId == category.id ? Color.accentColor : Color.secondary)
+                    }
                     .tag(category.id)
+                    .padding(.vertical, 3)
+                }
             }
         }
         .listStyle(.sidebar)
@@ -181,8 +236,9 @@ struct SettingsRootView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Spacer()
+            Spacer(minLength: 16)
             control(model, def: def)
+                .frame(width: 180, alignment: .trailing)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -357,7 +413,7 @@ struct SettingsRootView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .frame(width: 180, alignment: .trailing)
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     private func pickerLabel(_ model: SettingsModel, def: SettingDef, index: Int) -> String {

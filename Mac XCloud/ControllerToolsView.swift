@@ -64,7 +64,7 @@ struct ControllerToolsView: View {
     private var embeddedContent: some View {
         HStack(spacing: 0) {
             sectionSidebar
-                .frame(minWidth: 170, idealWidth: 185, maxWidth: 205)
+                .frame(minWidth: 190, idealWidth: 205, maxWidth: 225)
             Divider()
             sectionDetail
         }
@@ -72,12 +72,22 @@ struct ControllerToolsView: View {
 
     private var sectionSidebar: some View {
         List {
-            ForEach(ControllerToolSection.allCases) { item in
-                Button { section = item } label: {
-                    Label(item.rawValue, systemImage: item.icon)
+            Section("Controller") {
+                ForEach(ControllerToolSection.allCases) { item in
+                    Button { section = item } label: {
+                        Label {
+                            Text(item.rawValue)
+                                .font(.system(size: 13, weight: section == item ? .semibold : .regular))
+                        } icon: {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 14, weight: .medium))
+                                .frame(width: 20, height: 20)
+                        }
+                        .foregroundStyle(section == item ? Color.accentColor : Color.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 3)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(section == item ? Color.accentColor : Color.primary)
             }
         }
         .listStyle(.sidebar)
@@ -98,14 +108,19 @@ struct ControllerToolsView: View {
                         case .shortcuts: shortcuts
                         }
                     }
-                    .padding(embedded ? 14 : 20)
+                    .padding(embedded ? 18 : 22)
                 } header: {
-                    HStack {
-                        Label(section.rawValue, systemImage: section.icon).font(.headline)
+                    HStack(spacing: 8) {
+                        Image(systemName: section.icon)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 20, height: 20)
+                        Text(section.rawValue)
+                            .font(.system(size: 15, weight: .semibold))
                         Spacer()
                     }
-                    .padding(.horizontal, embedded ? 14 : 20)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, embedded ? 18 : 22)
+                    .padding(.vertical, 12)
                     .background(.regularMaterial)
                 }
             }

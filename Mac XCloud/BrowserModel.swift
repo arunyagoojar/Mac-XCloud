@@ -223,18 +223,16 @@ final class BrowserModel: ObservableObject {
     // MARK: - Settings window
 
     private var settingsWindow: NSWindow?
-    private var controllerToolsWindow: NSWindow?
-    private var controllerToolsDelegate: WindowCloseDelegate?
     private var profileWindows: [ProfileKind: NSWindow] = [:]
 
     /// Opens the settings as a real, separate NSWindow that we fully control
     /// (the SwiftUI Settings scene's responder action proved unreliable).
     func openSettingsWindow() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
-            window.title = "Settings"
+            window.title = "Mac Xcloud"
             window.identifier = NSUserInterfaceItemIdentifier("xcg-settings")
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
