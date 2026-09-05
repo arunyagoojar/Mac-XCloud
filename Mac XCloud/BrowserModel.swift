@@ -18,6 +18,10 @@ struct SpikeReport: Equatable {
     var userAgent = ""
     var webControllerIDs: [String] = []
     var nativeControllerIDs: [String] = []
+    var remotePlayActive = false
+    var remoteServerStatus = "Unknown"
+    var remoteConsoleStatus = "Unknown"
+    var controllerMismatch = false
     var messages: [String] = []
 }
 
@@ -69,6 +73,11 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var currentRegion = ""
     @Published private(set) var telemetry = StreamTelemetry.empty
     @Published private(set) var bridgeReady = false
+
+    var remotePlayActive: Bool { report.remotePlayActive }
+    var remoteServerStatus: String { report.remoteServerStatus }
+    var remoteConsoleStatus: String { report.remoteConsoleStatus }
+    var controllerMismatch: Bool { report.controllerMismatch }
 
     var statusController: MenuBarStatusController?
     let controllerFeatures = ControllerFeatureService()
@@ -251,30 +260,11 @@ final class BrowserModel: ObservableObject {
         settingsWindow?.performClose(nil)
     }
 
+    /// Legacy entry point retained for source compatibility. Controller Tools
+    /// now lives inside Settings and the settings window owns controller input.
     func openControllerTools() {
-        if controllerToolsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                  backing: .buffered, defer: false)
-            window.title = "Controller Tools"
-            window.identifier = NSUserInterfaceItemIdentifier("xcg-controller-tools")
-            window.titlebarAppearsTransparent = true
-            window.isReleasedWhenClosed = false
-            let closeDelegate = WindowCloseDelegate { [weak self] in
-                self?.controllerFeatures.setControllerToolsActive(false)
-                self?.recomputeControllerOwner()
-            }
-            controllerToolsDelegate = closeDelegate
-            window.delegate = closeDelegate
-            window.center()
-            window.contentView = NSHostingView(rootView:
-                ControllerToolsView(service: controllerFeatures)
-                    .environmentObject(self)
-            )
-            controllerToolsWindow = window
-        }
-        controllerToolsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: false)
+        settingsModel.selectCategory("controller")
+        openSettingsWindow()
     }
 
     private var isGamepadPollingPaused = false
@@ -323,7 +313,7 @@ final class BrowserModel: ObservableObject {
                     }
                     self.evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
                 }
-                try? await Task.sleep(for: .milliseconds(250))
+                try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
     }
@@ -385,11 +375,10 @@ final class BrowserModel: ObservableObject {
             // controller buttons into UI actions.
             setGamepadPollingPaused(true)
         case .controllerTools, .profile:
-            // These windows use mouse/keyboard only. Keep the browser's
-            // Gamepad authority active while they are open.
+            // Profile editors remain separate and do not consume controller UI.
             setGamepadPollingPaused(false)
         }
-        controllerFeatures.setControllerToolsActive(controllerInputOwner == .controllerTools)
+        controllerFeatures.setControllerToolsActive(controllerInputOwner == .settings && settingsModel.selectedCategoryId == "controller")
     }
 
     private func transitionControllerOwner(to next: ControllerInputOwner) {
@@ -492,12 +481,17 @@ final class BrowserModel: ObservableObject {
                     try {
                       var info = await BxCBridge.streamInfo();
                       var stats = info.playing ? await BxCBridge.streamStats() : null;
-                      return JSON.stringify({info:info, stats:stats});
+                      var remote = window.STATES && window.STATES.remotePlay || {};
+                      return JSON.stringify({info:info, stats:stats, remote:{active:!!(window.STATES && window.STATES.isPlaying && remote), server:remote.serverStatus || remote.serverState || (remote.server ? 'Connected' : 'Unknown'), console:remote.consoleStatus || remote.consoleState || (remote.consoleName ? 'Available' : 'Unknown')}});
                     } catch (e) { return JSON.stringify({info:{playing:false,title:'',region:''},stats:null}); }
                     """)
                 guard let text = result as? String, let data = text.data(using: .utf8),
                       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
                 let info = root["info"] as? [String: Any] ?? [:]
+                let remote = root["remote"] as? [String: Any] ?? [:]
+                report.remotePlayActive = remote["active"] as? Bool ?? false
+                report.remoteServerStatus = remote["server"] as? String ?? "Unknown"
+                report.remoteConsoleStatus = remote["console"] as? String ?? "Unknown"
                 isStreaming = info["playing"] as? Bool ?? false
                 currentGameTitle = info["title"] as? String ?? ""
                 currentRegion = info["region"] as? String ?? ""
@@ -635,8 +629,13 @@ final class BrowserModel: ObservableObject {
             report.gamepadAPI = (body["gamepadAPI"] as? Bool) ?? false
             report.webRTC = (body["webrtc"] as? Bool) ?? false
             report.userAgent = body["ua"] as? String ?? ""
+        case "remote-status":
+            report.remotePlayActive = body["active"] as? Bool ?? false
+            report.remoteServerStatus = body["server"] as? String ?? "Unknown"
+            report.remoteConsoleStatus = body["console"] as? String ?? "Unknown"
         case "gamepads":
             report.webControllerIDs = body["ids"] as? [String] ?? []
+            report.controllerMismatch = !report.nativeControllerIDs.isEmpty && report.webControllerIDs.isEmpty
             if !report.webControllerIDs.isEmpty {
                 inputPresets.retryActiveWebSettings()
             } else {
@@ -684,8 +683,15 @@ final class BrowserModel: ObservableObject {
         report.nativeControllerIDs = GCController.controllers().map { controller in
             controller.vendorName ?? "Game Controller"
         }
+        report.controllerMismatch = !report.nativeControllerIDs.isEmpty && report.webControllerIDs.isEmpty
         // Ask WebKit/Better xCloud to rescan its own real Gamepad list after
         // native connect/current notifications. This does not fabricate input.
         evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
+    }
+
+    func retryControllerDiscovery() {
+        refreshNativeControllers()
+        evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
+        note("Requested a safe native/browser controller rescan")
     }
 }

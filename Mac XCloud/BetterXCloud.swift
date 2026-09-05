@@ -427,8 +427,10 @@ enum BetterXCloud {
             }
             if (event && event.repeat !== undefined) payload.repeat = finite(event.repeat, 0, 0, 1000);
             window.webkit.messageHandlers.spikeHandler.postMessage(payload);
-          } catch (error) {}
-          return false;
+          } catch (error) { return false; }
+          // The native handler owns rumble for this app. Returning true stops
+          // Better xCloud from also driving the browser actuator a second time.
+          return true;
         };
 
         window.BxCBridge = {
@@ -811,6 +813,9 @@ enum BetterXCloud {
         /* Stats bar — match the app's dark material cards, not the Xbox HUD. */
         '.bx-stats-bar, #bx-stats-bar {',
         '  position: fixed !important;',
+        '}',
+        '.bx-stats-bar.bx-gone, #bx-stats-bar.bx-gone { display: none !important; }',
+        '.bx-stats-bar:not(.bx-gone), #bx-stats-bar:not(.bx-gone) {',
         '  top: 16px !important;',
         '  right: 16px !important;',
         '  left: auto !important;',

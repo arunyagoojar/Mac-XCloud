@@ -599,11 +599,16 @@ final class SettingsModel: ObservableObject {
         objectWillChange.send()
     }
 
+    private var regionPingTask: Task<Void, Never>?
+
     func testRegions() {
         guard !isPingingRegions else { return }
         isPingingRegions = true
         saveMessage = ""
-        Task {
+        browser?.evaluateJS("window.__xcgRegionPingCancelled = false")
+        regionPingTask?.cancel()
+        regionPingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 let result = try await browser?.callAsyncJS("""
                     try {
@@ -611,9 +616,11 @@ final class SettingsModel: ObservableObject {
                       var regions = BxCBridge.regionList();
                       var out = [];
                       for (var i = 0; i < regions.length; i++) {
+                        if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
                         var r = regions[i]; if (!r.baseUri) continue;
                         var times = [];
                         for (var n = 0; n < 3; n++) {
+                          if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
                           var t = performance.now();
                           try { await fetch(r.baseUri + '/v2/servers/home?mr=50', {method:'GET', cache:'no-store'}); times.push(Math.round(performance.now()-t)); } catch (e) {}
                         }
@@ -623,7 +630,13 @@ final class SettingsModel: ObservableObject {
                     } catch (e) { return JSON.stringify({error:String(e)}); }
                     """)
                 isPingingRegions = false
-                guard let text = result as? String, let data = text.data(using: .utf8),
+                regionPingTask = nil
+                guard let text = result as? String else {
+                    saveMessage = "Region test failed"
+                    return
+                }
+                if text == "{\"cancelled\":true}" { saveMessage = "Region test stopped"; return }
+                guard let data = text.data(using: .utf8),
                       let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
                     saveMessage = "Region test failed"
                     return
@@ -639,13 +652,18 @@ final class SettingsModel: ObservableObject {
                 objectWillChange.send()
             } catch {
                 isPingingRegions = false
-                saveMessage = "Region test failed: \(error.localizedDescription)"
+                regionPingTask = nil
+                if !Task.isCancelled { saveMessage = "Region test failed: \(error.localizedDescription)" }
             }
         }
     }
 
     func stopRegionPing() {
+        browser?.evaluateJS("window.__xcgRegionPingCancelled = true")
+        regionPingTask?.cancel()
+        regionPingTask = nil
         isPingingRegions = false
+        saveMessage = "Region test stopped"
     }
 
     func useBestRegion() {

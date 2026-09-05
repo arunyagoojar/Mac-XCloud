@@ -121,7 +121,7 @@ struct WebView: NSViewRepresentable {
               }
               if (notifyNewPads) {
                 pads.forEach(function (pad) {
-                  var id = String(pad.id || pad.index);
+                  var id = String(pad.index) + "|" + String(pad.id || "");
                   if (seenBrowserPads[id]) return;
                   seenBrowserPads[id] = true;
                   // Dispatch only a real browser-returned Gamepad object. The
@@ -141,10 +141,10 @@ struct WebView: NSViewRepresentable {
           }
 
           window.addEventListener('gamepadconnected', function (event) {
-            if (event.gamepad) seenBrowserPads[String(event.gamepad.id || event.gamepad.index)] = true;
+            if (event.gamepad) seenBrowserPads[String(event.gamepad.index) + "|" + String(event.gamepad.id || "")] = true;
           });
           window.addEventListener('gamepaddisconnected', function (event) {
-            if (event.gamepad) delete seenBrowserPads[String(event.gamepad.id || event.gamepad.index)];
+            if (event.gamepad) delete seenBrowserPads[String(event.gamepad.index) + "|" + String(event.gamepad.id || "")];
           });
 
           scanBrowserGamepads(true);

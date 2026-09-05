@@ -48,7 +48,6 @@ struct Mac_XCloudApp: App {
             }
             .environmentObject(browser)
         }
-        .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView()

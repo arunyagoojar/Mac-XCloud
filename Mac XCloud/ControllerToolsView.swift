@@ -25,47 +25,32 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
 struct ControllerToolsView: View {
     @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var service: ControllerFeatureService
-    @State private var section: ControllerToolSection = .presets
+    /// Embedded in Settings for the 1.3.5 route. The standalone window path is
+    /// intentionally retained only as a compatibility shell and is no longer
+    /// opened by any app action.
+    var embedded = false
+    @Binding private var section: ControllerToolSection
+
+    init(service: ControllerFeatureService, embedded: Bool = false, section: Binding<ControllerToolSection> = .constant(.presets)) {
+        self.service = service
+        self.embedded = embedded
+        self._section = section
+    }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $section) {
-                ForEach(ControllerToolSection.allCases) { item in
-                    Label(item.rawValue, systemImage: item.icon).tag(item)
-                }
+        Group {
+            if embedded {
+                embeddedContent
+            } else {
+                NavigationView {
+                    sectionSidebar
+                sectionDetail
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 240)
-        } detail: {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    Section {
-                        Group {
-                            switch section {
-                            case .overview: overview
-                            case .test: test
-                            case .calibration: calibration
-                            case .triggers: triggers
-                            case .touchpad: touchpad
-                            case .presets: presets
-                            case .shortcuts: shortcuts
-                            }
-                        }
-                        .padding(20)
-                    } header: {
-                        HStack {
-                            Label(section.rawValue, systemImage: section.icon).font(.headline)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .background(.regularMaterial)
-                    }
-                }
+                .navigationViewStyle(.columns)
+                .navigationTitle("Controller Tools")
+                .frame(minWidth: 860, minHeight: 600)
             }
         }
-        .navigationTitle("Controller Tools")
-        .frame(minWidth: 860, minHeight: 600)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             service.setControllerToolsActive(true)
@@ -73,6 +58,57 @@ struct ControllerToolsView: View {
         }
         .onDisappear {
             service.setControllerToolsActive(false)
+        }
+    }
+
+    private var embeddedContent: some View {
+        HStack(spacing: 0) {
+            sectionSidebar
+                .frame(minWidth: 170, idealWidth: 185, maxWidth: 205)
+            Divider()
+            sectionDetail
+        }
+    }
+
+    private var sectionSidebar: some View {
+        List {
+            ForEach(ControllerToolSection.allCases) { item in
+                Button { section = item } label: {
+                    Label(item.rawValue, systemImage: item.icon)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(section == item ? Color.accentColor : Color.primary)
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private var sectionDetail: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                Section {
+                    Group {
+                        switch section {
+                        case .overview: overview
+                        case .test: test
+                        case .calibration: calibration
+                        case .triggers: triggers
+                        case .touchpad: touchpad
+                        case .presets: presets
+                        case .shortcuts: shortcuts
+                        }
+                    }
+                    .padding(embedded ? 14 : 20)
+                } header: {
+                    HStack {
+                        Label(section.rawValue, systemImage: section.icon).font(.headline)
+                        Spacer()
+                    }
+                    .padding(.horizontal, embedded ? 14 : 20)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial)
+                }
+            }
         }
     }
 
@@ -93,16 +129,16 @@ struct ControllerToolsView: View {
             title("Controller Overview")
             if let d = service.descriptor {
                 GroupBox {
-                    LabeledContent("Controller", value: d.vendorName)
-                    LabeledContent("Category", value: d.productCategory)
-                    LabeledContent("Input preset", value: browser.inputPresets.activePreset.name)
-                    LabeledContent("Battery", value: batteryText)
-                    LabeledContent("Adaptive triggers", value: service.capabilities.hasAdaptiveTriggers ? "Available" : "Unavailable")
-                    LabeledContent("Touchpad", value: service.capabilities.hasTouchpad ? "Available" : "Unavailable")
-                    LabeledContent("Haptics", value: service.capabilities.hasHaptics ? "Available" : "Unavailable")
+                    HStack { Text("Controller"); Spacer(); Text(d.vendorName) }
+                    HStack { Text("Category"); Spacer(); Text(d.productCategory) }
+                    HStack { Text("Input preset"); Spacer(); Text(browser.inputPresets.activePreset.name) }
+                    HStack { Text("Battery"); Spacer(); Text(batteryText) }
+                    HStack { Text("Adaptive triggers"); Spacer(); Text(service.capabilities.hasAdaptiveTriggers ? "Available" : "Unavailable") }
+                    HStack { Text("Touchpad"); Spacer(); Text(service.capabilities.hasTouchpad ? "Available" : "Unavailable") }
+                    HStack { Text("Haptics"); Spacer(); Text(service.capabilities.hasHaptics ? "Available" : "Unavailable") }
                 }
             } else {
-                ContentUnavailableView("No Controller", systemImage: "gamecontroller", description: Text("Connect a controller to use these tools."))
+                VStack { Image(systemName: "gamecontroller").font(.largeTitle); Text("No Controller"); Text("Connect a controller to use these tools.").font(.caption).foregroundStyle(.secondary) }
             }
         }
     }
@@ -205,8 +241,8 @@ struct ControllerToolsView: View {
             Text("Shortcuts support chords, holds and double-presses. Macros are limited to 16 finite steps and two seconds—no loops or turbo.")
                 .foregroundStyle(.secondary)
             GroupBox("Suggested native shortcuts") {
-                LabeledContent("Open Settings", value: "Hold L3 + R3")
-                LabeledContent("Touchpad gesture", value: "Two-finger tap")
+                HStack { Text("Open Settings"); Spacer(); Text("Hold L3 + R3") }
+                HStack { Text("Touchpad gesture"); Spacer(); Text("Two-finger tap") }
             }
             Button("Create Default Shortcuts") { installDefaultShortcuts() }
             Divider()
@@ -261,9 +297,9 @@ struct ControllerToolsView: View {
     private func calibrationSummary(_ label: String, _ c: StickCalibration) -> some View {
         VStack(alignment: .leading) {
             Text(label).font(.headline)
-            LabeledContent("Center", value: String(format: "%.4f, %.4f", c.center.x, c.center.y))
-            LabeledContent("Inner deadzone", value: String(format: "%.2f", c.innerDeadzone))
-            LabeledContent("Outer deadzone", value: String(format: "%.2f", c.outerDeadzone))
+            HStack { Text("Center"); Spacer(); Text(String(format: "%.4f, %.4f", c.center.x, c.center.y)) }
+            HStack { Text("Inner deadzone"); Spacer(); Text(String(format: "%.2f", c.innerDeadzone)) }
+            HStack { Text("Outer deadzone"); Spacer(); Text(String(format: "%.2f", c.outerDeadzone)) }
         }
     }
 

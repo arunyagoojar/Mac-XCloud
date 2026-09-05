@@ -447,8 +447,9 @@ struct ProfileEditorView: View {
     ]
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 0) {
+        NavigationView {
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
                 List(selection: Binding(get: { model.selectedID }, set: { model.select($0) })) {
                     ForEach(model.profiles) { profile in
                         HStack {
@@ -468,11 +469,13 @@ struct ProfileEditorView: View {
                 }
                 .buttonStyle(.borderless)
                 .padding(8)
+                }
+                .frame(minWidth: 190, idealWidth: 220, maxWidth: 260)
+                Divider()
+                editor
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
-        } detail: {
-            editor
         }
+        .navigationViewStyle(.columns)
         .navigationTitle(model.kind.title)
         .frame(minWidth: 820, minHeight: 580)
         .background(.ultraThinMaterial)
@@ -482,7 +485,12 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var editor: some View {
         if model.selectedID == nil {
-            ContentUnavailableView("No Profile Selected", systemImage: "keyboard")
+            VStack(spacing: 8) {
+                Image(systemName: "keyboard").font(.largeTitle).foregroundStyle(.secondary)
+                Text("No Profile Selected").font(.headline)
+                Text("Choose a profile from the sidebar.").font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 0) {
                 HStack {

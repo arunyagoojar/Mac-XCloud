@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct AdaptiveTriggerPresetManager: View {
     @ObservedObject var service: ControllerFeatureService
@@ -49,8 +50,8 @@ struct AdaptiveTriggerPresetManager: View {
                 }
             }
         }
-        .onChange(of: name) { _, _ in scheduleAutosave() }
-        .onChange(of: parameters) { _, _ in scheduleAutosave() }
+        .onReceive(Just(name)) { _ in scheduleAutosave() }
+        .onReceive(Just(parameters)) { _ in scheduleAutosave() }
         .onDisappear {
             autosaveTask?.cancel()
             service.stopTriggerPreview()
@@ -94,7 +95,7 @@ struct AdaptiveTriggerPresetManager: View {
         let currentName = name
         let currentParameters = parameters
         autosaveTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(600))
+            try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled, self.selectedID == selectedID,
                   let existing = store.customTriggerPresets.first(where: { $0.id == selectedID }) else { return }
             var updated = existing

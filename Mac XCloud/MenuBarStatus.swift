@@ -64,6 +64,9 @@ final class MenuBarStatusController {
         updates.target = self
         menu.addItem(updates)
         menu.addItem(.separator())
+        let main = NSMenuItem(title: "Open Main Window", action: #selector(openMainWindow), keyEquivalent: "")
+        main.target = self
+        menu.addItem(main)
         let settings = NSMenuItem(title: "Open Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -93,6 +96,7 @@ final class MenuBarStatusController {
     @objc private func checkForUpdates() {
         UpdaterService.checkForUpdates()
     }
+    @objc private func openMainWindow() { browser?.openMainWindow() }
     @objc private func openSettings() { browser?.openSettingsWindow() }
     @objc private func toggleFullscreen() { browser?.toggleFullscreen() }
     @objc private func reload() { browser?.reload() }

@@ -459,13 +459,13 @@ final class ControllerFeatureService: ObservableObject {
         case .vibration:
             trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.60, frequency: 0.55)
         case .acceleration:
-            trigger.setModeSlopeFeedback(startPosition: 0.12, endPosition: 0.95, startStrength: 0.04, endStrength: 0.34)
+            applySlopeFeedback(trigger, start: 0.12, end: 0.95, startStrength: 0.04, endStrength: 0.34)
         case .deceleration:
-            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.92, startStrength: 0.30, endStrength: 0.08)
+            applySlopeFeedback(trigger, start: 0.08, end: 0.92, startStrength: 0.30, endStrength: 0.08)
         case .engineStrain:
             trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.30, frequency: 0.16)
         case .braking:
-            trigger.setModeSlopeFeedback(startPosition: 0.08, endPosition: 0.90, startStrength: 0.10, endStrength: 0.68)
+            applySlopeFeedback(trigger, start: 0.08, end: 0.90, startStrength: 0.10, endStrength: 0.68)
         case .pistolFire:
             trigger.setModeWeaponWithStartPosition(0.28, endPosition: 0.55, resistiveStrength: 0.55)
         case .shotgunFire:
@@ -479,11 +479,11 @@ final class ControllerFeatureService: ObservableObject {
         case .machineGun:
             trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.78, frequency: 0.72)
         case .fishing:
-            trigger.setModeSlopeFeedback(startPosition: 0.18, endPosition: 0.90, startStrength: 0.12, endStrength: 0.65)
+            applySlopeFeedback(trigger, start: 0.18, end: 0.90, startStrength: 0.12, endStrength: 0.65)
         case .triggerJam:
             trigger.setModeFeedbackWithStartPosition(0.20, resistiveStrength: 0.92)
         case .doorResistance:
-            trigger.setModeSlopeFeedback(startPosition: 0.12, endPosition: 0.92, startStrength: 0.08, endStrength: 0.72)
+            applySlopeFeedback(trigger, start: 0.12, end: 0.92, startStrength: 0.08, endStrength: 0.72)
         case .electricShock:
             trigger.setModeVibrationWithStartPosition(0.15, amplitude: 0.75, frequency: 0.90)
         case .heartbeat:
@@ -507,6 +507,14 @@ final class ControllerFeatureService: ObservableObject {
         dualSense.leftTrigger.setModeOff()
         dualSense.rightTrigger.setModeOff()
         applyAdaptiveTriggerSettings()
+    }
+
+    private func applySlopeFeedback(_ trigger: GCDualSenseAdaptiveTrigger, start: Float, end: Float, startStrength: Float, endStrength: Float) {
+        if #available(macOS 12.3, *) {
+            trigger.setModeSlopeFeedback(startPosition: start, endPosition: end, startStrength: startStrength, endStrength: endStrength)
+        } else {
+            trigger.setModeFeedbackWithStartPosition(start, resistiveStrength: startStrength)
+        }
     }
 
     private func applyCustomAdaptiveTrigger(

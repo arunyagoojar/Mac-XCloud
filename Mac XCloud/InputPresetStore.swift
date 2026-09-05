@@ -403,7 +403,7 @@ final class InputPresetStore: ObservableObject {
         let expectedID = activePresetID
         let expectedGeneration = webApplyGeneration
         readinessRetryTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(180))
+            try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled, let self,
                   self.activePresetID == expectedID,
                   self.webApplyGeneration == expectedGeneration else { return }
@@ -573,7 +573,7 @@ final class InputPresetStore: ObservableObject {
         webAutosaveGeneration &+= 1
         let generation = webAutosaveGeneration
         webAutosaveTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(700))
+            try? await Task.sleep(nanoseconds: 700_000_000)
             guard !Task.isCancelled else { return }
             await self?.autosaveWebState(for: id, generation: generation)
         }

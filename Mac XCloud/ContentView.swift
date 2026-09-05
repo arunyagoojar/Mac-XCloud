@@ -95,7 +95,7 @@ struct ContentView: View {
         .onAppear { browser.pollStreamInfo() }
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 browser.pollStreamInfo()
             }
         }
@@ -138,6 +138,17 @@ struct ContentView: View {
 
                     Label("Native controllers: \(browser.report.nativeControllerIDs.count)",
                           systemImage: "gamecontroller")
+
+                    Label(browser.remotePlayActive ? "Remote Play: active" : "Remote Play: inactive",
+                          systemImage: browser.remotePlayActive ? "checkmark.circle" : "minus.circle")
+                    Text("Remote server: \(browser.remoteServerStatus)").font(.caption)
+                    Text("Remote console: \(browser.remoteConsoleStatus)").font(.caption)
+                    if browser.controllerMismatch {
+                        Label("Controller mismatch: native connected, browser unavailable", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                        Button("Rescan Controller") { browser.retryControllerDiscovery() }
+                            .buttonStyle(.bordered)
+                    }
 
                     ForEach(browser.report.nativeControllerIDs, id: \.self) { id in
                         Text("• \(id)").font(.caption).padding(.leading, 8)

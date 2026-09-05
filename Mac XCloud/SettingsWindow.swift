@@ -12,6 +12,7 @@ import SwiftUI
 struct SettingsRootView: View {
     @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var model: SettingsModel
+    @State private var controllerSection: ControllerToolSection = .overview
 
     var body: some View {
         content(model)
@@ -24,18 +25,17 @@ struct SettingsRootView: View {
                 browser.isSettingsWindowOpen = false
                 unbindController()
             }
-            .frame(minWidth: 760, minHeight: 540)
+            .frame(minWidth: 820, minHeight: 560)
             .background(.ultraThinMaterial)
     }
 
     private func content(_ model: SettingsModel) -> some View {
-        NavigationSplitView {
+        NavigationView {
             sidebar(model)
-                .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 240)
-        } detail: {
+                .frame(minWidth: 190, idealWidth: 210, maxWidth: 240)
             detail(model)
         }
-        .scrollContentBackground(.hidden)
+        .navigationViewStyle(.columns)
         .navigationTitle("Settings")
     }
 
@@ -83,6 +83,19 @@ struct SettingsRootView: View {
     // MARK: - Detail
 
     private func detail(_ model: SettingsModel) -> some View {
+        Group {
+            if model.selectedCategoryId == "controller" {
+                ControllerToolsView(service: browser.controllerFeatures, embedded: true, section: $controllerSection)
+            } else {
+                settingsDetail(model)
+            }
+        }
+        .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
+            ForcedMKBPicker(model: model)
+        }
+    }
+
+    private func settingsDetail(_ model: SettingsModel) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
@@ -125,9 +138,6 @@ struct SettingsRootView: View {
                 }
             }
             .padding(.bottom, 12)
-        }
-        .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
-            ForcedMKBPicker(model: model)
         }
     }
 
@@ -347,7 +357,7 @@ struct SettingsRootView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize()
+        .frame(width: 180, alignment: .trailing)
     }
 
     private func pickerLabel(_ model: SettingsModel, def: SettingDef, index: Int) -> String {
@@ -389,6 +399,7 @@ struct SettingsRootView: View {
             ), supportsOpacity: false)
             .labelsHidden()
             .fixedSize()
+            .frame(width: 180, alignment: .trailing)
             .help("Custom color")
         }
     }

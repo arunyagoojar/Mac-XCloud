@@ -9,7 +9,7 @@
     ·
     <a href="https://github.com/arunyagoojar/Mac-XCloud/actions"><strong>Builds</strong></a>
   </p>
-  <p><em>Free and open source · macOS 14.6+ · Not affiliated with Microsoft</em></p>
+  <p><em>Free and open source · macOS 12.0+ · Not affiliated with Microsoft</em></p>
 </div>
 
 <br>
@@ -196,7 +196,7 @@ GitHub Actions builds the app, signs the Sparkle archive, creates the GitHub Rel
 
 ## Compatibility and troubleshooting
 
-- Minimum deployment target: **macOS 14.6**.
+- Minimum deployment target: **macOS 12.0**.
 - A wired controller connection is recommended when Bluetooth HID reconnects are unstable.
 - If the controller was connected before Mac Xcloud launched, the app retries WebKit Gamepad discovery during startup so the Xbox page can see it.
 - If controller input disappears, reload the Xbox page once. If the issue repeats, reconnect the controller or test USB; macOS WebKit/GameController has a known disconnect assertion that the app can detect but cannot fully prevent with public APIs.
