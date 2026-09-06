@@ -6,6 +6,7 @@ final class MenuBarStatusController {
     private let item: NSStatusItem
     private weak var browser: BrowserModel?
     private var timer: Timer?
+    private var terminateObserver: NSObjectProtocol?
 
     init(browser: BrowserModel) {
         self.browser = browser
@@ -15,6 +16,24 @@ final class MenuBarStatusController {
         refreshMenu()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshMenu() }
+        }
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tearDown() }
+        }
+    }
+
+    /// Removes the status item and its refresh timer during quit so the icon
+    /// never outlives the terminating process.
+    func tearDown() {
+        timer?.invalidate()
+        timer = nil
+        item.menu = nil
+        NSStatusBar.system.removeStatusItem(item)
+        if let terminateObserver {
+            NotificationCenter.default.removeObserver(terminateObserver)
+            self.terminateObserver = nil
         }
     }
 
