@@ -57,9 +57,10 @@ jobs:
             -scheme "Mac XCloud" \
             -configuration Release \
             -destination "platform=macOS" \
-            -arch arm64 -arch x86_64 ONLY_ACTIVE_ARCH=NO \
             -derivedDataPath build \
-            MARKETING_VERSION=${{ steps.version.outputs.short }} \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+                        MARKETING_VERSION=${{ steps.version.outputs.short }} \
             CURRENT_PROJECT_VERSION=${{ steps.version.outputs.build }} \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
