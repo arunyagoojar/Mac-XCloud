@@ -195,15 +195,14 @@ struct AdaptiveTriggerPresetManager: View {
             Divider()
             slider("End position", value: parameter(\.endPosition), range: (editor.draft.parameters.startPosition + 0.01)...1)
         }
-        if mode == .feedback || mode == .weapon || mode == .slopeFeedback || mode == .resistanceCurve {
+        if mode == .feedback || mode == .weapon || mode == .slopeFeedback || mode == .resistanceCurve || mode == .twoStageFeedback || mode == .detent {
             Divider()
             slider(mode == .slopeFeedback ? "Start strength" : "Resistance", value: parameter(\.startStrength))
         }
-        if mode == .slopeFeedback || mode == .resistanceCurve || mode == .vibrationRamp {
+        if mode == .slopeFeedback || mode == .resistanceCurve || mode == .twoStageFeedback || mode == .detent {
             Divider()
             slider("End strength" , value: parameter(\.endStrength))
-                .opacity(mode == .slopeFeedback || mode == .resistanceCurve ? 1 : 0)
-                .accessibilityHidden(mode == .vibrationRamp)
+
         }
         if mode == .vibration || mode == .vibrationRamp {
             Divider()
@@ -264,6 +263,10 @@ struct AdaptiveTriggerPresetSelector: View {
                         Text(preset.htmlName).tag(AdaptiveTriggerSelection.builtIn(preset))
                     }
                 }
+            }
+            let current = side == .left ? service.settings.adaptiveTriggers.leftPreset : service.settings.adaptiveTriggers.rightPreset
+            if !AdaptiveTriggerPreset.recommendedCatalog.contains(current) {
+                Text("Previous: " + current.htmlName).tag(AdaptiveTriggerSelection.builtIn(current))
             }
             if !store.customTriggerPresets.isEmpty {
                 Section("Custom Presets") {

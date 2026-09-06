@@ -37,7 +37,170 @@ final class ControllerFeatureService: ObservableObject {
     @Published var settings: ControllerSettings {
         didSet {
             persistSettings()
-            applySettingsToAttachedController(rebuildHaptics: settings.haptics != oldValue.haptics)
+            applySettingsToAttachedController(previous: oldValue)
+        }
+    }
+
+    @Published var globalRumbleGain: Float = UserDefaults.standard.object(forKey: "controller.globalRumbleGain") as? Float ?? 1 {
+        didSet { UserDefaults.standard.set(globalRumbleGain, forKey: "controller.globalRumbleGain") }
+    }
+    @Published var applyCalibrationToStream = UserDefaults.standard.bool(forKey: "controller.streamCalibration") {
+        didSet { UserDefaults.standard.set(applyCalibrationToStream, forKey: "controller.streamCalibration") }
+    }
+    @Published private(set) var rumbleEventCount = 0
+    @Published private(set) var triggerRumbleEventCount = 0
+    @Published private(set) var rumbleChannels = "No stream rumble received"
+    @Published private(set) var gyroAvailable = false
+    var enhancements: ControllerEnhancements { settings.enhancements ?? ControllerEnhancements() }
+    var onStreamInput: (([String: Double]) -> Void)?
+    var streamInputEnabled = false {
+        didSet { if !streamInputEnabled { rapidFireStartedAt = nil; stopStreamRumble() } }
+    }
+    private var lastStreamInputAt: TimeInterval = 0
+    private var sentStreamInput = false
+    @Published private(set) var motionPreview = ControllerVector2.zero
+    @Published private(set) var motionStatus = "Gyro disabled"
+    @Published var aimDeliveryStatus = "Waiting for stream input"
+    private var lastMotionReportAt: TimeInterval = 0
+    @Published private(set) var touchPreview = ControllerVector2.zero
+    @Published private(set) var lastGesture = "No gesture yet"
+    private var rumbleCounts = (all: 0, trigger: 0)
+    private var lastRumblePublishAt: TimeInterval = 0
+    private var rapidFireStartedAt: TimeInterval?
+    private var streamHapticPlayer: CHHapticAdvancedPatternPlayer?
+    private var streamRumbleEndsAt: TimeInterval = 0
+    private var triggerFeedbackEndsAt: TimeInterval = 0
+    private var lastStreamIntensity: Float = -1
+    private var lastStreamSharpness: Float = -1
+    private var lastGameTriggerLevels = ControllerVector2(x: -1, y: -1)
+    private var triggerRestoreTask: Task<Void, Never>?
+    private var gyroBias = ControllerVector2.zero
+    private var smoothedGyro = ControllerVector2.zero
+    private let rawTouch = DualSenseTouchReader()
+    private var precisionGyro = ControllerPrecisionGyro()
+    private var touchServo = ControllerTouchServo()
+    private var flickState = ControllerFlickState()
+    private var touchAimCentre: ControllerVector2?
+    private var lastTouchAimSampleAt: Double?
+    private var lastTouchUsedRaw = false
+    private var steeringWheel = ControllerWheelState()
+    private var steeringResponse = ControllerSteeringResponse()
+    private var lastSteeringTarget: Float = 0
+    private var lastSteeringOutput: Float = 0
+    @Published private(set) var steeringPreview = "Center Gyro while driving straight"
+
+    private func yawRate(_ motion: GCMotion) -> Float {
+        let rate = motion.rotationRate, gravity = motion.gravity
+        return ControllerMotionProjection.yaw(x: rate.x, y: rate.y, z: rate.z, gx: gravity.x, gy: gravity.y, gz: gravity.z)
+    }
+
+    private func updateSteering(_ motion: GCMotion, at timestamp: Double) {
+        let gravity = motion.gravity, acceleration = motion.acceleration, rate = motion.rotationRate
+        let input = ControllerWheelMotion.select(hasGravity: motion.hasGravityAndUserAcceleration,
+            gravity: ControllerMotionVector(x: gravity.x, y: gravity.y, z: gravity.z),
+            acceleration: ControllerMotionVector(x: acceleration.x, y: acceleration.y, z: acceleration.z))
+        let rotation = motion.hasRotationRate
+            ? ControllerMotionVector(x: rate.x, y: rate.y, z: rate.z) : .zero
+        guard let angle = steeringWheel.sample(input, rate: rotation, now: timestamp, hasRate: motion.hasRotationRate) else {
+            steeringResponse.reset(at: timestamp); lastSteeringTarget = 0; lastSteeringOutput = 0
+            return
+        }
+        lastSteeringTarget = ControllerAimMath.steering(angle: angle, centre: 0,
+            range: enhancements.effectiveSteeringRangeRadians, floor: enhancements.effectiveSteeringFloor,
+            deadzone: (enhancements.steeringDeadzoneDegrees ?? 0) * .pi / 180,
+            exponent: enhancements.steeringExponent ?? 1, inverted: enhancements.steeringInverted ?? false) * enhancements.effectiveSteeringMaximum
+        lastSteeringOutput = steeringResponse.sample(target: Double(lastSteeringTarget), now: timestamp,
+            smoothing: Double(enhancements.steeringSmoothing ?? 0.5))
+    }
+
+    func centerGyro() {
+        guard let motion = controller?.motion else { return }
+        gyroBias = ControllerVector2(x: yawRate(motion), y: Float(motion.rotationRate.x))
+        updateSteering(motion, at: ProcessInfo.processInfo.systemUptime)
+        steeringWheel.center()
+        steeringResponse.reset(at: ProcessInfo.processInfo.systemUptime)
+        lastSteeringTarget = 0; lastSteeringOutput = 0
+        flickState.reset(); precisionGyro.reset()
+        smoothedGyro = .zero
+    }
+
+    func resetRumbleDiagnostics() {
+        rumbleCounts = (0, 0)
+        rumbleEventCount = 0; triggerRumbleEventCount = 0
+        rumbleChannels = "No stream rumble received"
+    }
+
+    func stopStreamRumble() {
+        try? streamHapticPlayer?.stop(atTime: CHHapticTimeImmediate)
+        streamHapticPlayer = nil
+        lastStreamIntensity = -1; lastStreamSharpness = -1
+        streamRumbleEndsAt = 0
+        triggerRestoreTask?.cancel(); triggerRestoreTask = nil
+        if triggerFeedbackEndsAt > 0 { applyAdaptiveTriggerSettings() }
+        triggerFeedbackEndsAt = 0
+        lastGameTriggerLevels = ControllerVector2(x: -1, y: -1)
+    }
+
+    func recordRumble(left: Float, right: Float, leftTrigger: Float, rightTrigger: Float) {
+        rumbleCounts.all += 1
+        if leftTrigger > 0 || rightTrigger > 0 { rumbleCounts.trigger += 1 }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard controllerToolsActive, now - lastRumblePublishAt >= 0.5 else { return }
+        lastRumblePublishAt = now
+        rumbleEventCount = rumbleCounts.all; triggerRumbleEventCount = rumbleCounts.trigger
+        rumbleChannels = String(format: "L %.0f · R %.0f · L2 %.0f · R2 %.0f%%", left * 100, right * 100, leftTrigger * 100, rightTrigger * 100)
+    }
+
+    func testStreamRumble() {
+        receiveStreamRumble(left: 0.25, right: 0.25, leftTrigger: 0, rightTrigger: 0, duration: 0.8, isTest: true)
+    }
+
+    func receiveStreamRumble(left: Float, right: Float, leftTrigger: Float, rightTrigger: Float, duration: Double, isTest: Bool = false) {
+        guard streamInputEnabled || isTest else { return }
+        let e = enhancements
+        // Gain always applies; the old Normal mode silently capped amplification at 1×.
+        let intensity = min(e.rumble(max(left, right), global: globalRumbleGain) * max(settings.haptics.intensityMultiplier, 0), 1)
+        let seconds = duration.isFinite ? min(max(duration, 0), 2) : 0.15
+        guard seconds > 0, settings.haptics.mode != .off else { stopStreamRumble(); return }
+        let now = ProcessInfo.processInfo.systemUptime
+        streamRumbleEndsAt = now + seconds
+        if intensity <= 0 {
+            try? streamHapticPlayer?.stop(atTime: CHHapticTimeImmediate)
+            streamHapticPlayer = nil; lastStreamIntensity = -1
+        } else if let engine = engine(for: settings.haptics.preferredLocality) {
+            do {
+                if streamHapticPlayer == nil {
+                    try engine.start()
+                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: 1),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: 0)
+                    ], relativeTime: 0, duration: 1)
+                    let player = try engine.makeAdvancedPlayer(with: CHHapticPattern(events: [event], parameters: []))
+                    player.loopEnabled = true
+                    try player.sendParameters([CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: intensity, relativeTime: 0)], atTime: CHHapticTimeImmediate)
+                    try player.start(atTime: CHHapticTimeImmediate)
+                    streamHapticPlayer = player
+                    lastStreamIntensity = -1
+                }
+                let sharpness = min(max(right, 0), 1)
+                if intensity != lastStreamIntensity || sharpness != lastStreamSharpness {
+                    try streamHapticPlayer?.sendParameters([
+                        CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: intensity, relativeTime: 0),
+                        CHHapticDynamicParameter(parameterID: .hapticSharpnessControl, value: sharpness, relativeTime: 0)
+                    ], atTime: CHHapticTimeImmediate)
+                    lastStreamIntensity = intensity; lastStreamSharpness = sharpness
+                }
+            } catch { stopStreamRumble(); let message = "Stream rumble failed: \(error.localizedDescription)"; if lastError != message { lastError = message } }
+        }
+        if e.gameDrivenTriggers, let pad = controller?.extendedGamepad as? GCDualSenseGamepad {
+            let levels = ControllerVector2(x: e.rumble(leftTrigger, global: globalRumbleGain), y: e.rumble(rightTrigger, global: globalRumbleGain))
+            if levels != lastGameTriggerLevels {
+                if levels.x <= 0 || levels.y <= 0 { applyAdaptiveTriggerSettings() }
+                if !e.leftLock, levels.x > 0 { pad.leftTrigger.setModeVibrationWithStartPosition(0.1, amplitude: levels.x, frequency: 0.5) }
+                if !e.rightLock, levels.y > 0 { pad.rightTrigger.setModeVibrationWithStartPosition(0.1, amplitude: levels.y, frequency: 0.5) }
+                lastGameTriggerLevels = levels
+            }
+            triggerFeedbackEndsAt = now + seconds
         }
     }
 
@@ -75,6 +238,7 @@ final class ControllerFeatureService: ObservableObject {
         var primaryActive = false
         var secondaryActive = false
         var secondFingerSeen = false
+        var swipeEmitted = false
         var lastTapAt: TimeInterval?
         var pendingTapTask: Task<Void, Never>?
         var fallbackExpiryTasks: [Int: Task<Void, Never>] = [:]
@@ -149,10 +313,16 @@ final class ControllerFeatureService: ObservableObject {
         self.controller = controller
         selectedController = controller
         controller.handlerQueue = .main
+        gyroAvailable = controller.motion?.hasRotationRate == true
+        controller.motion?.valueChangedHandler = { [weak self] _ in
+            MainActor.assumeIsolated { self?.lastMotionReportAt = ProcessInfo.processInfo.systemUptime }
+        }
+        controller.motion?.sensorsActive = enhancements.gyroEnabled
         descriptor = makeDescriptor(for: controller)
         capabilities = makeCapabilities(for: controller)
         configureInputHandlers(for: controller)
         configureTouchpadHandlers(for: controller)
+        if enhancements.touchpadAimEnabled { rawTouch.start() }
         rebuildHapticEngines(for: controller)
         applyAdaptiveTriggerSettings()
         applyLEDPolicy()
@@ -161,6 +331,7 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     func detach() {
+        stopStreamRumble()
         pollTimer?.invalidate()
         pollTimer = nil
         touchRuntime.pendingTapTask?.cancel()
@@ -186,6 +357,14 @@ final class ControllerFeatureService: ObservableObject {
         }
 
         stopHapticEngines()
+        controller?.motion?.valueChangedHandler = nil
+        controller?.motion?.sensorsActive = false
+        lastMotionReportAt = 0
+        gyroAvailable = false
+        steeringWheel.reset(); steeringResponse.reset(); lastSteeringTarget = 0; lastSteeringOutput = 0
+        rawTouch.stop(); flickState.reset(); precisionGyro.reset(); touchServo.reset()
+        touchAimCentre = nil
+        gyroBias = .zero; smoothedGyro = .zero; rapidFireStartedAt = nil
         self.controller = nil
         selectedController = nil
         descriptor = nil
@@ -199,12 +378,13 @@ final class ControllerFeatureService: ObservableObject {
         attach(to: GCController.current ?? GCController.controllers().first)
     }
 
-    func startPolling(interval: TimeInterval = 1.0 / 120.0) {
+    func startPolling(interval: TimeInterval = 1.0 / 60.0) {
         guard pollTimer == nil else { return }
         let safeInterval = min(max(interval, 1.0 / 240.0), 0.25)
-        pollTimer = Timer.scheduledTimer(withTimeInterval: safeInterval, repeats: true) { [weak self] _ in
+        pollTimer = Timer(timeInterval: safeInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.publishCurrentSnapshot() }
         }
+        if let pollTimer { RunLoop.main.add(pollTimer, forMode: .common) }
     }
 
     /// High-rate SwiftUI updates are only needed while a live test page is
@@ -253,16 +433,31 @@ final class ControllerFeatureService: ObservableObject {
         defaults.set(data, forKey: persistenceKey)
     }
 
-    private func applySettingsToAttachedController(rebuildHaptics: Bool = true) {
+    private func applySettingsToAttachedController(previous: ControllerSettings) {
         guard !isApplyingSettings else { return }
+        if enhancements.gyroStick != previous.enhancements?.gyroStick || enhancements.gyroEnabled != previous.enhancements?.gyroEnabled {
+            steeringWheel.reset(); steeringResponse.reset(); lastSteeringTarget = 0; lastSteeringOutput = 0
+        }
+        if enhancements.gyroFlickMode != previous.enhancements?.gyroFlickMode || enhancements.gyroEnabled != previous.enhancements?.gyroEnabled {
+            flickState.reset(); precisionGyro.reset(); smoothedGyro = .zero
+        }
+        if enhancements.touchpadAimEnabled != previous.enhancements?.touchpadAimEnabled { touchAimCentre = nil; lastTouchAimSampleAt = nil; touchServo.reset() }
+        if enhancements.touchpadAimEnabled { rawTouch.start() } else { rawTouch.stop() }
+        controller?.motion?.sensorsActive = enhancements.gyroEnabled
         isApplyingSettings = true
+        triggerRestoreTask?.cancel(); triggerRestoreTask = nil
         defer { isApplyingSettings = false }
-        configureTouchpadHandlers(for: controller)
-        if rebuildHaptics {
+        if settings.touchpad != previous.touchpad || enhancements.touchpadAimEnabled != (previous.enhancements?.touchpadAimEnabled ?? false) {
+            configureTouchpadHandlers(for: controller)
+        }
+        if settings.haptics.mode != previous.haptics.mode || settings.haptics.preferredLocality != previous.haptics.preferredLocality {
+            stopStreamRumble()
             rebuildHapticEngines(for: controller)
         }
-        applyAdaptiveTriggerSettings()
-        applyLEDPolicy()
+        if settings.adaptiveTriggers != previous.adaptiveTriggers || settings.enhancements?.leftLock != previous.enhancements?.leftLock || settings.enhancements?.rightLock != previous.enhancements?.rightLock || settings.enhancements?.lockPosition != previous.enhancements?.lockPosition {
+            applyAdaptiveTriggerSettings()
+        }
+        if settings.led != previous.led { applyLEDPolicy() }
     }
 
     // MARK: - Input snapshots
@@ -270,6 +465,7 @@ final class ControllerFeatureService: ObservableObject {
     func publishCurrentSnapshot() {
         guard let controller, let gamepad = controller.extendedGamepad else { return }
         let timestamp = ProcessInfo.processInfo.systemUptime
+        if streamRumbleEndsAt > 0 && timestamp >= streamRumbleEndsAt { stopStreamRumble() }
         let rawLeftStick = ControllerVector2(x: gamepad.leftThumbstick.xAxis.value, y: gamepad.leftThumbstick.yAxis.value)
         let rawRightStick = ControllerVector2(x: gamepad.rightThumbstick.xAxis.value, y: gamepad.rightThumbstick.yAxis.value)
         let rawLeftTrigger = gamepad.leftTrigger.value
@@ -288,10 +484,124 @@ final class ControllerFeatureService: ObservableObject {
             battery: batterySnapshot(from: controller)
         )
 
-        let shouldPublishToUI = highRateUIDetail || (timestamp - lastPublishedAt) >= (1.0 / 15.0)
+        if enhancements.gyroMode == .steering, let motion = controller.motion {
+            updateSteering(motion, at: timestamp)
+        }
+        let shouldPublishToUI = controllerToolsActive && (timestamp - lastPublishedAt) >= (highRateUIDetail ? 1.0 / 30.0 : 0.25)
         if shouldPublishToUI {
+            if rumbleEventCount != rumbleCounts.all { rumbleEventCount = rumbleCounts.all }
+            if triggerRumbleEventCount != rumbleCounts.trigger { triggerRumbleEventCount = rumbleCounts.trigger }
             snapshot = next
             lastPublishedAt = timestamp
+        }
+        if shouldPublishToUI {
+            let status: String
+            if !enhancements.gyroEnabled {
+                status = "Gyro disabled"
+            } else {
+                let modeText: String
+                switch enhancements.gyroMode {
+                case .steering: modeText = " · Steering wheel → Left stick"
+                case .aiming: modeText = " · Aiming → Right stick"
+                case .flickShift: modeText = " · Flick shifting → Right stick"
+                case .off: modeText = ""
+                }
+                status = (timestamp - lastMotionReportAt < 1 ? "Receiving motion reports" : "No recent motion reports — reconnect controller") + modeText
+            }
+            if motionStatus != status { motionStatus = status }
+            if let motion = controller.motion { motionPreview = ControllerVector2(x: yawRate(motion), y: Float(motion.rotationRate.x)) }
+            touchPreview = next.primaryTouch.isActive ? next.primaryTouch.position : .zero
+            if enhancements.gyroMode == .steering {
+                steeringPreview = steeringWheel.available
+                    ? String(format: "Angle %+.1f° · Target %+.0f%% · Smoothed %+.0f%% · %@",
+                             steeringWheel.angle * 180 / .pi, lastSteeringTarget * 100,
+                             lastSteeringOutput * 100, steeringWheel.status)
+                    : steeringWheel.status
+            }
+        }
+        let wantsStreamInput = applyCalibrationToStream || enhancements.gyroEnabled || enhancements.touchpadAimEnabled || enhancements.rapidFireEnabled
+        if streamInputEnabled && (wantsStreamInput || sentStreamInput) {
+            let inputDelta = timestamp - lastStreamInputAt
+            lastStreamInputAt = timestamp
+            sentStreamInput = wantsStreamInput
+            var output: [String: Double] = [:]
+            if applyCalibrationToStream {
+                output = ["LeftTrigger": Double(next.leftTrigger), "RightTrigger": Double(next.rightTrigger),
+                          "LeftThumbXAxis": Double(next.leftStick.x), "LeftThumbYAxis": Double(next.leftStick.y),
+                          "RightThumbXAxis": Double(next.rightStick.x), "RightThumbYAxis": Double(next.rightStick.y)]
+            }
+            let e = enhancements
+            if e.gyroEnabled, let motion = controller.motion,
+               (e.gyroStick == .left) || e.gyroFlickMode == true || !e.gyroAimOnly || rawLeftTrigger > 0.25 {
+                if e.gyroStick == .left {
+                    let steering = steeringWheel.available ? lastSteeringOutput : 0
+                    // Keep the physical stick usable when steering sensors are unavailable.
+                    let baseLeftX = applyCalibrationToStream ? next.leftStick.x : rawLeftStick.x
+                    let baseLeftY = applyCalibrationToStream ? next.leftStick.y : rawLeftStick.y
+                    output["LeftThumbXAxis"] = min(max(Double(baseLeftX) + Double(steering), -1), 1)
+                    output["LeftThumbYAxis"] = Double(baseLeftY)
+                    output.removeValue(forKey: "gyroX"); output.removeValue(forKey: "gyroY")
+                    output.removeValue(forKey: "gyroFineX"); output.removeValue(forKey: "gyroFineY")
+                    output.removeValue(forKey: "gyroAxisBase")
+                } else {
+                let rate = motion.rotationRate
+                let rawRate = ControllerVector2(x: -(yawRate(motion) - gyroBias.x),
+                    y: (Float(rate.x) - gyroBias.y) * (e.gyroInvertY ? -1 : 1))
+                smoothedGyro = precisionGyro.sample(rawRate, dt: inputDelta,
+                    noise: e.effectiveGyroNoiseThreshold, sensitivity: e.gyroSensitivity, floor: e.gyroOutputFloor ?? 0.12)
+                output["gyroX"] = Double(smoothedGyro.x)
+                output["gyroY"] = Double(smoothedGyro.y)
+                output["gyroFineX"] = Double(precisionGyro.fine.x)
+                output["gyroFineY"] = Double(precisionGyro.fine.y)
+                output["gyroAxisBase"] = (e.gyroStick ?? .right).axisBase
+                    lastSteeringOutput = 0
+                    if e.gyroFlickMode == true {
+                        let pitch = ControllerAimMath.tilt(gx: motion.gravity.x, gy: motion.gravity.y, gz: motion.gravity.z).y
+                        output.removeValue(forKey: "gyroFineX"); output.removeValue(forKey: "gyroFineY")
+                        output["gyroX"] = 0
+                        output["gyroY"] = Double(flickState.sample(rate: Float(rate.x) - gyroBias.y, angle: pitch, now: timestamp) * (e.gyroInvertY ? -1 : 1))
+                    }
+                }
+            } else { smoothedGyro = .zero; precisionGyro.reset(); flickState.reset(); lastSteeringOutput = 0 }
+            if e.touchpadAimEnabled {
+                // Steering owns the left stick by definition; touch aiming must
+                // not zero its axes, so it always drives the right stick then.
+                let touchStick: ControllerAimStick = e.gyroStick == .left ? .right : (e.touchpadStick ?? .right)
+                output["touchAxisBase"] = touchStick.axisBase
+                output["touchpadAim"] = 1
+                if next.primaryTouch.isActive {
+                    output["touchActive"] = 1
+                    let usingRaw = rawTouch.point(0) != nil
+                    if usingRaw != lastTouchUsedRaw {
+                        // Coordinate sources differ; rebase without a phantom jump.
+                        touchServo.reset(); touchAimCentre = nil; lastTouchAimSampleAt = nil
+                        lastTouchUsedRaw = usingRaw
+                    }
+                    let reportAt = usingRaw ? rawTouch.reportTime : timestamp
+                    if lastTouchAimSampleAt != reportAt {
+                        if let previous = touchAimCentre {
+                            touchServo.move(dx: next.primaryTouch.position.x - previous.x,
+                                dy: next.primaryTouch.position.y - previous.y,
+                                sensitivity: e.touchpadSensitivity ?? 0.35, at: timestamp)
+                        }
+                        touchAimCentre = next.primaryTouch.position
+                        lastTouchAimSampleAt = reportAt
+                    }
+                    let servo = touchServo.sample(dt: inputDelta, floor: e.gyroOutputFloor ?? 0.12, now: timestamp, contact: true)
+                    output["touchX"] = Double(servo.x)
+                    output["touchY"] = Double(servo.y)
+                } else {
+                    touchServo.stop()
+                    touchAimCentre = nil; lastTouchAimSampleAt = nil
+                }
+            } else { touchServo.reset(); touchAimCentre = nil; lastTouchAimSampleAt = nil }
+            output["nativeControllerCount"] = Double(GCController.controllers().count)
+            if e.rapidFireEnabled, rawRightTrigger > 0.5 {
+                if rapidFireStartedAt == nil { rapidFireStartedAt = timestamp }
+                let phase = (timestamp - (rapidFireStartedAt ?? timestamp)) * Double(min(max(e.rapidFireRate, 2), 15))
+                output["RightTrigger"] = phase.truncatingRemainder(dividingBy: 1) < 0.5 ? 1 : 0
+            } else { rapidFireStartedAt = nil }
+            onStreamInput?(output)
         }
         onNativeInputState?(next)
         processShortcuts(current: next, previous: previousSnapshot)
@@ -333,9 +643,18 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     private func touchPoint(from touchpad: GCControllerDirectionPad, index: Int = 0) -> ControllerTouchPoint {
-        ControllerTouchPoint(
+        if enhancements.touchpadAimEnabled {
+            if let point = rawTouch.point(index) { return point }
+            if rawTouch.hasReports { return .inactive }
+        }
+        // Poll contact state directly: WebKit can replace shared controller callbacks.
+        if let contact = controller?.physicalInputProfile.allTouchpads.first(where: { $0.touchSurface === touchpad }) {
+            return ControllerTouchPoint(isActive: contact.touchState != .up,
+                position: ControllerVector2(x: touchpad.xAxis.value, y: touchpad.yAxis.value))
+        }
+        return ControllerTouchPoint(
             isActive: index == 0 ? touchRuntime.primaryActive : touchRuntime.secondaryActive,
-            position: ControllerVector2(x: touchpad.xAxis.value, y: touchpad.yAxis.value)
+            position: index == 0 ? touchRuntime.currentPosition : ControllerVector2(x: touchpad.xAxis.value, y: touchpad.yAxis.value)
         )
     }
 
@@ -455,17 +774,25 @@ final class ControllerFeatureService: ObservableObject {
         } else {
             applyAdaptiveTrigger(dualSense.rightTrigger, preset: settings.adaptiveTriggers.rightPreset)
         }
+        let e = enhancements
+        let position = min(max(e.lockPosition, 0.05), 0.95)
+        if e.leftLock { dualSense.leftTrigger.setModeFeedbackWithStartPosition(position, resistiveStrength: 1) }
+        if e.rightLock { dualSense.rightTrigger.setModeFeedbackWithStartPosition(position, resistiveStrength: 1) }
     }
 
     private func applyAdaptiveTrigger(
         _ trigger: GCDualSenseAdaptiveTrigger,
         preset: AdaptiveTriggerPreset
     ) {
-        if let strengths = preset.pedalStrengths {
+        if let strengths = preset.designedResistance ?? preset.pedalStrengths {
             applyResistanceZones(trigger, levels: strengths, fallback: strengths.last ?? 0.2)
             return
         }
         switch preset {
+        case .precisionBreak:
+            trigger.setModeWeaponWithStartPosition(0.18, endPosition: 0.38, resistiveStrength: 0.65)
+        case .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents:
+            break // The positional design above owns these effects.
         case .off:
             trigger.setModeOff()
         case .feedback:
@@ -574,7 +901,7 @@ final class ControllerFeatureService: ObservableObject {
                 amplitude: value.amplitude,
                 frequency: value.frequency
             )
-        case .resistanceCurve:
+        case .resistanceCurve, .twoStageFeedback, .detent:
             applyResistanceZones(trigger, levels: value.travelLevels, fallback: value.startStrength)
         case .vibrationRamp:
             if #available(macOS 12.3, *) {
@@ -616,9 +943,7 @@ final class ControllerFeatureService: ObservableObject {
             return
         }
         let requestedIntensity = intensity ?? 0.7
-        let multiplier = settings.haptics.mode == .amplified
-            ? max(settings.haptics.intensityMultiplier, 1)
-            : min(settings.haptics.intensityMultiplier, 1)
+        let multiplier = max(settings.haptics.intensityMultiplier, 0)
         let finalIntensity = min(max(requestedIntensity * multiplier, 0), 1)
         let finalSharpness = min(max(sharpness ?? settings.haptics.sharpness, 0), 1)
         let finalDuration = min(max(duration, 0.01), 2)
@@ -644,6 +969,7 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     func stopHaptics() {
+        stopStreamRumble()
         stopHapticEngines()
         rebuildHapticEngines(for: controller)
     }
@@ -665,6 +991,9 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     private func stopHapticEngines() {
+        try? streamHapticPlayer?.stop(atTime: CHHapticTimeImmediate)
+        streamHapticPlayer = nil
+        lastStreamIntensity = -1
         hapticEngines.values.forEach { $0.stop(completionHandler: nil) }
         hapticEngines.removeAll()
     }
@@ -682,10 +1011,17 @@ final class ControllerFeatureService: ObservableObject {
             dualSense.touchpadPrimary.valueChangedHandler = nil
             dualSense.touchpadSecondary.valueChangedHandler = nil
         }
+        touchRuntime.pendingTapTask?.cancel()
+        touchRuntime.fallbackExpiryTasks.values.forEach { $0.cancel() }
         touchRuntime = TouchRuntimeState()
-        guard settings.touchpad.isEnabled else { return }
+        guard settings.touchpad.isEnabled || enhancements.touchpadAimEnabled else { return }
 
-        let touchpads = controller.physicalInputProfile.allTouchpads
+        // NSSet iteration was assigning fingers arbitrarily on every reconfigure.
+        var touchpads = controller.physicalInputProfile.touchpads.sorted { $0.key < $1.key }.map(\.value)
+        if let dualSense = controller.extendedGamepad as? GCDualSenseGamepad,
+           let primary = touchpads.firstIndex(where: { $0.touchSurface === dualSense.touchpadPrimary }) {
+            touchpads.swapAt(0, primary)
+        }
         if !touchpads.isEmpty {
             for (index, touchpad) in touchpads.prefix(2).enumerated() {
                 configureTouchpad(touchpad, index: index)
@@ -728,6 +1064,7 @@ final class ControllerFeatureService: ObservableObject {
             if !touchRuntime.primaryActive {
                 touchRuntime.pendingTapTask?.cancel()
                 touchRuntime.beganAt = now
+                touchRuntime.swipeEmitted = false
                 touchRuntime.startPosition = position
             }
             touchRuntime.primaryActive = true
@@ -754,7 +1091,7 @@ final class ControllerFeatureService: ObservableObject {
                 self.publishCurrentSnapshot()
             }
         }
-        publishCurrentSnapshot()
+        recognizeSwipe()
         _ = moved
     }
 
@@ -767,6 +1104,7 @@ final class ControllerFeatureService: ObservableObject {
             case .down:
                 touchRuntime.pendingTapTask?.cancel()
                 touchRuntime.beganAt = now
+                touchRuntime.swipeEmitted = false
                 touchRuntime.startPosition = position
                 touchRuntime.currentPosition = position
                 touchRuntime.primaryActive = true
@@ -775,8 +1113,7 @@ final class ControllerFeatureService: ObservableObject {
                 touchRuntime.primaryActive = true
                 touchRuntime.currentPosition = position
             case .up:
-                touchRuntime.currentPosition = position
-                finishPrimaryTouch(at: now, endPosition: position)
+                finishPrimaryTouch(at: now, endPosition: touchRuntime.currentPosition)
                 touchRuntime.primaryActive = false
             @unknown default:
                 break
@@ -792,10 +1129,23 @@ final class ControllerFeatureService: ObservableObject {
                 break
             }
         }
-        publishCurrentSnapshot()
+        recognizeSwipe()
+    }
+
+    private func recognizeSwipe() {
+        guard touchRuntime.primaryActive, !touchRuntime.swipeEmitted else { return }
+        let dx = touchRuntime.currentPosition.x - touchRuntime.startPosition.x
+        let dy = touchRuntime.currentPosition.y - touchRuntime.startPosition.y
+        guard max(abs(dx), abs(dy)) >= settings.touchpad.swipeMinimumDistance else { return }
+        touchRuntime.swipeEmitted = true
+        touchRuntime.pendingTapTask?.cancel()
+        emitGesture(abs(dx) > abs(dy) ? (dx > 0 ? .swipeRight : .swipeLeft) : (dy > 0 ? .swipeUp : .swipeDown))
     }
 
     private func finishPrimaryTouch(at timestamp: TimeInterval, endPosition: ControllerVector2) {
+        if touchRuntime.swipeEmitted {
+            touchRuntime.beganAt = nil; touchRuntime.secondFingerSeen = false; return
+        }
         guard let beganAt = touchRuntime.beganAt else { return }
         let duration = timestamp - beganAt
         let deltaX = endPosition.x - touchRuntime.startPosition.x
@@ -846,7 +1196,10 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     private func emitGesture(_ gesture: TouchpadGesture) {
+        guard settings.touchpad.isEnabled, !enhancements.touchpadAimEnabled else { return }
         guard let mapping = settings.touchpad.mappings.first(where: { $0.isEnabled && $0.gesture == gesture }) else { return }
+
+        if lastGesture != gesture.rawValue { lastGesture = gesture.rawValue }
         dispatch(action: mapping.action)
     }
 

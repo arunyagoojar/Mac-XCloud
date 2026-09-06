@@ -172,7 +172,7 @@ struct ControllerInputSnapshot: Codable, Equatable, Sendable {
 
 // MARK: - Calibration and response curves
 
-enum ResponseCurve: Codable, Equatable, Sendable {
+enum ResponseCurve: Codable, Equatable, Hashable, Sendable {
     case linear
     case exponential(exponent: Float)
     case sCurve(strength: Float)
@@ -204,7 +204,7 @@ enum ResponseCurve: Codable, Equatable, Sendable {
     }
 }
 
-struct ResponseCurvePoint: Codable, Equatable, Sendable {
+struct ResponseCurvePoint: Codable, Equatable, Hashable, Sendable {
     var input: Float
     var output: Float
 
@@ -343,6 +343,12 @@ enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     case twoStagePull
     case softDetent
     case progressiveRecoil
+    case precisionBreak
+    case stagedWall
+    case clutchBite
+    case bowDraw
+    case hydraulicBrake
+    case ratchetDetents
 
     init(from decoder: Decoder) throws {
         self = Self.migrated(try decoder.singleValueContainer().decode(String.self))
@@ -414,21 +420,40 @@ extension AdaptiveTriggerPreset {
         case .twoStagePull: "Two-stage Pull"
         case .softDetent: "Soft Detent"
         case .progressiveRecoil: "Progressive Recoil"
+        case .precisionBreak: "Precision Break"
+        case .stagedWall: "Two-stage Wall"
+        case .clutchBite: "Clutch Bite"
+        case .bowDraw: "Bow Draw & Let-off"
+        case .hydraulicBrake: "Hydraulic Brake"
+        case .ratchetDetents: "Ratchet Detents"
         }
     }
 
     var category: AdaptiveTriggerCategory {
         switch self {
-        case .off, .feedback, .weapon, .bowAndArrow, .vibration: .standard
-        case .acceleration, .deceleration, .engineStrain, .braking: .racing
-        case .pistolFire, .shotgunFire, .smgFire, .sniperFire, .twoStagePull, .softDetent, .progressiveRecoil: .weapons
+        case .off, .feedback, .weapon, .bowAndArrow, .vibration, .ratchetDetents: .standard
+        case .acceleration, .deceleration, .engineStrain, .braking, .clutchBite, .hydraulicBrake: .racing
+        case .pistolFire, .shotgunFire, .smgFire, .sniperFire, .twoStagePull, .softDetent, .progressiveRecoil, .precisionBreak, .stagedWall, .bowDraw: .weapons
         case .galloping, .machineGun: .specialized
         case .fishing, .triggerJam, .doorResistance, .electricShock, .heartbeat, .rain: .immersive
         }
     }
 
+    static let recommendedCatalog: [AdaptiveTriggerPreset] = [.off, .acceleration, .heartbeat, .precisionBreak, .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents]
+
+    var designedResistance: [Float]? {
+        switch self {
+        case .stagedWall: return [0, 0.06, 0.10, 0.14, 0.18, 0.65, 0.72, 0.78, 0.82, 0.82]
+        case .clutchBite: return [0.04, 0.08, 0.18, 0.40, 0.62, 0.46, 0.28, 0.16, 0.12, 0.12]
+        case .bowDraw: return [0.04, 0.10, 0.22, 0.38, 0.56, 0.72, 0.85, 0.92, 0.48, 0.30]
+        case .hydraulicBrake: return [0.02, 0.03, 0.06, 0.12, 0.24, 0.40, 0.60, 0.78, 0.90, 0.95]
+        case .ratchetDetents: return [0, 0.10, 0.55, 0.12, 0.65, 0.12, 0.75, 0.12, 0.80, 0.18]
+        default: return nil
+        }
+    }
+
     static func catalog(in category: AdaptiveTriggerCategory) -> [AdaptiveTriggerPreset] {
-        allCases.filter { $0.category == category }
+        recommendedCatalog.filter { $0.category == category }
     }
 }
 
@@ -440,9 +465,11 @@ enum AdaptiveTriggerEffectMode: String, Codable, CaseIterable, Sendable {
     case slopeFeedback
     case resistanceCurve
     case vibrationRamp
+    case twoStageFeedback
+    case detent
 
     var hasEndPosition: Bool {
-        self == .weapon || self == .slopeFeedback || self == .resistanceCurve || self == .vibrationRamp
+        self == .weapon || self == .slopeFeedback || self == .resistanceCurve || self == .vibrationRamp || self == .twoStageFeedback || self == .detent
     }
 
     var displayName: String {
@@ -454,6 +481,8 @@ enum AdaptiveTriggerEffectMode: String, Codable, CaseIterable, Sendable {
         case .slopeFeedback: return "Linear resistance"
         case .resistanceCurve: return "Smooth resistance curve"
         case .vibrationRamp: return "Travel-based vibration"
+        case .twoStageFeedback: return "Two-stage resistance"
+        case .detent: return "Detent & release"
         }
     }
 
@@ -465,6 +494,8 @@ enum AdaptiveTriggerEffectMode: String, Codable, CaseIterable, Sendable {
         case .vibration: return "A steady vibration after the start position. Frequency is relative, not Hz."
         case .slopeFeedback: return "Linear resistance between start and end; feedback ends beyond the end position."
         case .resistanceCurve: return "Smoothly builds resistance across ten travel zones and holds the ending force through full pull."
+        case .twoStageFeedback: return "First-stage resistance begins at start; second-stage resistance begins at end and holds through full pull."
+        case .detent: return "Resistance rises toward the end position, then releases to the ending force. Uses ten hardware travel zones."
         case .vibrationRamp: return "Vibration grows with trigger travel and holds its peak beyond the ramp end. Frequency is relative, not Hz."
         }
     }
@@ -522,6 +553,10 @@ struct AdaptiveTriggerCustomParameters: Codable, Equatable, Sendable {
         case .resistanceCurve:
             let smooth = progress * progress * (3 - 2 * progress)
             return value.startStrength + (value.endStrength - value.startStrength) * smooth
+        case .twoStageFeedback:
+            return position < value.endPosition ? value.startStrength : value.endStrength
+        case .detent:
+            return position < value.endPosition ? value.startStrength * progress : value.endStrength
         case .vibrationRamp:
             return value.amplitude * progress
         }
@@ -1050,6 +1085,7 @@ struct PerPresetControllerSettings: Codable, Equatable, Sendable {
     var shortcuts: ControllerShortcutSchema
     var macros: [ControllerMacro]
     var led: ControllerLEDSettings
+    var enhancements: ControllerEnhancements? = nil
 
     static let `default` = PerPresetControllerSettings(
         adaptiveTriggers: .default,
@@ -1071,6 +1107,7 @@ struct ControllerSettings: Codable, Equatable, Sendable {
     var shortcuts: ControllerShortcutSchema
     var macros: [ControllerMacro]
     var led: ControllerLEDSettings
+    var enhancements: ControllerEnhancements? = nil
 
     static let `default` = ControllerSettings(
         calibration: .default,
@@ -1091,7 +1128,8 @@ struct ControllerSettings: Codable, Equatable, Sendable {
             categoryPreset: categoryPreset,
             shortcuts: shortcuts,
             macros: macros,
-            led: led
+            led: led,
+            enhancements: enhancements
         )
     }
 
@@ -1103,5 +1141,498 @@ struct ControllerSettings: Codable, Equatable, Sendable {
         shortcuts = preset.shortcuts
         macros = preset.macros
         led = preset.led
+        enhancements = preset.enhancements
+    }
+}
+
+// Optional in older profiles: absent values retain the existing behavior.
+struct ControllerEnhancements: Codable, Equatable, Sendable {
+    var touchpadAimEnabled = false
+    var touchpadSensitivity: Float? = nil
+    var touchpadMouseMode: Bool? = nil
+    var gyroEnabled = false
+    var gyroTiltMode: Bool? = nil // Decode legacy profiles only; no longer drives input.
+    var gyroFlickMode: Bool? = nil
+    var gyroStick: ControllerAimStick? = nil
+    var touchpadStick: ControllerAimStick? = nil
+    var gyroNoiseThreshold: Float? = nil
+    var effectiveGyroNoiseThreshold: Float { gyroNoiseThreshold ?? (gyroDeadzone == 0.025 ? 0.003 : gyroDeadzone) }
+    var gyroAimOnly = true
+    var gyroSensitivity: Float = 0.45
+    var gyroDeadzone: Float = 0.025
+    var gyroOutputFloor: Float? = nil
+    var steeringRangeDegrees: Float? = nil
+    var steeringFloor: Float? = nil
+    var steeringSmoothing: Float? = nil
+    var steeringDeadzoneDegrees: Float? = nil
+    var steeringExponent: Float? = nil
+    var steeringInverted: Bool? = nil
+    var steeringMaximum: Float? = nil
+    var effectiveSteeringMaximum: Float { let value = steeringMaximum ?? 1; return value.isFinite ? min(max(value, 0.2), 1) : 1 }
+    // Steering carries the stick above a game's inner dead zone at every held
+    // angle; Forza-style defaults sit near 0.3, far above the aiming default.
+    var effectiveSteeringFloor: Float { min(max(steeringFloor ?? 0.30, 0), 0.6) }
+    var effectiveSteeringRangeRadians: Float { min(max(((steeringRangeDegrees ?? 40) * .pi) / 180, 0.1), .pi * 2 / 3) }
+    var gyroInvertY = false
+    var rapidFireEnabled = false
+    var rapidFireRate: Float = 8
+    var leftLock = false
+    var rightLock = false
+    var lockPosition: Float = 0.3
+    var rumbleGain: Float = 1
+    var rumbleExponent: Float = 1
+    var gameDrivenTriggers = false
+
+    var gyroMode: ControllerGyroMode {
+        guard gyroEnabled else { return .off }
+        if gyroStick == .left { return .steering }
+        return gyroFlickMode == true ? .flickShift : .aiming
+    }
+    mutating func setGyroMode(_ mode: ControllerGyroMode) {
+        gyroEnabled = mode != .off
+        gyroFlickMode = mode == .flickShift
+        gyroStick = mode == .steering ? .left : .right
+    }
+
+    func rumble(_ value: Float, global: Float) -> Float {
+        guard value.isFinite, global.isFinite else { return 0 }
+        return min(max(pow(min(max(value, 0), 1), min(max(rumbleExponent, 0.25), 4)) * rumbleGain * global, 0), 1)
+    }
+}
+
+/// Project rotation onto world-up so yaw works with the controller flat or upright.
+enum ControllerMotionProjection {
+    static func yaw(x: Double, y: Double, z: Double, gx: Double, gy: Double, gz: Double) -> Float {
+        let norm = (gx * gx + gy * gy + gz * gz).squareRoot()
+        guard [x,y,z,gx,gy,gz].allSatisfy({ $0.isFinite }) else { return 0 }
+        guard norm > 0.1 else { return Float(y) }
+        return Float(-(x * gx + y * gy + z * gz) / norm)
+    }
+}
+
+struct ControllerMotionVector {
+    var x: Double
+    var y: Double
+    var z: Double
+    static let zero = Self(x: 0, y: 0, z: 0)
+    var length: Double { sqrt(x*x + y*y + z*z) }
+    var isFinite: Bool { x.isFinite && y.isFinite && z.isFinite }
+}
+
+struct ControllerWheelMotion {
+    enum Source: String {
+        case gravity = "Gravity"
+        case acceleration = "Accelerometer + gyro"
+    }
+    var vector: ControllerMotionVector
+    var source: Source
+
+    static func select(hasGravity: Bool, gravity: ControllerMotionVector,
+                       acceleration: ControllerMotionVector) -> Self? {
+        if hasGravity, gravity.isFinite, (0.5...1.5).contains(gravity.length) {
+            return Self(vector: gravity, source: .gravity)
+        }
+        guard acceleration.isFinite, (0.5...1.5).contains(acceleration.length) else { return nil }
+        return Self(vector: acceleration, source: .acceleration)
+    }
+}
+
+/// Absolute wheel-angle estimator. Temporal smoothing belongs to the final stick output.
+struct ControllerWheelState {
+    private var filtered: Double?
+    private var centre: Double?
+    private var previousTime: Double?
+    private var lastAnchorAt: Double?
+    private var lastVector: ControllerMotionVector?
+    private(set) var angle: Float = 0
+    private(set) var status = "Waiting for steering sensors"
+    private(set) var available = false
+    private(set) var measuredAngle: Float = 0
+    private(set) var bridgedSamples = 0
+    private(set) var rejectedSamples = 0
+    mutating func reset() { self = Self() }
+    mutating func center() { centre = filtered; angle = 0; measuredAngle = 0 }
+    mutating func sample(_ input: ControllerWheelMotion?, rate: ControllerMotionVector, now: Double,
+                         hasRate: Bool = true) -> Float? {
+        guard now.isFinite else { available = false; return nil }
+        let dt = previousTime.map { now - $0 } ?? 0
+        // A duplicate/out-of-order timestamp must not overwrite the integration clock.
+        if previousTime != nil && dt <= 0 { return available ? angle : nil }
+        previousTime = now
+        func wrap(_ value: Double) -> Double { atan2(sin(value), cos(value)) }
+        let validRate = hasRate && rate.isFinite && rate.length < 35
+        let candidate = input.flatMap { reading -> ControllerWheelMotion? in
+            let v = reading.vector
+            return v.isFinite && v.x*v.x + v.y*v.y > 0.04 ? reading : nil
+        }
+        var confidence = 0.0
+        if let reading = candidate {
+            confidence = reading.source == .gravity ? 1 : max(0, min(1, (0.30 - abs(reading.vector.length - 1)) / 0.22))
+        }
+        // Predict from the previous trusted vector when linear acceleration corrupts the current one.
+        let basis = confidence >= 0.75 ? candidate?.vector : lastVector
+        var predicted = filtered
+        if validRate, let last = filtered, let v = basis, dt > 0, dt <= 0.25 {
+            let planar = v.x*v.x + v.y*v.y
+            if planar > 0.04 {
+                let angularRate = -rate.z + (rate.y*v.y + rate.x*v.x)*v.z / planar
+                if angularRate.isFinite { predicted = last + angularRate * dt }
+            }
+        }
+        if let reading = candidate, confidence > 0 {
+            let measured = atan2(reading.vector.x, -reading.vector.y)
+            if confidence >= 0.75 {
+                // Reliable absolute position owns the target; no rate-dependent
+                // gain or smoothing bypass. Smooth after all stick mapping below.
+                filtered = measured
+            } else if let prediction = predicted, dt > 0, dt <= 0.25 {
+                let correction = (1 - exp(-dt / 0.25)) * confidence * wrap(measured - prediction)
+                let limit = max(0.002, dt * 1.5)
+                filtered = prediction + min(max(correction, -limit), limit)
+            } else { filtered = measured }
+            if confidence >= 0.75 { lastVector = reading.vector; lastAnchorAt = now }
+            else { rejectedSamples += 1 }
+            status = confidence >= 0.75 ? reading.source.rawValue : "Filtering acceleration disturbance"
+        } else {
+            rejectedSamples += 1
+            guard let prediction = predicted, let anchor = lastAnchorAt,
+                  now - anchor <= 0.20, dt > 0, dt <= 0.25, validRate else {
+                available = false
+                status = "Steering sensors unavailable — hold controller face toward you"
+                return nil
+            }
+            filtered = prediction
+            bridgedSamples += 1
+            status = "Bridging brief sensor disturbance"
+        }
+        // Never reset the saved centre on a dropout, reversal, or sensor-source change.
+        guard let current = filtered else { available = false; return nil }
+        if centre == nil { centre = current }
+        angle = Float(wrap(current - (centre ?? current)))
+        if let reading = candidate, confidence > 0 {
+            measuredAngle = Float(wrap(atan2(reading.vector.x, -reading.vector.y) - (centre ?? current)))
+        }
+        available = true
+        return angle
+    }
+}
+
+/// Time-weighted moving average of the final stick target. A held step ramps
+/// evenly across one window, without spring acceleration or amplitude thresholds.
+/// The maximum retained history is 150 ms (normally nine 60 Hz input intervals).
+struct ControllerSteeringResponse {
+    private struct Interval {
+        var start: Double
+        var end: Double
+        var value: Double
+    }
+    private var history: [Interval] = []
+    private(set) var output: Double = 0
+    private var previousTime: Double?
+    static func responseTime(smoothing: Double) -> Double {
+        let amount = smoothing.isFinite ? min(max(smoothing, 0), 1) : 0.5
+        return 0.030 + 0.120 * amount
+    }
+    mutating func reset(at now: Double? = nil) {
+        history.removeAll(keepingCapacity: true)
+        output = 0; previousTime = now
+    }
+    mutating func sample(target: Double, now: Double, smoothing: Double) -> Float {
+        guard target.isFinite, now.isFinite else { reset(); return 0 }
+        guard let previous = previousTime else { previousTime = now; return Float(output) }
+        let dt = now - previous
+        guard dt > 0 else { return Float(output) }
+        previousTime = now
+        if dt > 0.25 { reset(at: now); return 0 }
+        let goal = min(max(target, -1), 1)
+        // Weight by elapsed time, not packet count, so uneven poll intervals do
+        // not change sensitivity. Equal adjacent targets share one interval.
+        if let last = history.last, last.value == goal {
+            history[history.count - 1].end = now
+        } else {
+            history.append(Interval(start: previous, end: now, value: goal))
+        }
+        let oldest = now - 0.150
+        history.removeAll { $0.end <= oldest }
+        if !history.isEmpty { history[0].start = max(history[0].start, oldest) }
+        let window = Self.responseTime(smoothing: smoothing)
+        let beginning = now - window
+        var integral = 0.0
+        for interval in history {
+            let duration = max(0, interval.end - max(interval.start, beginning))
+            integral += interval.value * duration
+        }
+        // Before the first report/reset, the implicit history is neutral.
+        // Positive weights cannot overshoot or add momentum beyond the targets.
+        output = min(max(integral / window, -1), 1)
+        return Float(output)
+    }
+}
+
+/// Neutral-preserving conversion shared by touch and gyro. No resistance floor at rest.
+enum ControllerAimMath {
+    static func touchGain(_ velocity: Float, sensitivity: Float, floor: Float) -> Float {
+        guard velocity.isFinite, sensitivity.isFinite else { return 0 }
+        // Linear velocity → stick mapping; the only ceiling is full stick. The old
+        // nested saturation curve compressed every sensitivity above ~0.4 stick.
+        let scaled = velocity * min(max(sensitivity, 0.05), 3)
+        let magnitude = min(abs(scaled), 1)
+        guard magnitude > 0 else { return 0 }
+        let offset = min(max(floor, 0), 0.4)
+        return (scaled < 0 ? -1 : 1) * (offset + (1 - offset) * magnitude)
+    }
+    static func steering(angle: Float, centre: Float, range: Float, floor: Float, deadzone: Float = 0, exponent: Float = 1, inverted: Bool = false) -> Float {
+        guard angle.isFinite, centre.isFinite else { return 0 }
+        let delta = atan2(sin(angle - centre), cos(angle - centre))
+        guard range.isFinite, floor.isFinite, deadzone.isFinite, exponent.isFinite else { return 0 }
+        let span = min(max(range, 0.1), .pi * 2 / 3)
+        let neutral = min(max(deadzone, 0), span * 0.25)
+        let travel = max(abs(delta) - neutral, 0)
+        let amount = pow(min(travel / (span - neutral), 1), min(max(exponent, 0.5), 2))
+        let offset = min(max(floor, 0), 0.6)
+        // Fade optional game dead-zone compensation across the first half degree.
+        let entry = min(travel / (.pi / 360), 1)
+        return (inverted ? -1 : 1) * (delta < 0 ? -1 : 1) * (offset * entry + (1 - offset) * amount)
+    }
+
+    static func trackpad(current: ControllerVector2, previous: ControllerVector2, dt: Double, sensitivity: Float) -> ControllerVector2 {
+        guard dt.isFinite, dt > 0, dt < 0.1 else { return .zero }
+        let gain = min(max(sensitivity, 0.05), 1) / Float(dt)
+        func velocity(_ delta: Float) -> Float {
+            guard delta.isFinite else { return 0 }
+            let scaled = delta * gain
+            return scaled / (1 + abs(scaled))
+        }
+        return ControllerVector2(x: velocity(current.x - previous.x), y: velocity(current.y - previous.y))
+    }
+
+    static func axis(_ value: Float, deadzone: Float) -> Float {
+        guard value.isFinite else { return 0 }
+        let d = min(max(deadzone, 0), 0.95)
+        guard abs(value) > d else { return 0 }
+        return (value < 0 ? -1 : 1) * min((abs(value) - d) / (1 - d), 1)
+    }
+    static func smooth(_ target: Float, previous: Float, dt: Double) -> Float {
+        guard target.isFinite, target != 0 else { return 0 }
+        let alpha = Float(1 - exp(-min(max(dt, 0.001), 0.1) / 0.008))
+        return previous + (target - previous) * alpha
+    }
+    static func tilt(gx: Double, gy: Double, gz: Double) -> ControllerVector2 {
+        guard [gx,gy,gz].allSatisfy({ $0.isFinite }) else { return .zero }
+        return ControllerVector2(x: Float(atan2(gx, sqrt(gy*gy+gz*gz))), y: Float(atan2(gy, -gz)))
+    }
+    static func tiltDelta(_ value: Float, centre: Float) -> Float {
+        let delta = atan2(sin(value - centre), cos(value - centre))
+        // Three degrees of neutral travel, full stick at twenty degrees.
+        return axis(delta / (.pi / 9), deadzone: 0.15)
+    }
+}
+
+/// Speed-adaptive low-pass filtering following Casiez et al.'s 1€ algorithm.
+struct ControllerAdaptiveFilter {
+    private var value: Float = 0
+    private var raw: Float = 0
+    private var derivative: Float = 0
+    mutating func reset() { value = 0; raw = 0; derivative = 0 }
+    mutating func sample(_ next: Float, dt: Double, minimum: Float = 8, beta: Float = 4, neutralImmediately: Bool = true) -> Float {
+        guard next.isFinite else { reset(); return 0 }
+        if next == 0 && neutralImmediately { reset(); return 0 }
+        let step = Float(min(max(dt, 0.001), 0.05))
+        func alpha(_ cutoff: Float) -> Float { 1 / (1 + 1 / (2 * .pi * cutoff * step)) }
+        derivative += alpha(1) * ((next - raw) / step - derivative)
+        raw = next
+        value += alpha(minimum + beta * abs(derivative)) * (next - value)
+        return value
+    }
+}
+
+/// One vertical pulse, followed by return-to-neutral suppression.
+struct ControllerFlickState {
+    private var neutral: Float?
+    private var blocked = false
+    private var quietSince: Double?
+    private var pulseUntil: Double = 0
+    private var direction: Float = 0
+    mutating func reset() { self = Self() }
+    mutating func sample(rate: Float, angle: Float, now: Double) -> Float {
+        guard rate.isFinite, angle.isFinite, now.isFinite else { reset(); return 0 }
+        guard let neutral else {
+            if abs(rate) < 0.2 { self.neutral = angle }
+            return 0
+        }
+        if now < pulseUntil { return direction }
+        if blocked {
+            // Rearm on rate decay alone: repeated shifts must not wait for a
+            // full return to the neutral tilt and a long settle.
+            if abs(rate) < 0.35 {
+                if quietSince == nil { quietSince = now }
+                if now - (quietSince ?? now) >= 0.05 { blocked = false; quietSince = nil }
+            } else { quietSince = nil }
+            return 0
+        }
+        if abs(rate) >= 1.5 {
+            direction = rate > 0 ? 1 : -1
+            // A stroke moving back toward neutral is the return after a flick,
+            // never a shift; a deliberate opposite flick crosses neutral while
+            // still fast and fires there.
+            if angle * direction >= -0.03 {
+                pulseUntil = now + 0.08
+                blocked = true
+                return direction
+            }
+            return 0
+        }
+        return 0
+    }
+}
+
+/// DualSense standard USB/Bluetooth touch layout documented by SDL's PS5 driver.
+/// Decode only full reports. Simplified Bluetooth reports have no touch data.
+enum DualSenseTouchPacket {
+    static func decode(_ bytes: [UInt8]) -> [ControllerTouchPoint]? {
+        let base: Int
+        if bytes.count == 64 && bytes.first == 0x01 { base = 1 }
+        else if bytes.count == 78 && bytes.first == 0x31 { base = 2 }
+        else { return nil }
+        var result: [ControllerTouchPoint] = []
+        for slot in 0..<2 {
+            let offset = base + 32 + slot * 4
+            let active = bytes[offset] & 0x80 == 0
+            let x = Int(bytes[offset+1]) | ((Int(bytes[offset+2]) & 0x0f) << 8)
+            let y = (Int(bytes[offset+2]) >> 4) | (Int(bytes[offset+3]) << 4)
+            guard !active || (x < 1920 && y < 1080) else { return nil }
+            result.append(ControllerTouchPoint(isActive: active,
+                position: active ? ControllerVector2(x: Float(x) / 1919 * 2 - 1, y: 1 - Float(y) / 1079 * 2) : .zero))
+        }
+        return result
+    }
+}
+
+
+enum ControllerAimStick: String, Codable, CaseIterable, Sendable {
+    case left, right
+    var title: String { self == .left ? "Left stick" : "Right stick" }
+    var axisBase: Double { self == .left ? 0 : 2 }
+}
+
+/// One picker drives every motion behavior; the stored fields stay per-feature
+/// so existing profiles and the injected script keep working unchanged.
+enum ControllerGyroMode: String, Codable, CaseIterable, Sendable {
+    case off, aiming, steering, flickShift
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .aiming: return "Aiming (right stick)"
+        case .steering: return "Steering wheel (left stick)"
+        case .flickShift: return "Flick shifting"
+        }
+    }
+}
+
+/// Filter raw rates first; a radial hysteresis gate separates rest from slow aim.
+/// Filters stay warm through brief pauses so the return stroke responds exactly
+/// as fast as the stroke that entered the turn; only a sustained rest resets.
+struct ControllerPrecisionGyro {
+    private var xFilter = ControllerAdaptiveFilter()
+    private var yFilter = ControllerAdaptiveFilter()
+    private var active = false
+    private var restTime: Double = 0
+    private(set) var fine = ControllerVector2.zero
+    mutating func reset() { self = Self() }
+    mutating func sample(_ rate: ControllerVector2, dt: Double, noise: Float, sensitivity: Float, floor: Float) -> ControllerVector2 {
+        guard rate.x.isFinite, rate.y.isFinite, dt.isFinite else { reset(); return .zero }
+        let threshold = min(max(noise, 0), 0.1)
+        let rawLength = sqrt(rate.x*rate.x + rate.y*rate.y)
+        if rawLength <= threshold * 0.5 {
+            // Output releases immediately, but the filters keep decaying so a
+            // hard reset can no longer lag the next stroke's onset.
+            _ = xFilter.sample(rate.x, dt: dt, minimum: 3.5, beta: 7, neutralImmediately: false)
+            _ = yFilter.sample(rate.y, dt: dt, minimum: 3.5, beta: 7, neutralImmediately: false)
+            restTime += dt
+            if restTime >= 0.3 { reset() }
+            active = false; fine = .zero
+            return .zero
+        }
+        restTime = 0
+        let x = xFilter.sample(rate.x, dt: dt, minimum: 3.5, beta: 7, neutralImmediately: false)
+        let y = yFilter.sample(rate.y, dt: dt, minimum: 3.5, beta: 7, neutralImmediately: false)
+        let length = sqrt(x*x + y*y)
+        if length <= (active ? threshold * 0.65 : threshold) || length < 0.00001 {
+            restTime += dt
+            if restTime >= 0.3 { reset() }
+            active = false; fine = .zero; return .zero
+        }
+        restTime = 0
+        active = true
+        // Do not amplify orthogonal-axis noise when overcoming the game's stick dead zone.
+        func clean(_ value: Float) -> Float {
+            let magnitude = max(abs(value) - threshold * 0.65, 0)
+            return value < 0 ? -magnitude : magnitude
+        }
+        let cx = clean(x), cy = clean(y), cleanLength = sqrt(cx*cx + cy*cy)
+        guard cleanLength > 0.00001 else { fine = .zero; return .zero }
+        let speed = min(max(cleanLength * sensitivity, 0), 1)
+        fine = ControllerVector2(x: cx / cleanLength * speed, y: cy / cleanLength * speed)
+        let compensation = min(max(floor, 0), 0.4)
+        // Fade the dead-zone carrier in over roughly two frames: the old fixed
+        // step from zero to the full carrier read as a twitch on every stroke.
+        let entry = min(max((cleanLength - threshold) / (threshold * 0.5 + 0.0001), 0), 1)
+        let magnitude = compensation * entry + (1 - compensation * entry) * speed
+        return ControllerVector2(x: cx / cleanLength * magnitude, y: cy / cleanLength * magnitude)
+    }
+}
+
+/// Mouse-style touch aiming. Finger travel accumulates into a target and a
+/// proportional servo drives the stick toward it, so output is a smooth
+/// function of the accumulated undelivered motion — sensor noise averages out
+/// instead of being differentiated into velocity jitter. Short edge flicks
+/// deliver exact travel, and a stationary or lifted finger stops the camera.
+struct ControllerTouchServo {
+    /// Higher responsiveness = shorter glide after the finger stops.
+    static let responsiveness: Float = 20
+    private(set) var target = ControllerVector2.zero
+    private(set) var delivered = ControllerVector2.zero
+    private(set) var output = ControllerVector2.zero
+    private var lastMotionAt: Double = -.infinity
+    mutating func reset() { self = Self() }
+    mutating func move(dx: Float, dy: Float, sensitivity: Float, at now: Double) {
+        guard [dx, dy].allSatisfy({ $0.isFinite }) else { return }
+        let gain = min(max(sensitivity, 0.05), 3)
+        target.x = min(max(target.x + dx * gain, -1.2), 1.2)
+        target.y = min(max(target.y + dy * gain, -1.2), 1.2)
+        // Sub-pixel shivers must not keep a resting finger "moving", but every
+        // real drag — even a very slow one — counts as motion.
+        if abs(dx) > 0.0005 || abs(dy) > 0.0005 { lastMotionAt = now }
+    }
+    /// Ends the current motion: the camera stops exactly where delivery stands.
+    mutating func stop() { target = delivered }
+    mutating func sample(dt: Double, floor: Float, now: Double, contact: Bool) -> ControllerVector2 {
+        var rem = ControllerVector2(x: min(max(target.x - delivered.x, -1.2), 1.2),
+                                    y: min(max(target.y - delivered.y, -1.2), 1.2))
+        // A resting finger flushes once the glide has effectively finished, so
+        // the stop is smooth and no travel is silently discarded.
+        let settled = abs(rem.x) < 0.005 && abs(rem.y) < 0.005
+        if !contact || (now - lastMotionAt > 0.09 && settled) { stop() }
+        rem = ControllerVector2(x: min(max(target.x - delivered.x, -1.2), 1.2),
+                                y: min(max(target.y - delivered.y, -1.2), 1.2))
+        let step = Float(min(max(dt, 0.001), 0.05))
+        let offset = min(max(floor, 0), 0.4)
+        var result = ControllerVector2.zero
+        for axis in 0..<2 {
+            let value = axis == 0 ? rem.x : rem.y
+            let velocity = value * Self.responsiveness
+            let magnitude = min(abs(velocity), 1)
+            let out: Float = abs(value) < 0.0005 ? 0 : (velocity < 0 ? -1 : 1) * (offset + (1 - offset) * magnitude)
+            let applied = min(max(velocity, -1), 1) * step
+            if axis == 0 {
+                result.x = out
+                delivered.x = min(max(delivered.x + applied, -1.3), 1.3)
+            } else {
+                result.y = out
+                delivered.y = min(max(delivered.y + applied, -1.3), 1.3)
+            }
+        }
+        output = result
+        return result
     }
 }

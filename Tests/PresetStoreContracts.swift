@@ -69,6 +69,57 @@ struct PresetStoreContracts {
         store.deleteTriggerPreset(id: trigger)
         await store.deletePreset(id: racing)
         check(store.presets.count == 1 && store.customTriggerPresets.isEmpty, "Custom records can be deleted without affecting Default")
+        let portable = try store.exportPresetData(id: InputPreset.defaultID)
+        let imported = try store.importPresetData(portable)
+        check(imported != InputPreset.defaultID && store.presets.count == 2, "Import creates a new profile without overwriting Default")
+        do { _ = try store.importPresetData(Data("{}".utf8)); preconditionFailure("Corrupt import accepted") }
+        catch { check(store.presets.count == 2, "Invalid import does not mutate storage") }
+        await store.noteGame(id: "game-a", playing: true)
+        await store.applyPreset(id: imported)
+        await store.noteGame(id: "", playing: false)
+        check(store.activePresetID == InputPreset.defaultID, "Leaving a game restores the previous global profile")
+        await store.noteGame(id: "game-a", playing: true)
+        check(store.activePresetID == imported, "Returning to a game restores its selected profile")
+        await store.noteGame(id: "", playing: true)
+        check(store.currentGameID == "game-a", "Missing title metadata cannot erase the game association")
+        await store.noteGame(id: "", playing: false)
+        await store.deletePreset(id: imported)
+        let baselineRange = browser.controllerFeatures.settings.enhancements?.steeringRangeDegrees
+        await store.noteGame(id: "independent-a", title: "Forza Horizon 6", playing: true)
+        let gameA = store.activePresetID
+        check(gameA != InputPreset.defaultID && store.activePreset.name.contains("Forza"), "New game gets its own named profile")
+        browser.controllerFeatures.updateSettings { settings in
+            var e = settings.enhancements ?? ControllerEnhancements(); e.steeringRangeDegrees = 72; settings.enhancements = e
+        }
+        await store.noteGame(id: "independent-b", title: "Another Game", playing: true)
+        let gameB = store.activePresetID
+        check(gameA != gameB && browser.controllerFeatures.settings.enhancements?.steeringRangeDegrees == baselineRange,
+              "Second game inherits global settings, not the previous game's steering")
+        browser.controllerFeatures.updateSettings { settings in
+            var e = settings.enhancements ?? ControllerEnhancements(); e.steeringRangeDegrees = 24; settings.enhancements = e
+        }
+        await store.noteGame(id: "independent-a", title: "Forza Horizon 6", playing: true)
+        check(store.activePresetID == gameA && browser.controllerFeatures.settings.enhancements?.steeringRangeDegrees == 72,
+              "Returning restores game-specific tuning without manual save")
+        await store.noteGame(id: "", playing: false)
+        check(store.activePresetID == InputPreset.defaultID && browser.controllerFeatures.settings.enhancements?.steeringRangeDegrees == baselineRange,
+              "Global settings remain independent after game tuning")
+        await store.noteGame(id: "", title: "A Title Only", playing: true)
+        let titleProfile = store.activePresetID
+        check(store.currentGameID == "title:a title only", "Game title provides a fallback identity")
+        await store.noteGame(id: "stable-id", title: "A Title Only", playing: true)
+        check(store.currentGameID == "stable-id" && store.activePresetID == titleProfile, "Late stable ID keeps the title's existing profile")
+        let restartedBrowser = BrowserModel()
+        let restartedStore = InputPresetStore(browser: restartedBrowser, fileManager: files, defaults: defaults)
+        check(restartedStore.activePresetID == InputPreset.defaultID, "Relaunch returns to global settings until the game is detected")
+        await store.noteGame(id: "", playing: false)
+        check(InputPresetStore.gameKey(id: "", title: "Xbox Cloud Gaming") == "", "Generic website titles cannot become game identities")
+        store.autoGameProfiles = false
+        let countBeforeDisabled = store.presets.count
+        await store.noteGame(id: "disabled-game", title: "Disabled Game", playing: true)
+        check(store.presets.count == countBeforeDisabled && store.activePresetID == InputPreset.defaultID, "Disabling game recall prevents automatic profile creation")
+        await store.noteGame(id: "", playing: false)
+        store.autoGameProfiles = true
         let saved = root.appendingPathComponent("Xbox Cloud data/presets/default.json")
         let data = try Data(contentsOf: saved)
         var envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]

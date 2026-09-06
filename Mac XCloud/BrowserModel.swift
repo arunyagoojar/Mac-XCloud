@@ -71,6 +71,18 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var currentGameTitle = ""
     @Published private(set) var currentRegion = ""
     @Published private(set) var telemetry = StreamTelemetry.empty
+    @Published var nativeHUDVisible = false
+    @Published private(set) var nativeHUDItems = ["fps", "ping", "btr"]
+    @Published private(set) var nativeHUDPosition = "top-right"
+    @Published private(set) var nativeHUDOpacity = 0.9
+    @Published private(set) var nativeHUDTextSize = 9.0
+    @Published private(set) var nativeHUDBackground = 0.65
+    @Published private(set) var nativeHUDColors = false
+    @Published private(set) var nativeHUDQuickGlance = false
+
+    @Published private(set) var nativeHUDGlancing = false
+    @Published private(set) var nativeHUDValues: [String: String] = [:]
+    @Published private(set) var telemetryUpdatedAt = Date.distantPast
     @Published private(set) var bridgeReady = false
 
     var remotePlayActive: Bool { report.remotePlayActive }
@@ -81,7 +93,14 @@ final class BrowserModel: ObservableObject {
     var statusController: MenuBarStatusController?
     let controllerFeatures = ControllerFeatureService()
     lazy var controllerInput = ControllerInputService(controllerProvider: controllerFeatures.selectedControllerProvider)
-    lazy var inputPresets = InputPresetStore(browser: self)
+    lazy var inputPresets: InputPresetStore = {
+        let store = InputPresetStore(browser: self)
+        store.onSettingsApplied = { [weak self] in
+            guard let self, self.isSettingsWindowOpen else { return }
+            self.settingsModel.load()
+        }
+        return store
+    }()
     private var cancellables = Set<AnyCancellable>()
     private var loadingTimeout: DispatchWorkItem?
     private(set) var controllerInputOwner: ControllerInputOwner = .none
@@ -90,6 +109,106 @@ final class BrowserModel: ObservableObject {
     private var browserGamepadSyncTask: Task<Void, Never>?
     lazy var settingsModel = SettingsModel(browser: self)
 
+    @Published var controllerWebDiagnostics = "Run Check Web Support with the controller connected."
+    private var rumbleSamples: [[String: Any]] = []
+    func inspectControllerWebSupport() async {
+        do {
+            controllerWebDiagnostics = try await callAsyncJS("return JSON.stringify(BxCBridge.controllerDiagnostics(), null, 2);") as? String ?? "No browser response"
+        } catch { controllerWebDiagnostics = error.localizedDescription }
+    }
+    private var aimTestUntil = Date.distantPast
+    private var syntheticInputTestTask: Task<Void, Never>?
+    private var syntheticInputTestID: UUID?
+
+    func testAimRoute() {
+        startSyntheticInputTest(values: ["nativeControllerCount": 1, "gyroX": 0.35], samples: 1,
+            message: "Return to the game within 3 seconds; the camera will move right briefly.")
+    }
+    /// Bypasses sensors, but still needs a focused stream and one browser-visible
+    /// controller. Diagnostics report bridge submission, not game acknowledgement.
+    func testSteerRoute() {
+        startSyntheticInputTest(values: ["nativeControllerCount": 1, "LeftThumbXAxis": -0.6], samples: 10,
+            message: "Return to the game within 3 seconds; the car should hold left for about 1.5 seconds.")
+    }
+
+    private func startSyntheticInputTest(values: [String: Double], samples: Int, message: String) {
+        stopSyntheticInputTest(message: "Previous input test cancelled.")
+        let id = UUID()
+        syntheticInputTestID = id
+        controllerWebDiagnostics = message
+        syntheticInputTestTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, self.syntheticInputTestID == id else { return }
+                for _ in 0..<samples {
+                    try Task.checkCancellation()
+                    guard self.controllerInputOwner == .stream,
+                          self.report.nativeControllerIDs.count == 1,
+                          self.report.webControllerIDs.count == 1 else {
+                        self.stopSyntheticInputTest(message: "Input test cancelled: focus the game with exactly one native and browser-visible controller.")
+                        return
+                    }
+                    self.aimTestUntil = .distantFuture
+                    self.pendingStreamInput = nil
+                    let result = try await self.callAsyncJS("""
+                        const b = window.BxCBridge;
+                        if (!b || !b.updateNativeInput(values)) throw new Error("Browser input bridge unavailable");
+                        return JSON.stringify(b.controllerDiagnostics(), null, 2);
+                        """, arguments: ["values": values]) as? String ?? "No diagnostics returned"
+                    guard self.syntheticInputTestID == id else { return }
+                    self.controllerWebDiagnostics = "Input test submitted (not game acknowledgement):\n" + result
+                    try await Task.sleep(nanoseconds: 150_000_000)
+                }
+                guard self.syntheticInputTestID == id else { return }
+                self.stopSyntheticInputTest(message: "Input test finished; native override released.\n" + self.controllerWebDiagnostics)
+            } catch {
+                guard let self, self.syntheticInputTestID == id else { return }
+                self.stopSyntheticInputTest(message: "Input test stopped: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func stopSyntheticInputTest(message: String) {
+        guard syntheticInputTestTask != nil else { return }
+        syntheticInputTestTask?.cancel()
+        syntheticInputTestTask = nil
+        syntheticInputTestID = nil
+        aimTestUntil = .distantPast
+        pendingStreamInput = nil
+        controllerWebDiagnostics = message
+        // Restore physical input explicitly, rather than waiting for the 200 ms TTL.
+        evaluateJS("window.BxCBridge?.updateNativeInput({});") { [weak self] _, error in
+            guard let error else { return }
+            let detail = error.localizedDescription
+            Task { @MainActor [weak self] in
+                guard let self, self.syntheticInputTestID == nil else { return }
+                self.controllerWebDiagnostics += "\nInput test release failed: " + detail
+            }
+        }
+    }
+    func testWebRumble(trigger: Bool) async {
+        controllerFeatures.stopStreamRumble()
+        do { controllerWebDiagnostics = try await callAsyncJS("return BxCBridge.testWebRumble(trigger);", arguments: ["trigger":trigger]) as? String ?? "No response" }
+        catch { controllerWebDiagnostics = error.localizedDescription }
+    }
+    func exportControllerDiagnostics() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Mac-XCloud-controller-diagnostics.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let report: [String: Any] = ["game": currentGameTitle, "web": controllerWebDiagnostics,
+                "nativeMotion": controllerFeatures.gyroAvailable, "rumbleSamples": rumbleSamples,
+                "steeringSensor": controllerFeatures.steeringPreview, "motionStatus": controllerFeatures.motionStatus,
+                "inputBridgeCalls": inputBridgeCalls, "inputBridgeAverageMs": inputBridgeTotalMs / Double(max(inputBridgeCalls, 1)),
+                "inputBridgeMaxMs": inputBridgeMaxMs]
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
+        } catch { controllerWebDiagnostics = error.localizedDescription }
+    }
+    private var streamInputInFlight = false
+    private var pendingStreamInput: [String: Double]?
+    private var inputBridgeCalls = 0
+    private var inputBridgeTotalMs = 0.0
+    private var inputBridgeMaxMs = 0.0
     weak var webView: WKWebView?
 
     init() {
@@ -127,6 +246,40 @@ final class BrowserModel: ObservableObject {
         }
         controllerFeatures.onMacroReset = { [weak self] in
             self?.resetWebMacroOverlay()
+        }
+        controllerFeatures.onNativeInputState = { [weak self] state in
+            guard let self else { return }
+            let held = self.controllerInputOwner == .stream && state.buttons.home.isPressed
+            if self.nativeHUDGlancing != held { self.nativeHUDGlancing = held }
+        }
+        controllerFeatures.onStreamInput = { [weak self] values in
+            guard let self, self.controllerInputOwner == .stream, Date() >= self.aimTestUntil else { return }
+            self.pendingStreamInput = values
+            guard !self.streamInputInFlight else { return }
+            self.streamInputInFlight = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.streamInputInFlight = false }
+                while let values = self.pendingStreamInput {
+                    self.pendingStreamInput = nil
+                    guard self.controllerInputOwner == .stream, Date() >= self.aimTestUntil else { break }
+                    let deliveredAt = ProcessInfo.processInfo.systemUptime
+                    defer {
+                        let elapsed = (ProcessInfo.processInfo.systemUptime - deliveredAt) * 1000
+                        self.inputBridgeCalls += 1; self.inputBridgeTotalMs += elapsed
+                        self.inputBridgeMaxMs = max(self.inputBridgeMaxMs, elapsed)
+                    }
+                    do {
+                        let reply = try await self.callAsyncJS("const b = window.BxCBridge; return {ready: Boolean(b?.updateNativeInput(values))};", arguments: ["values": values]) as? [String: Any] ?? [:]
+                        let ready = reply["ready"] as? Bool ?? false
+                        let status = ready ? "Browser input updated" : "Browser aiming connection unavailable — reload stream"
+                        if self.controllerFeatures.aimDeliveryStatus != status { self.controllerFeatures.aimDeliveryStatus = status }
+                    } catch {
+                        let status = "Browser input failed: \(error.localizedDescription)"
+                        if self.controllerFeatures.aimDeliveryStatus != status { self.controllerFeatures.aimDeliveryStatus = status }
+                    }
+                }
+            }
         }
         controllerFeatures.startPolling(interval: 1.0 / 60.0)
         _ = inputPresets
@@ -272,7 +425,7 @@ final class BrowserModel: ObservableObject {
         // Keep the throttle in sync when navigation happens without a window
         // focus change (sidebar clicks while Settings is already key).
         if case .controllerSection(let section) = settingsModel.route {
-            controllerFeatures.setHighRateUIDetail(section == .test || section == .calibration)
+            controllerFeatures.setHighRateUIDetail(controllerInputOwner == .settings && (section == .test || section == .calibration))
         } else {
             controllerFeatures.setHighRateUIDetail(false)
         }
@@ -393,7 +546,7 @@ final class BrowserModel: ObservableObject {
             controllerRouteIsVisible = true
             // Live test/calibration pages need per-frame snapshots; everywhere
             // else the published snapshot is throttled so Settings never lags.
-            controllerFeatures.setHighRateUIDetail(section == .test || section == .calibration)
+            controllerFeatures.setHighRateUIDetail(controllerInputOwner == .settings && (section == .test || section == .calibration))
         } else {
             controllerRouteIsVisible = false
             controllerFeatures.setHighRateUIDetail(false)
@@ -406,9 +559,17 @@ final class BrowserModel: ObservableObject {
             reconcileControllerOwnerState()
             return
         }
+        let previous = controllerInputOwner
         controllerInputOwner = next
+        if previous == .stream && next != .stream {
+            stopSyntheticInputTest(message: "Input test cancelled: the game lost focus.")
+        }
         reconcileControllerOwnerState()
-        if next != .stream { controllerFeatures.resetMacros() }
+        controllerFeatures.streamInputEnabled = next == .stream
+        if next != .stream {
+            controllerFeatures.resetMacros()
+            evaluateJS("window.BxCBridge?.updateNativeInput({});")
+        }
         if next != .settings { controllerFeatures.cancelCalibration() }
     }
 
@@ -486,14 +647,14 @@ final class BrowserModel: ObservableObject {
         case .toggleFullscreen: toggleFullscreen()
         case .screenshot: evaluateJS("try { ShortcutHandler.runAction('stream.screenshot.capture'); 'ok' } catch(e) { 'err' }")
         case .toggleStats:
+            nativeHUDVisible.toggle()
             // Native toggle: flip the Better xCloud preference and sync the bar
             // immediately, instead of relying on the page's shortcut handler.
             evaluateJS("""
                 try {
                   var next = BxCBridge.getStream('stats.showWhenPlaying') !== true;
                   BxCBridge.setStream('stats.showWhenPlaying', next, 'ui');
-                  var bar = document.querySelector('.bx-stats-bar, #bx-stats-bar');
-                  if (bar) bar.classList.toggle('bx-gone', !next);
+
                   'ok'
                 } catch (e) { 'err' }
                 """)
@@ -505,13 +666,18 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    private var statsPollInFlight = false
     func pollStreamInfo() {
+        guard !statsPollInFlight else { return }
+        statsPollInFlight = true
         Task {
+            defer { statsPollInFlight = false }
             do {
                 let result = try await callAsyncJS("""
                     try {
                       var info = await BxCBridge.streamInfo();
-                      var stats = info.playing ? await BxCBridge.streamStats() : null;
+                      var stats = null;
+                      try { if (info.playing) stats = await BxCBridge.streamStats(); } catch (_) {}
                       var remote = window.STATES && window.STATES.remotePlay || {};
                       return JSON.stringify({info:info, stats:stats, remote:{active:!!(window.STATES && window.STATES.isPlaying && remote), server:remote.serverStatus || remote.serverState || (remote.server ? 'Connected' : 'Unknown'), console:remote.consoleStatus || remote.consoleState || (remote.consoleName ? 'Available' : 'Unknown')}});
                     } catch (e) { return JSON.stringify({info:{playing:false,title:'',region:''},stats:null}); }
@@ -520,13 +686,38 @@ final class BrowserModel: ObservableObject {
                       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
                 let info = root["info"] as? [String: Any] ?? [:]
                 let remote = root["remote"] as? [String: Any] ?? [:]
+                nativeHUDVisible = info["hudVisible"] as? Bool ?? false
+                let items = info["hudItems"] as? [String] ?? ["fps", "ping", "btr"]
+                if nativeHUDItems != items { nativeHUDItems = items }
+                let position = info["hudPosition"] as? String ?? "top-right"
+                if nativeHUDPosition != position { nativeHUDPosition = position }
+                let opacity = min(max(info["hudOpacity"] as? Double ?? 90, 10), 100) / 100
+                if nativeHUDOpacity != opacity { nativeHUDOpacity = opacity }
+                let background = min(max(info["hudBackground"] as? Double ?? 65, 0), 100) / 100
+                if nativeHUDBackground != background { nativeHUDBackground = background }
+                let colors = info["hudColors"] as? Bool ?? false
+                if nativeHUDColors != colors { nativeHUDColors = colors }
+                let glance = info["hudQuickGlance"] as? Bool ?? false
+                if nativeHUDQuickGlance != glance { nativeHUDQuickGlance = glance }
+                let textSize = info["hudTextSize"] as? String ?? "0.9rem"
+                let size = textSize == "1.1rem" ? 11.0 : textSize == "1.0rem" ? 10.0 : 9.0
+                if nativeHUDTextSize != size { nativeHUDTextSize = size }
                 report.remotePlayActive = remote["active"] as? Bool ?? false
                 report.remoteServerStatus = remote["server"] as? String ?? "Unknown"
                 report.remoteConsoleStatus = remote["console"] as? String ?? "Unknown"
                 isStreaming = info["playing"] as? Bool ?? false
                 currentGameTitle = info["title"] as? String ?? ""
+                let gameID = info["gameID"] as? String ?? ""
+                let playing = isStreaming, gameTitle = currentGameTitle
+                let gameKey = playing ? InputPresetStore.gameKey(id: gameID, title: gameTitle) : ""
+                if inputPresets.currentGameID != gameKey {
+                    Task { await inputPresets.noteGame(id: gameID, title: gameTitle, playing: playing) }
+                }
                 currentRegion = info["region"] as? String ?? ""
                 if let stats = root["stats"] as? [String: Any] {
+                    telemetryUpdatedAt = .now
+                    let display = stats["display"] as? [String: String] ?? [:]
+                    if nativeHUDValues != display { nativeHUDValues = display }
                     let loss = stats["loss"] as? [String: Any] ?? [:]
                     let frames = stats["frames"] as? [String: Any] ?? [:]
                     telemetry = StreamTelemetry(
@@ -540,8 +731,9 @@ final class BrowserModel: ObservableObject {
                         resolution: stats["resolution"] as? String ?? "",
                         decodeTimeMs: (stats["decodeTime"] as? NSNumber)?.doubleValue ?? 0
                     )
-                } else {
+                } else if !isStreaming {
                     telemetry = .empty
+                    nativeHUDValues = [:]
                 }
                 statusController?.refreshMenu()
             } catch {
@@ -558,6 +750,7 @@ final class BrowserModel: ObservableObject {
     // MARK: - State updates (called by WebView.Coordinator)
 
     func navigationStarted() {
+        stopSyntheticInputTest(message: "Input test cancelled: page navigation started.")
         inputPresets.invalidateWebOperationsForNavigation()
         controllerFeatures.resetMacros()
         bridgeReady = false
@@ -619,6 +812,7 @@ final class BrowserModel: ObservableObject {
     private var webContentTerminationDates: [Date] = []
 
     func webContentTerminated() {
+        stopSyntheticInputTest(message: "Input test cancelled: browser content stopped.")
         loadingTimeout?.cancel()
         loadingTimeout = nil
         isLoading = false
@@ -666,6 +860,9 @@ final class BrowserModel: ObservableObject {
             report.remoteConsoleStatus = body["console"] as? String ?? "Unknown"
         case "gamepads":
             report.webControllerIDs = body["ids"] as? [String] ?? []
+            if report.webControllerIDs.count != 1 {
+                stopSyntheticInputTest(message: "Input test cancelled: browser controller count changed.")
+            }
             report.controllerMismatch = !report.nativeControllerIDs.isEmpty && report.webControllerIDs.isEmpty
             if !report.webControllerIDs.isEmpty {
                 inputPresets.retryActiveWebSettings()
@@ -692,17 +889,22 @@ final class BrowserModel: ObservableObject {
             if isSettingsWindowOpen { settingsModel.load() }
             note("Better xCloud bridge ready")
         case "native-rumble":
+            let raw = body["raw"] as? [String: Any] ?? [:]
+            rumbleSamples.append(["time": Date().timeIntervalSince1970, "game": currentGameTitle, "raw": raw,
+                "durationMs": body["durationMs"] as? Double ?? 150])
+            if rumbleSamples.count > 240 { rumbleSamples.removeFirst(rumbleSamples.count - 240) }
             let left = Float(body["leftMotorPercent"] as? Double ?? 0) / 100
             let right = Float(body["rightMotorPercent"] as? Double ?? 0) / 100
             let durationMs = body["durationMs"] as? Double ?? 150
-            let intensity = min(max(max(left, right), 0), 1)
-            if intensity > 0 {
-                controllerFeatures.playTestPulse(
-                    intensity: intensity,
-                    sharpness: min(max(right, 0), 1),
-                    duration: min(max(durationMs / 1_000, 0.03), 2)
-                )
-            }
+            controllerFeatures.recordRumble(left: Float(raw["leftMotorPercent"] as? Double ?? 0) / 100,
+                right: Float(raw["rightMotorPercent"] as? Double ?? 0) / 100,
+                leftTrigger: Float(raw["leftTriggerMotorPercent"] as? Double ?? 0) / 100,
+                rightTrigger: Float(raw["rightTriggerMotorPercent"] as? Double ?? 0) / 100)
+            controllerFeatures.receiveStreamRumble(left: left, right: right,
+                leftTrigger: Float(body["leftTriggerMotorPercent"] as? Double ?? 0) / 100,
+                rightTrigger: Float(body["rightTriggerMotorPercent"] as? Double ?? 0) / 100,
+                duration: durationMs / 1_000)
+
         default:
             note("\(type): \(body["detail"] as? String ?? "")")
         }
@@ -713,6 +915,9 @@ final class BrowserModel: ObservableObject {
     private func refreshNativeControllers() {
         report.nativeControllerIDs = GCController.controllers().map { controller in
             controller.vendorName ?? "Game Controller"
+        }
+        if report.nativeControllerIDs.count != 1 {
+            stopSyntheticInputTest(message: "Input test cancelled: native controller count changed.")
         }
         report.controllerMismatch = !report.nativeControllerIDs.isEmpty && report.webControllerIDs.isEmpty
         // Ask WebKit/Better xCloud to rescan its own real Gamepad list after

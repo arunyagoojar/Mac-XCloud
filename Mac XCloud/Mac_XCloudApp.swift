@@ -57,6 +57,8 @@ struct Mac_XCloudApp: App {
             CommandMenu("Settings") {
                 Button("Open Settings…") { browser.openSettingsWindow() }
                     .keyboardShortcut(",", modifiers: .command)
+                Divider()
+
             }
             AdaptiveTriggerCommands(service: browser.controllerFeatures, store: browser.inputPresets)
             CommandGroup(after: .toolbar) {

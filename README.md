@@ -57,7 +57,7 @@ You still need the Xbox/Game Pass access required to use Xbox Cloud Gaming.
 ### Controller tools
 
 * DualSense adaptive triggers
-* 21 built-in adaptive-trigger modes
+* 24 built-in adaptive-trigger modes
 * Saved custom trigger presets in both left/right selectors and trigger menus
 * Editable vibration amplitude and normalized frequency
 * Sustained pedal resistance through full trigger travel (positional feedback on macOS 12.3+, constant-feedback fallback on 12.0–12.2)
@@ -188,3 +188,11 @@ Mac Xcloud uses [Better xCloud](https://github.com/redphx/better-xcloud) by redp
 Xbox Cloud Gaming is a Microsoft service. Mac Xcloud is an independent project and is not affiliated with or endorsed by Microsoft.
 
 Game artwork shown in screenshots belongs to its respective publishers.
+
+## Controller feature preview
+
+Adds per-game profile recall, local gameplay dead zones and stick previews, rumble curves, trigger stops, hold-to-fire, portable profile files, two new custom trigger modes, gyro/touchpad aim, and web capability/rumble diagnostics. Hardware and live-stream verification is pending. See `docs/controller-feature-guide.md` for setup, evidence, limitations, and the test checklist.
+
+## Revision 2 controller fixes
+
+Native macOS stats HUD with blur and corner spacing, motion-only outgoing input, orientation-aware gyro, deterministic touch tracking, swipe fixes, reduced Settings updates, reusable rumble playback, and a curated trigger menu. See `docs/controller-revision2.md` for the GitHub research and testing sequence.

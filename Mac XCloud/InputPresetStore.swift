@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CryptoKit
 import Foundation
+import UniformTypeIdentifiers
 
 // MARK: - Portable Better xCloud data
 
@@ -52,6 +53,7 @@ struct BetterXCloudInputSettings: Codable, Equatable, Sendable {
     var keyboard: BetterXCloudProfileSnapshot?
     var controllerShortcuts: BetterXCloudProfileSnapshot?
     var controllerCustomization: BetterXCloudProfileSnapshot?
+    var streamPreferences: [String: JSONValue]? = nil
 
     static let `default` = BetterXCloudInputSettings(
         mkbEnabled: false,
@@ -169,6 +171,7 @@ enum InputPresetStorageStatus: Equatable {
 
 @MainActor
 final class InputPresetStore: ObservableObject {
+    var onSettingsApplied: (() -> Void)?
     static let schemaVersion = 2
 
     @Published private(set) var presets: [InputPreset] = [.default]
@@ -177,6 +180,128 @@ final class InputPresetStore: ObservableObject {
     @Published private(set) var activePresetID: UUID = InputPreset.defaultID
     @Published var operationMessage: String?
     @Published private(set) var isBusy = false
+
+    @Published var autoGameProfiles = UserDefaults.standard.object(forKey: "inputPresets.autoGameProfiles") as? Bool ?? true {
+        didSet {
+            defaults.set(autoGameProfiles, forKey: "inputPresets.autoGameProfiles")
+            if autoGameProfiles && !oldValue && !currentGameID.isEmpty {
+                let id = currentGameID, title = currentGameTitle
+                currentGameID = ""
+                Task { await noteGame(id: id.hasPrefix("title:") ? "" : id, title: title, playing: true) }
+            }
+        }
+    }
+    @Published private(set) var currentGameID = ""
+    private var gameBasePresetID: UUID?
+    private var restoringGame = false
+
+    @Published private(set) var currentGameTitle = ""
+    private var gameTransition: UInt = 0
+
+    static func gameKey(id: String, title: String) -> String {
+        let stable = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stable.isEmpty { return stable }
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generic = ["xbox", "xbox cloud gaming", "xbox cloud gaming (beta)", "home", "remote play"]
+        guard !title.isEmpty, !generic.contains(title.lowercased()) else { return "" }
+        return "title:" + title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    func noteGame(id: String, title: String = "", playing: Bool) async {
+        let key = playing ? Self.gameKey(id: id, title: title) : ""
+        if playing && key.isEmpty { return }
+        // Enrich a title fallback with a stable ID without switching profiles.
+        if playing, currentGameID.hasPrefix("title:"), !id.isEmpty,
+           Self.gameKey(id: "", title: title) == currentGameID {
+            var saved = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+            if let profile = saved[currentGameID] {
+                saved[key] = profile; defaults.set(saved, forKey: "inputPresets.games.v1")
+                currentGameID = key; currentGameTitle = title
+                return
+            }
+        }
+        guard key != currentGameID else { return }
+        gameTransition &+= 1
+        let transition = gameTransition
+        if currentGameID.isEmpty && !key.isEmpty {
+            gameBasePresetID = activePresetID
+            if autoGameProfiles { defaults.set(activePresetID.uuidString, forKey: "inputPresets.gameBaseID") }
+        }
+        currentGameID = key; currentGameTitle = playing ? title : ""
+        guard autoGameProfiles else {
+            if key.isEmpty { gameBasePresetID = nil; defaults.removeObject(forKey: "inputPresets.gameBaseID") }
+            return
+        }
+        let saved = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+        if !key.isEmpty, let known = saved[key].flatMap(UUID.init(uuidString:)), presets.contains(where: { $0.id == known }) {
+            await applyPreset(id: known, rememberGame: false)
+            return
+        }
+        let baseID = gameBasePresetID ?? InputPreset.defaultID
+        if key.isEmpty {
+            gameBasePresetID = nil
+            defaults.removeObject(forKey: "inputPresets.gameBaseID")
+            await applyPreset(id: presets.contains(where: { $0.id == baseID }) ? baseID : InputPreset.defaultID, rememberGame: false)
+            return
+        }
+        // Snapshot the global baseline before the first game's independent copy.
+        if activePresetID == baseID { await updatePreset(id: baseID) }
+        guard transition == gameTransition, currentGameID == key,
+              let base = presets.first(where: { $0.id == baseID }) else { return }
+        do {
+            var game = base
+            game.id = UUID()
+            game.name = uniqueName(from: title.isEmpty ? "Game " + String(key.prefix(24)) : String(title.prefix(100)))
+            game.createdAt = .now; game.updatedAt = .now
+            try write(game)
+            presets.append(game); sortPresets(); updateIndexAfterSave()
+            var links = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+            links[key] = game.id.uuidString
+            defaults.set(links, forKey: "inputPresets.games.v1")
+            await applyPreset(id: game.id, rememberGame: false)
+        } catch { operationMessage = "Could not remember game settings: \(error.localizedDescription)" }
+    }
+
+    func exportPresetData(id: UUID) throws -> Data {
+        guard let preset = presets.first(where: { $0.id == id }) else { throw CocoaError(.fileReadNoSuchFile) }
+        return try encoded(PresetEnvelope(schemaVersion: Self.schemaVersion, kind: "input-preset", revision: 1, checksum: checksum(for: preset), value: preset))
+    }
+
+    @discardableResult func importPresetData(_ data: Data) throws -> UUID {
+        guard data.count <= 2_000_000 else { throw CocoaError(.fileReadTooLarge) }
+        try validateEnvelope(data, kind: "input-preset")
+        var preset = try decoder().decode(PresetEnvelope<InputPreset>.self, from: data).value
+        preset.id = UUID()
+        preset.name = uniqueName(from: String(preset.name.prefix(100)).trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Imported Profile")
+        preset.createdAt = .now; preset.updatedAt = .now
+        // Custom effects are self-contained snapshots; source library UUIDs are local.
+        preset.controller.adaptiveTriggers.leftCustomPresetID = nil
+        preset.controller.adaptiveTriggers.rightCustomPresetID = nil
+        try write(preset)
+        presets.append(preset); sortPresets(); updateIndexAfterSave()
+        return preset.id
+    }
+
+    func exportPresetFile() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Mac-XCloud-profile.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try exportPresetData(id: activePresetID).write(to: url, options: .atomic); operationMessage = "Exported saved profile" }
+        catch { operationMessage = "Export failed: \(error.localizedDescription)" }
+    }
+
+    func importPresetFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard size <= 2_000_000 else { throw CocoaError(.fileReadTooLarge) }
+            _ = try importPresetData(Data(contentsOf: url))
+            operationMessage = "Imported profile; select it to apply"
+        } catch { operationMessage = "Import failed: \(error.localizedDescription)" }
+    }
 
     private weak var browser: BrowserModel?
     private let fileManager: FileManager
@@ -210,6 +335,14 @@ final class InputPresetStore: ObservableObject {
         self.defaults = defaults
         if let raw = defaults.string(forKey: "inputPresets.activeID"), let id = UUID(uuidString: raw) {
             activePresetID = id
+        }
+        autoGameProfiles = defaults.object(forKey: "inputPresets.autoGameProfiles") as? Bool ?? true
+        // A relaunch starts outside a stream; keep the last game profile saved,
+        // but return to the user's global baseline until a title is detected.
+        if let raw = defaults.string(forKey: "inputPresets.gameBaseID"), let base = UUID(uuidString: raw) {
+            activePresetID = base
+            defaults.set(raw, forKey: "inputPresets.activeID")
+            defaults.removeObject(forKey: "inputPresets.gameBaseID")
         }
         reloadFromDisk()
         browser.controllerFeatures.$settings
@@ -450,7 +583,7 @@ final class InputPresetStore: ObservableObject {
         } catch { operationMessage = "Could not delete preset: \(error.localizedDescription)" }
     }
 
-    func applyPreset(id: UUID) async {
+    func applyPreset(id: UUID, rememberGame: Bool = true) async {
         guard let browser, presets.contains(where: { $0.id == id }) else { return }
         do {
             // Save the last edit even when the 700 ms debounce has not fired.
@@ -469,7 +602,9 @@ final class InputPresetStore: ObservableObject {
         // Suppress only the synchronous native apply, not user edits made while
         // WebKit is awaiting readiness. Web autosave has its own readiness gate.
         suppressAutosave = true
+        restoringGame = !rememberGame
         setActive(id)
+        restoringGame = false
         browser.controllerFeatures.updateSettings { $0.apply(preset.controller) }
         suppressAutosave = false
         let task = Task { [weak self] in
@@ -562,6 +697,7 @@ final class InputPresetStore: ObservableObject {
             }
             let warnings = response["warnings"] as? [String] ?? []
             webSettingsReady = response["ok"] as? Bool == true && warnings.isEmpty
+            if webSettingsReady { onSettingsApplied?() }
             if !warnings.isEmpty { return " · " + warnings.joined(separator: "; ") }
             return webSettingsReady ? "" : " · Xbox input settings are waiting for confirmation"
         } catch {
@@ -873,6 +1009,11 @@ final class InputPresetStore: ObservableObject {
     private func setActive(_ id: UUID) {
         activePresetID = id
         defaults.set(id.uuidString, forKey: "inputPresets.activeID")
+        if autoGameProfiles, !restoringGame, !currentGameID.isEmpty {
+            var games = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+            games[currentGameID] = id.uuidString
+            defaults.set(games, forKey: "inputPresets.games.v1")
+        }
     }
 
     private func sortPresets() {

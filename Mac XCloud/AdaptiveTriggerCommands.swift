@@ -37,7 +37,7 @@ struct AdaptiveTriggerCommands: Commands {
 
     @ViewBuilder
     private func modes(for side: AdaptiveTriggerSide) -> some View {
-        ForEach(AdaptiveTriggerPreset.allCases, id: \.self) { preset in
+        ForEach(AdaptiveTriggerPreset.recommendedCatalog, id: \.self) { preset in
             Button(preset.htmlName) { select(.builtIn(preset), side: side) }
         }
         if !library.items.isEmpty {

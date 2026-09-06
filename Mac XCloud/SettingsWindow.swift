@@ -44,13 +44,43 @@ struct SettingsRootView: View {
                 Text(supportFailure ?? "")
             }
             .background(Color(nsColor: .windowBackgroundColor))
-            .sheet(isPresented: Binding(get: { model.showForcedMKBPicker }, set: { model.showForcedMKBPicker = $0 })) {
-                ForcedMKBPicker(model: model)
-            }
+    }
+
+    private struct SectionGroup {
+        let title: String
+        let icon: String
+        let routes: [(String, SettingsRoute)]
+    }
+    private var groups: [SectionGroup] { [
+        SectionGroup(title: "Play & Streaming", icon: "play.rectangle", routes: [("Stream", .category("stream")), ("Connection", .category("server")), ("Picture", .category("video")), ("Clarity", .category("clarity")), ("Remote Play", .category("remote"))]),
+        SectionGroup(title: "Controller", icon: "gamecontroller", routes: [("Device", .controllerSection(.overview)), ("Calibration", .controllerSection(.calibration)), ("Effects", .controllerSection(.triggers)), ("Test", .controllerSection(.test))]),
+        SectionGroup(title: "Motion & Steering", icon: "gyroscope", routes: [("Steering", .controllerSection(.steering)), ("Gyro & Flick", .controllerSection(.gyro)), ("Touchpad", .controllerSection(.touchpad))]),
+        SectionGroup(title: "Profiles & Shortcuts", icon: "square.stack", routes: [("Game Profiles", .controllerSection(.presets)), ("Shortcuts & Macros", .controllerSection(.shortcuts))]),
+        SectionGroup(title: "App", icon: "gearshape", routes: [("Overlay", .category("stats")), ("Appearance", .category("site")), ("Advanced", .category("advanced")), ("About", .home)])
+    ] }
+    private var activeGroup: SectionGroup {
+        if case .profileEditor = model.route { return groups[3] }
+        return groups.first { group in group.routes.contains { $0.1 == model.route } } ?? groups[4]
+    }
+    private var routeContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                ForEach(activeGroup.routes.indices, id: \.self) { index in
+                    let tab = activeGroup.routes[index]
+                    Button { model.navigate(to: tab.1) } label: {
+                        Text(tab.0).font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(model.route == tab.1 ? Color.accentColor.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                    }.buttonStyle(.plain).accessibilityAddTraits(model.route == tab.1 ? [.isSelected] : [])
+                }
+                Spacer(minLength: 0)
+            }.padding(.horizontal, 16).padding(.vertical, 8)
+            Divider()
+            contentForRoute
+        }
     }
 
     @ViewBuilder
-    private var routeContent: some View {
+    private var contentForRoute: some View {
         switch model.route {
         case .home:
             settingsHome
@@ -58,6 +88,8 @@ struct SettingsRootView: View {
             settingsDetail(model)
         case .controllerSection(let section):
             ControllerToolsView(service: browser.controllerFeatures, section: section)
+        case .profileEditor(let kind):
+            ProfileEditorView(model: ProfileEditorModel(kind: kind, browser: browser))
         }
     }
 
@@ -120,6 +152,8 @@ struct SettingsRootView: View {
             return SettingsCategory.all.first(where: { $0.id == id })?.title ?? "Settings"
         case .controllerSection(let section):
             return section.rawValue
+        case .profileEditor(let kind):
+            return kind.title
         }
     }
 
@@ -150,28 +184,21 @@ struct SettingsRootView: View {
             .help("Support the developer on Ko-fi (opens in your browser)")
             .accessibilityLabel("Buy me a coffee? Open Ko-fi in browser")
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 0) {
-                        sidebarRow("About", symbol: "info.circle", color: .gray, route: .home)
-                        ForEach(Array(SettingsCategory.all.enumerated()), id: \.element.id) { index, category in
-                            if index == 0 || category.id == "mkb" || category.id == "site" {
-                                Spacer().frame(height: 8)
-                            }
-                            sidebarRow(category.title, symbol: category.icon, color: categoryColor(category.id),
-                                       route: .category(category.id))
-                        }
-                        Spacer().frame(height: 8)
-                        ForEach(ControllerToolSection.allCases) { section in
-                            sidebarRow(section.rawValue, symbol: section.icon, color: .purple,
-                                       route: .controllerSection(section))
-                        }
-                    }
-                    .padding(.bottom, 4)
+            VStack(spacing: 5) {
+                ForEach(groups.indices, id: \.self) { index in
+                    let group = groups[index]
+                    Button { model.navigate(to: group.routes[0].1) } label: {
+                        HStack(spacing: 9) {
+                            Image(systemName: group.icon).frame(width: 20)
+                            Text(group.title).font(.system(size: 12, weight: .medium))
+                            Spacer(minLength: 0)
+                        }.padding(.horizontal, 10).padding(.vertical, 11).contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                        .foregroundStyle(activeGroup.title == group.title ? Color.white : Color.primary)
+                        .background(activeGroup.title == group.title ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 8))
                 }
-                .onChange(of: model.route) { route in
-                    proxy.scrollTo(route == .home ? "About" : routeTitle)
-                }
+                Spacer()
+                Text("Settings are saved automatically.").font(.caption).foregroundStyle(.secondary).padding(8)
             }
         }
         .padding(10)
@@ -204,7 +231,6 @@ struct SettingsRootView: View {
         case "server", "stream", "remote": return .blue
         case "stats": return .green
         case "clarity", "video": return .indigo
-        case "mkb": return .orange
         default: return .gray
         }
     }
@@ -227,7 +253,7 @@ struct SettingsRootView: View {
                 }
                 Divider()
                 SettingsRow("Controller tools", note: "Test, calibrate, and customize your controller in this window.") {
-                    Text("7 sections").foregroundStyle(.secondary)
+                    Text("5 main areas").foregroundStyle(.secondary)
                 }
             }
             suggestedButton
@@ -275,7 +301,6 @@ struct SettingsRootView: View {
         case "clarity": return "Upscaling and sharpening pipeline"
         case "video": return "Rendering, color, aspect, and audio"
         case "remote": return "Streaming from your own Xbox"
-        case "mkb": return "Mouse, keyboard, and profiles"
         case "site": return "Xbox site appearance and behavior"
         case "advanced": return "Privacy, layout, and hidden sections"
         case "controller": return "LED, polling rate, and local co-op"
@@ -328,10 +353,10 @@ struct SettingsRootView: View {
     }
 
     private func settingRow(_ model: SettingsModel, def: SettingDef) -> some View {
-        SettingsRow(def.label, note: def.note) {
+        SettingsRow(def.label) {
             control(model, def: def)
                 .frame(width: 168, alignment: .trailing)
-        }
+        }.help(def.note ?? def.label)
     }
 
     @ViewBuilder
@@ -405,27 +430,10 @@ struct SettingsRootView: View {
             ledControl(model)
 
         case .profileLauncher(let kind):
-            Button("Open…") { browser.openProfileEditor(kind) }
+            Button("Open…") { model.navigate(to: .profileEditor(kind)) }
                 .buttonStyle(.bordered)
                 .help("Opens the native \(kind.title.lowercased()) manager")
                 .accessibilityLabel("Open \(kind.title)")
-
-        case .forcedMKBGames:
-            Button {
-                model.showForcedMKBPicker = true
-            } label: {
-                HStack(spacing: 6) {
-                    Text("\(model.forcedNativeMKBGames.count) selected")
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(def.label)
-            .accessibilityValue("\(model.forcedNativeMKBGames.count) selected")
 
         case .pingTest:
             VStack(alignment: .trailing, spacing: 6) {

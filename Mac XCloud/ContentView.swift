@@ -91,13 +91,29 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
+        .overlay(alignment: hudAlignment) {
+            if browser.isStreaming && (browser.nativeHUDVisible || (browser.nativeHUDQuickGlance && browser.nativeHUDGlancing)) {
+                NativeStreamHUD(browser: browser).padding(3)
+            }
+        }
         .overlay(alignment: .topTrailing) { spikePanel }
         .onAppear { browser.pollStreamInfo() }
         .task {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 browser.pollStreamInfo()
             }
+        }
+    }
+
+    private var hudAlignment: Alignment {
+        switch browser.nativeHUDPosition {
+        case "top-left": return .topLeading
+        case "bottom-left": return .bottomLeading
+        case "bottom-right": return .bottomTrailing
+        case "top-center": return .top
+        case "bottom-center": return .bottom
+        default: return .topTrailing
         }
     }
 

@@ -31,7 +31,6 @@ enum SettingKind {
     case ledColor
     case info(text: String)
     case profileLauncher(ProfileKind)
-    case forcedMKBGames
     case pingTest
 }
 
@@ -41,6 +40,9 @@ enum SettingsRoute: Equatable {
     case home
     case category(String)
     case controllerSection(ControllerToolSection)
+    // The virtual-controller / keyboard-shortcut editors open inside the
+    // settings panel's own navigation instead of a separate window.
+    case profileEditor(ProfileKind)
 }
 
 struct SettingDef: Identifiable {
@@ -229,35 +231,6 @@ struct SettingsCategory: Identifiable {
                        note: nil,
                        scope: .global, kind: .toggle(defaultValue: false)),
         ]),
-        SettingsCategory(id: "mkb", title: "Mouse & Keyboard", icon: "keyboard", rows: [
-            SettingDef(id: "mkb.enabled", label: "Emulate controller with Mouse & Keyboard",
-                       note: "Play games that don't support MKB by faking a controller. Could be viewed as cheating online.",
-                       scope: .global, kind: .toggle(defaultValue: false)),
-            SettingDef(id: "nativeMkb.mode", label: "Native Mouse & Keyboard",
-                       note: "Uses the real MKB support some games offer, with no emulation.",
-                       scope: .global, kind: .option(
-                            values: ["default", "off", "on"],
-                            labels: ["Default", "Off", "On"],
-                            defaultValue: "default")),
-            SettingDef(id: "nativeMkb.forcedGames", label: "Force native MKB for these games",
-                       note: "These games always get real keyboard & mouse instead of an emulated controller.",
-                       scope: .global, kind: .forcedMKBGames),
-            SettingDef(id: "mkb.cursor.hideIdle", label: "Hide mouse cursor on idle",
-                       note: nil,
-                       scope: .global, kind: .toggle(defaultValue: false)),
-            SettingDef(id: "nativeMkb.scroll.sensitivityX", label: "Horizontal scroll sensitivity",
-                       note: nil,
-                       scope: .stream, kind: .range(min: 0, max: 10000, step: 1000, defaultValue: 0, format: { $0 == 0 ? "Default" : String(format: "%.1fx", $0 / 100) })),
-            SettingDef(id: "nativeMkb.scroll.sensitivityY", label: "Vertical scroll sensitivity",
-                       note: nil,
-                       scope: .stream, kind: .range(min: 0, max: 10000, step: 1000, defaultValue: 0, format: { $0 == 0 ? "Default" : String(format: "%.1fx", $0 / 100) })),
-            SettingDef(id: "mkb.profiles", label: "Virtual controller profiles",
-                       note: "Create and edit your own MKB button layouts.",
-                       scope: .global, kind: .profileLauncher(.mkb)),
-            SettingDef(id: "keyboard.profiles", label: "Keyboard shortcut profiles",
-                       note: "Bind actions like screenshot or stats toggle to keys.",
-                       scope: .global, kind: .profileLauncher(.keyboard)),
-        ]),
         SettingsCategory(id: "site", title: "Site & UI", icon: "safari", rows: [
             SettingDef(id: "ui.splashVideo.skip", label: "Skip Xbox splash video",
                        note: "Skips the intro video when a stream starts.",
@@ -320,7 +293,6 @@ struct SettingsCategory: Identifiable {
                        scope: .global, kind: .multi(options: [
                             ("news", "News"),
                             ("friends", "Play with friends"),
-                            ("native-mkb", "Play with mouse & keyboard"),
                             ("touch", "Play with touch"),
                             ("most-popular", "Most popular"),
                             ("byog", "Stream your own game"),
@@ -541,7 +513,7 @@ extension SettingsModel {
                     if ["stream.video.codecProfile", "userAgent.profile", "video.player.type", "video.processing"].contains(id) {
                         self.needsReload = true
                     }
-                    if ["mkb.enabled", "nativeMkb.mode", "mkb.p1.slot", "mkb.p2.slot", "mkb.p1.preset.mappingId", "mkb.p2.preset.mappingId", "keyboardShortcuts.preset.inGameId", "controller.settings"].contains(id) {
+                    if ["controller.settings", "video.brightness", "video.contrast", "video.saturation", "video.processing.sharpness", "audio.volume"].contains(id) {
                         self.browser?.inputPresets.noteBetterXCloudInputChanged(for: intendedPresetID)
                     }
                 }
@@ -556,9 +528,11 @@ extension SettingsModel {
                 }
                 // Surface normalization: if Better xCloud stored a different
                 // value than requested (e.g. unsupported quality), say so.
+                // The setting id is included so a mismatch can be reported
+                // against the exact row instead of a generic error.
                 if let readback = response["readback"], !(readback is [Any] || readback is [String: Any]),
                    String(describing: readback) != String(describing: value) {
-                    self.saveMessage = "Saved as \(readback) — the requested value is not supported here"
+                    self.saveMessage = "Saved as '\(readback)' — requested '\(value)' is not supported here for '\(id)'"
                 } else {
                     self.saveMessage = "Saved"
                 }
@@ -593,7 +567,6 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var regions: [(value: String, label: String)] = [("default", "Auto (closest server)")]
     @Published private(set) var resolvedRegionName: String?
     @Published var saveMessage: String?
-    @Published var showForcedMKBPicker = false
     @Published var needsReload = false
     @Published var isPingingRegions = false
     @Published var bestRegionResult: RegionPingResult?
@@ -603,17 +576,6 @@ final class SettingsModel: ObservableObject {
         let baseURI: String
         let averageMs: Int
         let samples: Int
-    }
-
-    var forcedNativeMKBGames: Set<String> {
-        Set((rawValue("nativeMkb.forcedGames") as? [String]) ?? [])
-    }
-
-    func toggleForcedNativeMKBGame(_ id: String) {
-        var selection = forcedNativeMKBGames
-        if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
-        write(id: "nativeMkb.forcedGames", scope: .global, value: selection.sorted())
-        objectWillChange.send()
     }
 
     private var regionPingTask: Task<Void, Never>?
@@ -778,6 +740,9 @@ final class SettingsModel: ObservableObject {
         case .controllerSection(let section):
             homeFocus = SettingsCategory.all.count + (ControllerToolSection.allCases.firstIndex(of: section) ?? 0)
             pane = .sidebar
+        case .profileEditor:
+            // The inline editor keeps the settings pane focused on itself.
+            pane = .rows
         }
         browser?.settingsRouteDidChange()
         objectWillChange.send()
@@ -1073,8 +1038,8 @@ extension SettingsModel {
             let count = rows.count
             guard count > 0 else { return }
             rowFocus = wrap(rowFocus + direction, count)
-        case .controllerSection:
-            // Controller detail controls retain native focus. Do not route d-pad
+        case .controllerSection, .profileEditor:
+            // Controller/editor controls retain native focus. Do not route d-pad
             // input into a hidden settings row.
             return
         }
@@ -1088,7 +1053,7 @@ extension SettingsModel {
         case .category:
             guard rows.indices.contains(rowFocus) else { return }
             adjust(rows[rowFocus], delta: delta)
-        case .controllerSection:
+        case .controllerSection, .profileEditor:
             // Let native focused controls handle keyboard/controller activation;
             // never mutate rows from a category that is not visible.
             return
@@ -1114,7 +1079,7 @@ extension SettingsModel {
             } else {
                 adjust(def, delta: 1)
             }
-        case .controllerSection:
+        case .controllerSection, .profileEditor:
             return
         }
     }
@@ -1150,6 +1115,9 @@ extension SettingsModel {
             } else {
                 navigate(to: .controllerSection(ControllerToolSection.allCases[next - categoryCount]))
             }
+        case .profileEditor:
+            // Keyboard input belongs to the inline editor; nothing to switch.
+            return
         }
     }
 

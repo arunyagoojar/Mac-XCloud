@@ -187,6 +187,11 @@ enum BetterXCloud {
               for (var k in optimizedGlobal) if (!(k in global)) global[k] = optimizedGlobal[k];
               for (var s in optimizedStream) if (!(s in stream)) stream[s] = optimizedStream[s];
             }
+            // This app no longer exposes keyboard/mouse gaming or pointer capture.
+            global["mkb.enabled"] = false;
+            global["nativeMkb.mode"] = "off";
+            global["nativeMkb.forcedGames"] = [];
+            stream["mkb.p2.slot"] = 0;
             global["ui.systemMenu.hideHandle"] = true;
             global["ui.controllerStatus.show"] = false;
             localStorage.setItem("BetterXcloud", JSON.stringify(global));
@@ -346,14 +351,87 @@ enum BetterXCloud {
             .components(separatedBy: .newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//#") }
             .joined(separator: "\n")
-        // Insert only a finite button overlay after Better xCloud has produced
-        // its mapped sample. Physical gamepad fields otherwise remain untouched.
-        let mappingMarker = "if(shareButtonPressed&&!shareButtonHandled)window.dispatchEvent(new Event(BxEvent.CAPTURE_SCREENSHOT));"
-        let macroMerge = mappingMarker + "if(window.BxCBridge)window.BxCBridge.mergeMacroButtons(xCloudGamepad);"
-        let macroOverlayAvailable = stripped.components(separatedBy: mappingMarker).count == 2
-        let cleaned = macroOverlayAvailable
-            ? stripped.replacingOccurrences(of: mappingMarker, with: macroMerge)
-            : stripped
+        // The final send path handles both physical and native-only changes.
+        let cleaned = stripped
+        let macroOverlayAvailable = true
+
+        let inputAdapter = #"""
+        // Install before Better xCloud or Xbox captures getGamepads.
+        // Keep the actual controller identity, buttons and actuator; change only input values.
+        const __xcgReadPhysicalPads = navigator.getGamepads.bind(navigator);
+        const __xcgPollInput = {values:{}, at:-Infinity, reads:0, applied:0, lastAxes:[], lastLeftAxes:[], lastAllAxes:[], clock:0, lastHardware:-Infinity, wasActive:false, error:""};
+        window.__xcgPollInput = __xcgPollInput;
+        const __xcgPollGamepads = function() {
+          const pads = Array.from(__xcgReadPhysicalPads());
+          __xcgPollInput.reads++;
+          const connected = pads.filter(p => p && p.connected !== false);
+          const now = performance.now(), n = __xcgPollInput.values;
+          const active = now - __xcgPollInput.at < 200 && n.nativeControllerCount === 1 &&
+            !document.hidden && !window.BX_EXPOSED?.disableGamepadPolling;
+          if (connected.length !== 1 || !Number.isFinite(__xcgPollInput.at)) return pads;
+          const p = connected[0];
+          // A standard four-axis controller is required; leave virtual MKB alone.
+          if (p.mapping !== "standard" || p.axes.length < 4 || /virtual/i.test(p.id)) return pads;
+          const axes = Array.from(p.axes), buttons = Array.from(p.buttons);
+          const clamp = v => Math.max(-1, Math.min(1, v));
+          if (active) {
+            ["LeftThumbXAxis","LeftThumbYAxis","RightThumbXAxis","RightThumbYAxis"].forEach((k,i) => {
+              if (Number.isFinite(n[k])) axes[i] = clamp(n[k] * (i % 2 ? -1 : 1));
+            });
+            // Native GameController has positive Y up; the browser has positive Y down.
+            const gyroBase = n.gyroAxisBase === 0 ? 0 : 2;
+            const touchBase = n.touchAxisBase === 0 ? 0 : 2;
+            const physicalMagnitude = base => Math.hypot(p.axes[base], p.axes[base+1]);
+            if (n.touchpadAim === 1 && physicalMagnitude(touchBase) <= 0.12) {
+              axes[touchBase] = Number.isFinite(n.touchX) ? clamp(n.touchX) : 0;
+              axes[touchBase+1] = Number.isFinite(n.touchY) ? clamp(-n.touchY) : 0;
+            }
+            const touchOwnsGyroStick = n.touchActive === 1 &&
+              n.touchpadAim === 1 && touchBase === gyroBase;
+            if (!touchOwnsGyroStick && (Number.isFinite(n.gyroX) || Number.isFinite(n.gyroY))) {
+              const magnitude = physicalMagnitude(gyroBase);
+              if (magnitude <= 0.05) { axes[gyroBase] = 0; axes[gyroBase+1] = 0; }
+              // Fade out game-dead-zone compensation continuously as physical input increases.
+              const blend = Math.max(0,Math.min(1,(magnitude - 0.05) / 0.25));
+              const combine = (coarse,fine) => Number.isFinite(fine) ? coarse + (fine - coarse) * blend : coarse;
+              const x = combine(n.gyroX,n.gyroFineX);
+              const y = combine(n.gyroY,n.gyroFineY);
+              if (Number.isFinite(x)) axes[gyroBase] = clamp(axes[gyroBase] + x);
+              if (Number.isFinite(y)) axes[gyroBase+1] = clamp(axes[gyroBase+1] - y);
+            }
+            ["LeftTrigger","RightTrigger"].forEach((k,i) => {
+              if (!Number.isFinite(n[k]) || !buttons[i+6]) return;
+              const value = Math.max(0, Math.min(1,n[k]));
+              buttons[i+6] = {value, pressed:value > 0.5, touched:value > 0};
+            });
+            __xcgPollInput.applied++;
+          }
+          __xcgPollInput.lastAxes = axes.slice(2,4); // Legacy right-stick diagnostics.
+          __xcgPollInput.lastLeftAxes = axes.slice(0,2);
+          __xcgPollInput.lastAllAxes = axes.slice(0,4);
+          // Motion alone must invalidate Xbox's timestamp-based unchanged-input skip.
+          // At expiry, publish a newer timestamp with physical values to release aiming.
+          // WebKit hardware timestamps can use a different origin from performance.now().
+          // Never let a large hardware timestamp freeze motion-only updates.
+          if (active || __xcgPollInput.wasActive || p.timestamp !== __xcgPollInput.lastHardware) {
+            __xcgPollInput.clock = Math.max(__xcgPollInput.clock, p.timestamp || 0, now) + 0.01;
+          }
+          __xcgPollInput.wasActive = active;
+          __xcgPollInput.lastHardware = p.timestamp;
+          const timestamp = __xcgPollInput.clock;
+          const proxy = new Proxy(p, {get(target,key) {
+            if (key === "axes") return axes;
+            if (key === "buttons") return buttons;
+            if (key === "timestamp") return timestamp;
+            const value = Reflect.get(target,key,target);
+            return typeof value === "function" ? value.bind(target) : value;
+          }});
+          return pads.map(pad => pad === p ? proxy : pad);
+        };
+        try { navigator.getGamepads = __xcgPollGamepads; }
+        catch(error) { __xcgPollInput.error = String(error); }
+        __xcgPollInput.installed = navigator.getGamepads === __xcgPollGamepads;
+        """#
 
         let bridge = #"""
         const __xcgMacroButtonFields = Object.freeze({
@@ -363,11 +441,66 @@ enum BetterXCloud {
           DPadLeft:true, DPadRight:true, Nexus:true, Share:true
         });
         const __xcgMacroButtons = Object.create(null);
+        let __xcgNativeInput = {}, __xcgNativeInputAt = 0, __xcgMergedSamples = 0;
         const __xcgBridgeCapability = {
           profileCapture: true,
           macroOverlay: \#(macroOverlayAvailable ? "true" : "false"),
           nativeRumble: false
         };
+
+        let __xcgChannel = null, __xcgOriginalSend = null, __xcgBase = [], __xcgLastNative = false;
+        let __xcgLastSendAt = 0, __xcgInputError = "", __xcgFlushTimer = null;
+        let __xcgOutgoingCount = 0, __xcgLastOutgoing = [];
+        function __xcgRecordOutgoing(samples) {
+          __xcgOutgoingCount++;
+          __xcgLastOutgoing = samples.map(sample => ({...sample}));
+        }
+        function __xcgEnsureInputSink() {
+          const channel = window.BX_EXPOSED?.inputChannel;
+          if (!channel || typeof channel.sendGamepadInput !== "function") return false;
+          if (channel === __xcgChannel) return true;
+          __xcgChannel = channel; __xcgBase = []; __xcgLastNative = false;
+          __xcgOriginalSend = channel.sendGamepadInput.bind(channel);
+          channel.sendGamepadInput = function(timestamp, samples) {
+            if (!Array.isArray(samples)) return __xcgOriginalSend(timestamp, samples);
+            // Cache immutable physical baselines. Never add gyro repeatedly to a reused sample.
+            __xcgBase = samples.map(sample => ({...sample}));
+            const output = samples.map(sample => window.BxCBridge.mergeMacroButtons({...sample}));
+            __xcgLastSendAt = performance.now();
+            const result = __xcgOriginalSend(timestamp, output);
+            __xcgRecordOutgoing(output);
+            return result;
+          };
+          return true;
+        }
+        function __xcgFlushNative() {
+          try {
+            if (window.__xcgPollInput?.installed && !Object.keys(__xcgMacroButtons).length) return;
+            if (!__xcgEnsureInputSink() || !__xcgBase.length) return;
+            const fresh = performance.now() - __xcgNativeInputAt < 200;
+            const active = fresh && Object.keys(__xcgNativeInput).some(k => k !== "nativeControllerCount") || Object.keys(__xcgMacroButtons).length > 0;
+            if (!active && !__xcgLastNative) return;
+            const wait = 1000 / 60 - (performance.now() - __xcgLastSendAt);
+            if (wait > 0) {
+              if (__xcgFlushTimer === null) __xcgFlushTimer = setTimeout(() => { __xcgFlushTimer = null; __xcgFlushNative(); }, wait);
+              return;
+            }
+            const pads = Array.from(navigator.getGamepads()).filter(Boolean);
+            if (pads.length !== 1 || !__xcgBase.some(s => s.GamepadIndex === pads[0].index)) {
+              __xcgBase = []; __xcgLastNative = false; return;
+            }
+            const output = __xcgBase.map(sample => window.BxCBridge.mergeMacroButtons({...sample, Dirty:true}));
+            __xcgLastNative = !!active;
+            __xcgLastSendAt = performance.now();
+            __xcgOriginalSend(performance.now(), output);
+            __xcgRecordOutgoing(output);
+          } catch (error) { __xcgInputError = String(error); }
+        }
+        // Expiry sends the unmodified baseline once, including a release when motion stops.
+        setInterval(function() {
+          __xcgEnsureInputSink();
+          if (__xcgLastNative && performance.now() - __xcgNativeInputAt >= 200) __xcgFlushNative();
+        }, 100);
 
         function __xcgFinite(value, fallback, min, max) {
           value = Number(value);
@@ -390,6 +523,7 @@ enum BetterXCloud {
               );
             }
             if (vibration_adjust_default.indexOf("__xcgPostNativeRumble") === -1) {
+              vibration_adjust_default = "if(e)e.__xcgRaw={leftMotorPercent:Number(e.leftMotorPercent)||0,rightMotorPercent:Number(e.rightMotorPercent)||0,leftTriggerMotorPercent:Number(e.leftTriggerMotorPercent)||0,rightTriggerMotorPercent:Number(e.rightTriggerMotorPercent)||0};" + vibration_adjust_default;
               vibration_adjust_default += ";if(window.__xcgPostNativeRumble&&window.__xcgPostNativeRumble(e))return";
             }
             __xcgBridgeCapability.nativeRumble = true;
@@ -405,6 +539,7 @@ enum BetterXCloud {
             var finite = function (value, fallback, min, max) { return __xcgFinite(value, fallback, min, max); };
             var payload = {
               type: "native-rumble",
+              raw: event && event.__xcgRaw || {},
               gamepadID: pad && typeof pad.id === "string" ? pad.id : "",
               gamepadId: pad && typeof pad.id === "string" ? pad.id : "",
               gamepadIndex: finite(event && (event.gamepadIndex ?? (pad && pad.index)), -1, -1, 255),
@@ -435,6 +570,44 @@ enum BetterXCloud {
 
         window.BxCBridge = {
           capabilities: __xcgBridgeCapability,
+          controllerDiagnostics: function() {
+            const pads = Array.from(navigator.getGamepads()).filter(Boolean);
+            return {
+              inputHookInstalled: __xcgEnsureInputSink(),
+              pollingAdapter: window.__xcgPollInput || null,
+              mouseSupportedInputTypes: STATES.currentStream?.titleInfo?.details?.supportedInputTypes ?? [],
+              physicalBaselineSamples: __xcgBase.length,
+              lastInputError: __xcgInputError,
+              lastSendAgeMs: Math.round(performance.now() - __xcgLastSendAt),
+              outgoingSendCount: __xcgOutgoingCount,
+              lastOutgoingSamples: __xcgLastOutgoing.map(sample => ({...sample})),
+              mergedSamples: __xcgMergedSamples,
+              nativeInputFresh: performance.now() - __xcgNativeInputAt < 200,
+              webHID: !!navigator.hid,
+              pads: pads.map(p => ({ id:p.id, index:p.index, axes:p.axes.length, buttons:p.buttons.length,
+                effects:Array.from(p.vibrationActuator?.effects || []), touchSurfaceAPI:"touches" in p,
+                motionAPI:"pose" in p, mapping:p.mapping }))
+            };
+          },
+          testWebRumble: async function(trigger) {
+            const pads = Array.from(navigator.getGamepads()).filter(Boolean);
+            if (pads.length !== 1) return "Connect exactly one browser-visible controller";
+            const actuator = pads[0].vibrationActuator;
+            const effect = trigger ? "trigger-rumble" : "dual-rumble";
+            if (!actuator || !Array.from(actuator.effects || []).includes(effect)) return effect + " is not advertised by this browser/controller";
+            try { return await actuator.playEffect(effect, {duration:200, startDelay:0, strongMagnitude:trigger?0:0.3, weakMagnitude:trigger?0:0.3, leftTrigger:trigger?0.3:0, rightTrigger:trigger?0.3:0}); }
+            catch(error) { return String(error); }
+          },
+          updateNativeInput: function(values) {
+            __xcgNativeInput = values || {};
+            __xcgNativeInputAt = performance.now();
+            if (window.__xcgPollInput) {
+              window.__xcgPollInput.values = __xcgNativeInput;
+              window.__xcgPollInput.at = __xcgNativeInputAt;
+            }
+            __xcgFlushNative();
+            return window.__xcgPollInput?.installed || __xcgChannel !== null;
+          },
           updateMacroButtons: function (delta) {
             delta = delta && typeof delta === "object" ? delta : {};
             Object.keys(delta).forEach(function (key) {
@@ -447,14 +620,43 @@ enum BetterXCloud {
               if (Number.isFinite(value)) __xcgMacroButtons[key] = Math.max(0, Math.min(1, value));
               else delete __xcgMacroButtons[key];
             });
+            __xcgFlushNative();
             return true;
           },
           resetMacroButtons: function () {
+            __xcgNativeInput = {};
+            if (window.__xcgPollInput) { window.__xcgPollInput.values = {}; window.__xcgPollInput.at = performance.now(); }
             Object.keys(__xcgMacroButtons).forEach(function (key) { delete __xcgMacroButtons[key]; });
+            __xcgFlushNative();
             return true;
           },
           mergeMacroButtons: function (sample) {
             if (!__xcgBridgeCapability.macroOverlay || !sample || typeof sample !== "object") return sample;
+            let pads = Array.from(navigator.getGamepads()).filter(Boolean);
+            if (!window.__xcgPollInput?.installed && sample.Virtual !== true && pads.length === 1 && sample.GamepadIndex === pads[0].index &&
+                __xcgNativeInput.nativeControllerCount === 1 &&
+                performance.now() - __xcgNativeInputAt < 200 && !document.hidden && !BX_EXPOSED.disableGamepadPolling) {
+              __xcgMergedSamples++;
+              const n = __xcgNativeInput;
+              ["LeftTrigger", "RightTrigger", "LeftThumbXAxis", "LeftThumbYAxis", "RightThumbXAxis", "RightThumbYAxis"].forEach(key => {
+                if (Number.isFinite(n[key])) { sample[key] = Math.max(key.includes("Axis") ? -1 : 0, Math.min(1, n[key])); sample.Dirty = true; }
+              });
+              const touchPrefix = n.touchAxisBase === 0 ? "LeftThumb" : "RightThumb";
+              const gyroPrefix = n.gyroAxisBase === 0 ? "LeftThumb" : "RightThumb";
+              if (n.touchpadAim === 1) {
+                // Native values are relative trackpad output, not absolute browser touch coordinates.
+                for (const [value,key] of [[n.touchX,touchPrefix+"XAxis"],[n.touchY,touchPrefix+"YAxis"]]) {
+                  if (Number.isFinite(value)) { sample[key] = Math.max(-1,Math.min(1,(sample[key] || 0)+value)); sample.Dirty = true; }
+                }
+              }
+              if (!(n.touchActive === 1 && n.touchpadAim === 1 && touchPrefix === gyroPrefix)) {
+                const moving = Math.hypot(sample[gyroPrefix+"XAxis"] || 0,sample[gyroPrefix+"YAxis"] || 0) > 0.12;
+                for (const [coarse,fine,key] of [[n.gyroX,n.gyroFineX,gyroPrefix+"XAxis"],[n.gyroY,n.gyroFineY,gyroPrefix+"YAxis"]]) {
+                  const value = moving && Number.isFinite(fine) ? fine : coarse;
+                  if (Number.isFinite(value)) { sample[key] = Math.max(-1,Math.min(1,(sample[key] || 0)+value)); sample.Dirty = true; }
+                }
+              }
+            }
             Object.keys(__xcgMacroButtons).forEach(function (key) {
               var value = Number(__xcgMacroButtons[key]);
               if (Number.isFinite(value)) sample[key] = Math.max(0, Math.min(1, value));
@@ -550,8 +752,6 @@ enum BetterXCloud {
             return this.getBaseStream(key, accepted);
           },
           profileTable: function (kind) {
-            if (kind === "mkb") return MkbMappingPresetsTable.getInstance();
-            if (kind === "keyboard") return KeyboardShortcutsTable.getInstance();
             if (kind === "controller-shortcuts") return ControllerShortcutsTable.getInstance();
             if (kind === "controller-customization") return ControllerCustomizationsTable.getInstance();
             throw new Error("Unknown profile type: " + kind);
@@ -578,9 +778,6 @@ enum BetterXCloud {
             return { sourceID: Number(record.id ?? selected), name: String(record.name || "Default"), data: record.data || {} };
           },
           captureInputPresetSettings: async function () {
-            var p1 = Number(this.getBaseStream("mkb.p1.preset.mappingId", -1));
-            var p2 = Number(this.getBaseStream("mkb.p2.preset.mappingId", 0));
-            var keyboard = Number(this.getBaseStream("keyboardShortcuts.preset.inGameId", -1));
             var controllerSettings = this.getBaseStream("controller.settings", {}) || {};
             var gamepad = null;
             try { gamepad = Array.from(navigator.getGamepads()).filter(Boolean)[0] || null; } catch (e) {}
@@ -588,15 +785,16 @@ enum BetterXCloud {
             var shortcuts = Number(controller.shortcutPresetId ?? -1);
             var customization = Number(controller.customizationPresetId ?? 0);
             return {
-              mkbEnabled: this.rawGlobal()["mkb.enabled"] === true,
-              nativeMkbMode: String(this.rawGlobal()["nativeMkb.mode"] ?? "default"),
-              p1Slot: Number(this.getBaseStream("mkb.p1.slot", 1)),
-              p2Slot: Number(this.getBaseStream("mkb.p2.slot", 0)),
-              mkbP1: await this.profileByID("mkb", p1),
-              mkbP2: await this.profileByID("mkb", p2),
-              keyboard: await this.profileByID("keyboard", keyboard),
+              mkbEnabled: false,
+              nativeMkbMode: "off",
+              p1Slot: 1,
+              p2Slot: 0,
+              mkbP1: null,
+              mkbP2: null,
+              keyboard: null,
               controllerShortcuts: await this.profileByID("controller-shortcuts", shortcuts),
-              controllerCustomization: await this.profileByID("controller-customization", customization)
+              controllerCustomization: await this.profileByID("controller-customization", customization),
+              streamPreferences: Object.fromEntries(["video.brightness", "video.contrast", "video.saturation", "video.processing.sharpness", "audio.volume"].map(key => [key, getStreamPref(key)]))
             };
           },
           upsertManagedProfile: async function (kind, snapshot, managedName) {
@@ -618,27 +816,8 @@ enum BetterXCloud {
             var bridge = this, isCurrent = function () { return bridge.inputPresetApplyToken === String(applyToken || ""); };
             var warnings = [], prefix = "XCG · " + String(presetName || "Input Preset") + " · ";
             if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
-            try { setGlobalPref("mkb.enabled", bundle.mkbEnabled === true, "ui"); } catch (e) { warnings.push("mkb.enabled: " + String(e)); }
-            try { setGlobalPref("nativeMkb.mode", String(bundle.nativeMkbMode || "default"), "ui"); } catch (e) { warnings.push("nativeMkb.mode: " + String(e)); }
-            try {
-              if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
-              this.setBaseStream("mkb.p1.slot", bundle.p1Slot ?? 1);
-              this.setBaseStream("mkb.p2.slot", bundle.p2Slot ?? 0);
-              var p1 = await this.upsertManagedProfile("mkb", bundle.mkbP1, prefix + "mkb-p1");
-              if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
-              var p2 = await this.upsertManagedProfile("mkb", bundle.mkbP2, prefix + "mkb-p2");
-              if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
-              this.setBaseStream("mkb.p1.preset.mappingId", p1 === null ? -1 : p1);
-              this.setBaseStream("mkb.p2.preset.mappingId", p2 === null ? 0 : p2);
-              await StreamSettings.refreshMkbSettings();
-            } catch (e) { warnings.push("mkb profiles: " + String(e)); }
-            try {
-              if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
-              var keyboard = await this.upsertManagedProfile("keyboard", bundle.keyboard, prefix + "keyboard");
-              if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
-              this.setBaseStream("keyboardShortcuts.preset.inGameId", keyboard === null ? -1 : keyboard);
-              await StreamSettings.refreshKeyboardShortcuts();
-            } catch (e) { warnings.push("keyboard: " + String(e)); }
+            // Legacy profile fields remain readable, but cannot reactivate removed features.
+            try { setGlobalPref("mkb.enabled", false, "ui"); setGlobalPref("nativeMkb.mode", "off", "ui"); } catch (e) {}
             try {
               if (!isCurrent()) return { ok: false, cancelled: true, warnings: [] };
               var shortcuts = await this.upsertManagedProfile("controller-shortcuts", bundle.controllerShortcuts, prefix + "controller-shortcuts");
@@ -657,6 +836,14 @@ enum BetterXCloud {
               this.setBaseStream("controller.settings", controllerSettings);
               await StreamSettings.refreshControllerSettings();
             } catch (e) { warnings.push("controller profiles: " + String(e)); }
+            const liveKeys = ["video.brightness", "video.contrast", "video.saturation", "video.processing.sharpness", "audio.volume"];
+            for (const key of liveKeys) {
+              if (!isCurrent()) return {ok:false, cancelled:true, warnings:[]};
+              const value = bundle.streamPreferences?.[key];
+              if (Number.isFinite(value)) {
+                try { setStreamPref(key, value, "ui"); } catch (e) { warnings.push(key + ": " + String(e)); }
+              }
+            }
             return { ok: warnings.length === 0, warnings: warnings };
           },
           streamInfo: function () {
@@ -664,9 +851,13 @@ enum BetterXCloud {
               var stream = STATES.currentStream || {};
               var remote = STATES.remotePlay || {};
               var title = stream.titleInfo && stream.titleInfo.product && stream.titleInfo.product.title;
-              title = title || remote.title || remote.consoleName || remote.name || stream.title || "";
+              title = title || remote.title || stream.title || "";
               if (!title) title = document.title.replace(/ - Xbox Cloud Gaming.*/, "");
-              return { playing: !!STATES.isPlaying, title: title || "", region: (STATES.selectedRegion && (STATES.selectedRegion.displayName || STATES.selectedRegion.shortName)) || remote.region || "" };
+              return { hudVisible: getStreamPref("stats.showWhenPlaying") === true,
+                hudItems: getStreamPref("stats.items"), hudPosition: getStreamPref("stats.position"),
+                hudOpacity: getStreamPref("stats.opacity.all"), hudBackground: getStreamPref("stats.opacity.background"),
+                hudColors: getStreamPref("stats.colors"), hudQuickGlance: getStreamPref("stats.quickGlance.enabled"), hudTextSize: getStreamPref("stats.textSize"),
+                gameID: String(stream.titleInfo?.product?.productId || stream.titleInfo?.details?.productId || stream.xboxTitleId || stream.titleInfo?.details?.xboxTitleId || stream.titleInfo?.titleId || ""), playing: !!STATES.isPlaying, title: title || "", region: (STATES.selectedRegion && (STATES.selectedRegion.displayName || STATES.selectedRegion.shortName)) || remote.region || "" };
             } catch (e) { return { playing: false, title: "", region: "" }; }
           },
           streamStats: async function () {
@@ -676,6 +867,7 @@ enum BetterXCloud {
             var finite = function (value, fallback) { value = Number(value); return Number.isFinite(value) ? value : fallback; };
             var pl = stats.pl || {}, fl = stats.fl || {}, dt = stats.dt || {};
             return {
+              display: Object.fromEntries(Object.entries(stats).map(([key, value]) => [key, value.toString()])),
               ping: finite(stats.ping && stats.ping.current, -1),
               fps: finite(stats.fps && stats.fps.current, 0),
               bitrate: finite(stats.btr && stats.btr.current, 0),
@@ -693,8 +885,6 @@ enum BetterXCloud {
           },
           regionList: function () { try { return Object.keys(STATES.serverRegions).map(function (k) { var r = STATES.serverRegions[k]; return { name: k, baseUri: r.baseUri || '' }; }); } catch (e) { return []; } },
           refreshProfiles: async function (kind) {
-            if (kind === "mkb") return await StreamSettings.refreshMkbSettings();
-            if (kind === "keyboard") return await StreamSettings.refreshKeyboardShortcuts();
             return await StreamSettings.refreshControllerSettings();
           },
           profileSelections: function () {
@@ -703,24 +893,13 @@ enum BetterXCloud {
             var settings = this.getBaseStream("controller.settings", {}) || {};
             var controller = gamepad && settings[gamepad.id] || {};
             return {
-              mkb: Number(this.getBaseStream("mkb.p1.preset.mappingId", -1)),
-              keyboard: Number(this.getBaseStream("keyboardShortcuts.preset.inGameId", -1)),
               controllerShortcuts: Number(controller.shortcutPresetId ?? -1),
               controllerCustomization: Number(controller.customizationPresetId ?? 0),
               gamepadId: gamepad ? gamepad.id : null
             };
           },
           selectProfile: async function (kind, id) {
-            if (kind === "mkb") {
-              this.setBaseStream("mkb.p1.preset.mappingId", id);
-              await StreamSettings.refreshMkbSettings();
-              return id;
-            }
-            if (kind === "keyboard") {
-              this.setBaseStream("keyboardShortcuts.preset.inGameId", id);
-              await StreamSettings.refreshKeyboardShortcuts();
-              return id;
-            }
+            if (!["controller-shortcuts", "controller-customization"].includes(kind)) throw new Error("Unsupported profile type");
             var gamepad = null;
             try { gamepad = Array.from(navigator.getGamepads()).filter(Boolean)[0] || null; } catch (e) {}
             if (!gamepad) throw new Error("Connect a controller first");
@@ -733,6 +912,29 @@ enum BetterXCloud {
             await StreamSettings.refreshControllerSettings();
             return id;
           }
+        };
+        // Rendering and the collection timer are owned by native macOS UI.
+        const __xcgOldStats = StreamStats.getInstance();
+        __xcgOldStats.stop();
+        __xcgOldStats.start = async function() {};
+        const __xcgStatsCollector = StreamStatsCollector.getInstance();
+        const __xcgCollect = __xcgStatsCollector.collect.bind(__xcgStatsCollector);
+        let __xcgCollectTask = null, __xcgCollectedAt = -Infinity, __xcgStatsPeer = null;
+        __xcgStatsCollector.collect = function() {
+          const peer = STATES.currentStream?.peerConnection;
+          if (peer !== __xcgStatsPeer) {
+            __xcgStatsPeer = peer; this.lastVideoStat = undefined;
+            this.selectedCandidatePairId = null; __xcgCollectedAt = -Infinity;
+          }
+          if (__xcgCollectTask) return __xcgCollectTask;
+          if (performance.now() - __xcgCollectedAt < 750) return Promise.resolve();
+          let timeout;
+          const bounded = Promise.race([__xcgCollect(), new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("Stream stats timed out")), 2500);
+          })]);
+          __xcgCollectTask = bounded.then(() => { __xcgCollectedAt = performance.now(); })
+            .finally(() => { clearTimeout(timeout); __xcgCollectTask = null; });
+          return __xcgCollectTask;
         };
         __xcgPatchBundledSource();
         try {
@@ -748,6 +950,7 @@ enum BetterXCloud {
             var __p = location.pathname || "";
             var __ok = location.hostname === "www.xbox.com" && (__p === "/play" || __p.indexOf("/play/") === 0 || __p.indexOf("/auth/msa") === 0 || /\\/play\\/?$/.test(__p));
             if (!__ok) return;
+            \(inputAdapter)
             \(cleaned)
             \(bridge)
           } catch (e) {
@@ -800,42 +1003,9 @@ enum BetterXCloud {
     static let nativeStyleScript = #"""
     (function () {
       var css = [
-        /* Better xCloud UI chrome — fully replaced by the native settings window */
-        '.bx-top-buttons { display: none !important; }',
-        '.bx-header-settings-button { display: none !important; }',
-        '.bx-centered-dialog { display: none !important; }',
-        '.bx-navigation-dialog { display: none !important; }',
-        '.bx-guide-home-buttons { display: none !important; }',
-        '.bx-controller-shortcuts-manager-container { display: none !important; }',
-        '.bx-keyboard-shortcuts-manager-container { display: none !important; }',
-        '.bx-toast { display: none !important; }',
-        '#bx-game-bar { display: none !important; }',
-        /* Stats bar — slim single-line macOS pill. Position is owned by the
-           Better xCloud "stats position" setting, so it is not overridden here. */
-        '.bx-stats-bar, #bx-stats-bar {',
-        '  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif !important;',
-        '  font-size: 11px !important;',
-        '  font-weight: 500 !important;',
-        '  line-height: 1.2 !important;',
-        '  color: rgba(245, 247, 250, 0.95) !important;',
-        '  border: 1px solid rgba(255, 255, 255, 0.14) !important;',
-        '  border-radius: 999px !important;',
-        '  background-color: rgba(16, 18, 22, 0.62) !important;',
-        '  -webkit-backdrop-filter: blur(22px) saturate(1.4) !important;',
-        '  backdrop-filter: blur(22px) saturate(1.4) !important;',
-        '  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32) !important;',
-        '  padding: 5px 14px !important;',
-        '  z-index: 2147483000 !important;',
-        '}',
-        '.bx-stats-bar > *, #bx-stats-bar > * { display: inline !important; margin: 0 4px !important; }',
-        '.bx-stats-bar * {',
-        '  box-sizing: border-box !important;',
-        '  font-family: inherit !important;',
-        '  letter-spacing: inherit !important;',
-        '}',
-        /* Auto-hiding mouse cursor: the page adds this class after idle time
-           while a controller is connected (see cursorHideScript). */
-        'html.xcg-hide-cursor, html.xcg-hide-cursor * { cursor: none !important; }'
+        '.bx-top-buttons,.bx-header-settings-button,.bx-centered-dialog,.bx-navigation-dialog,.bx-guide-home-buttons,.bx-controller-shortcuts-manager-container,.bx-keyboard-shortcuts-manager-container,.bx-toast,#bx-game-bar { display:none !important; }',
+        '.bx-stats-bar,#bx-stats-bar { display:none !important; }',
+        'html.xcg-hide-cursor,html.xcg-hide-cursor * { cursor:none !important; }'
       ].join('\n');
 
       function addStyle() {
@@ -870,44 +1040,15 @@ enum BetterXCloud {
       addStyle();
       removeBxButtons();
       try {
-        var observer = new MutationObserver(function () { addStyle(); removeBxButtons(); });
+        var scanPending = false;
+        var observer = new MutationObserver(function () {
+          if (scanPending) return;
+          scanPending = true;
+          setTimeout(function() { scanPending = false; addStyle(); removeBxButtons(); }, 250);
+        });
         observer.observe(document.documentElement, { childList: true, subtree: true });
-        setInterval(removeBxButtons, 1500);
       } catch (e) {}
 
-      /* Keep the stats bar's visibility in sync with stats.showWhenPlaying and
-         with explicit native commands. Runs once Better xCloud is present. */
-      function statsBar() { return document.querySelector('.bx-stats-bar, #bx-stats-bar'); }
-      function applyStatsVisibility(visible) {
-        try { var bar = statsBar(); if (bar) bar.classList.toggle('bx-gone', !visible); } catch (e) {}
-      }
-      function syncStatsVisibility() {
-        try {
-          if (typeof BxCBridge === 'undefined') return;
-          applyStatsVisibility(BxCBridge.getStream('stats.showWhenPlaying') === true);
-        } catch (e) {}
-      }
-      window.addEventListener('message', function (event) {
-        if (event.data && event.data.type === 'xcg-stats-visibility') {
-          applyStatsVisibility(event.data.visible === true);
-        }
-      });
-      function bindStatsSync() {
-        try {
-          if (typeof BxEventBus === 'undefined') return false;
-          BxEventBus.Stream.on('setting.changed', function (data) {
-            if (data.settingKey === 'stats.showWhenPlaying') syncStatsVisibility();
-          });
-          setInterval(syncStatsVisibility, 2000);
-          syncStatsVisibility();
-          return true;
-        } catch (e) { return false; }
-      }
-      if (!bindStatsSync()) {
-        var statsSyncTimer = setInterval(function () {
-          if (bindStatsSync()) clearInterval(statsSyncTimer);
-        }, 500);
-      }
     })();
     """#
 

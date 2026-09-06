@@ -6,6 +6,8 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
     case calibration = "Calibration"
     case triggers = "Triggers & Haptics"
     case touchpad = "Touchpad"
+    case gyro = "Gyro"
+    case steering = "Steering Wheel"
     case presets = "Input Presets"
     case shortcuts = "Shortcuts & Macros"
     var id: String { rawValue }
@@ -16,6 +18,8 @@ enum ControllerToolSection: String, CaseIterable, Identifiable {
         case .calibration: "scope"
         case .triggers: "waveform"
         case .touchpad: "hand.point.up.left"
+        case .gyro: "gyroscope"
+        case .steering: "steeringwheel"
         case .presets: "square.stack.3d.up"
         case .shortcuts: "command"
         }
@@ -47,6 +51,7 @@ struct ControllerToolsView: View {
             case .calibration: calibration
             case .triggers: triggers
             case .touchpad: touchpad
+            case .gyro, .steering: ControllerEnhancementsView(service: service, section: section)
             case .presets: presets
             case .shortcuts: shortcuts
             }
@@ -112,6 +117,18 @@ struct ControllerToolsView: View {
                     buttonGrid
                 }
             }
+            SettingsGroup("Web Controller Support") {
+                HStack {
+                    Button("Test Aim in 3s", action: browser.testAimRoute)
+                    Button("Test Steering in 3s", action: browser.testSteerRoute)
+                    Button("Check Web Support") { Task { await browser.inspectControllerWebSupport() } }
+                    Button("Test Web Rumble") { Task { await browser.testWebRumble(trigger: false) } }
+                    Button("Test Web Triggers") { Task { await browser.testWebRumble(trigger: true) } }
+                }.settingsRow()
+                Text("Test Steering drives the left stick directly for 1.5 seconds without sensors. If the car still does not turn, the fault is between the browser and the game, not the gyro settings.").font(.caption).foregroundStyle(.secondary).settingsRow()
+                Text(browser.controllerWebDiagnostics).font(.caption.monospaced()).textSelection(.enabled).settingsRow()
+                HStack { Spacer(); Button("Export Diagnostics…", action: browser.exportControllerDiagnostics) }.settingsRow()
+            }
             SettingsGroup("Test Outputs") {
                 HStack {
                     Button("Pulse Left") { service.playTestPulse(locality: .leftHandle) }
@@ -149,6 +166,7 @@ struct ControllerToolsView: View {
                     }
                 }
             }
+            ControllerEnhancementsView(service: service, section: .calibration)
             SettingsGroup("Current Correction") {
                 calibrationSummary("Left", service.settings.calibration.leftStick)
                 Divider()
@@ -164,8 +182,7 @@ struct ControllerToolsView: View {
 
     private var triggers: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Adaptive-trigger effects are synthetic category presets. xCloud does not transmit the original PS5 game-authored trigger effects.")
-                .font(.callout).foregroundStyle(.secondary)
+            ControllerEnhancementsView(service: service, section: .triggers)
             SettingsGroup("Adaptive Triggers") {
                 SettingsRow("Left trigger") {
                     AdaptiveTriggerPresetSelector(title: "Left trigger", side: .left, service: service, store: browser.inputPresets)
@@ -201,9 +218,14 @@ struct ControllerToolsView: View {
 
     private var touchpad: some View {
         VStack(alignment: .leading, spacing: 16) {
+            ControllerEnhancementsView(service: service, section: .touchpad)
             SettingsGroup("Touchpad") {
                 SettingsRow("Enable touchpad gestures") {
                     Toggle("Enable touchpad gestures", isOn: touchpadEnabled).labelsHidden().toggleStyle(.switch)
+                        .disabled(service.enhancements.touchpadAimEnabled)
+                }
+                if service.enhancements.touchpadAimEnabled {
+                    Text("Gestures are off while touchpad aiming is enabled.").font(.caption).foregroundStyle(.secondary)
                 }
                 Divider()
                 TouchpadGestureDemo()
@@ -224,7 +246,11 @@ struct ControllerToolsView: View {
                             Text("Toggle Stats").tag(ControllerNativeAction.toggleStats)
                             Text("Screenshot").tag(ControllerNativeAction.screenshot)
                             Text("Mute").tag(ControllerNativeAction.mute)
+                            ForEach(service.settings.macros) { macro in
+                                Text(macro.name).tag(ControllerNativeAction.macro(id: macro.id))
+                            }
                         }.settingsPicker()
+                            .disabled(service.enhancements.touchpadAimEnabled)
                     }
                 }
             }
@@ -236,7 +262,10 @@ struct ControllerToolsView: View {
     }
 
     private var shortcuts: some View {
-        ShortcutMacroEditor(service: service, installDefaults: installDefaultShortcuts)
+        VStack(alignment: .leading, spacing: 16) {
+            ControllerEnhancementsView(service: service, section: .shortcuts)
+            ShortcutMacroEditor(service: service, installDefaults: installDefaultShortcuts)
+        }
     }
 
     private func stick(_ label: String, value: ControllerVector2) -> some View {
@@ -285,7 +314,7 @@ struct ControllerToolsView: View {
     private var hapticMode: Binding<HapticMode> { Binding(get: { service.settings.haptics.mode }, set: { value in service.updateSettings { $0.haptics.mode = value } }) }
     private var hapticGain: Binding<Double> { Binding(get: { Double(service.settings.haptics.intensityMultiplier) }, set: { value in service.updateSettings { $0.haptics.intensityMultiplier = Float(value) } }) }
     private var hapticSharpness: Binding<Double> { Binding(get: { Double(service.settings.haptics.sharpness) }, set: { value in service.updateSettings { $0.haptics.sharpness = Float(value) } }) }
-    private var touchpadEnabled: Binding<Bool> { Binding(get: { service.settings.touchpad.isEnabled }, set: { value in service.updateSettings { $0.touchpad.isEnabled = value } }) }
+    private var touchpadEnabled: Binding<Bool> { Binding(get: { service.settings.touchpad.isEnabled && !service.enhancements.touchpadAimEnabled }, set: { value in service.updateSettings { $0.touchpad.isEnabled = value } }) }
 
     private func touchpadAction(for gesture: TouchpadGesture) -> Binding<ControllerNativeAction> {
         Binding(

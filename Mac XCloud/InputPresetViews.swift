@@ -8,11 +8,22 @@ struct InputPresetManagerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Each preset captures native controller settings and the selected Better xCloud mouse, keyboard, shortcut, and controller-remapping profiles. It is never tied to a game.")
+            Text("Profiles save controller, motion, effects and controller mappings. Game recall also keeps live picture and audio adjustments.")
                 .foregroundStyle(.secondary)
 
             storageCard
 
+            SettingsGroup("Game Profiles & Sharing") {
+                SettingsRow("Remember settings per game", note: "Creates a profile for each new game and restores it next time. Uses the game ID, with its website title as a fallback. Hardware calibration stays local.") {
+                    Toggle("Remember settings per game", isOn: $store.autoGameProfiles).labelsHidden().toggleStyle(.switch)
+                }
+                Divider()
+                HStack {
+                    Button("Import Profile…", action: store.importPresetFile)
+                    Spacer()
+                    Button("Export Saved Profile…", action: store.exportPresetFile)
+                }.settingsRow()
+            }
             SettingsGroup("Save & Create Profiles") {
                 SettingsRow("Active profile", note: store.activePreset.name) {
                     Button("Save Current Profile") { Task { await store.updatePreset(id: store.activePresetID) } }
