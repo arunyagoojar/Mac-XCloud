@@ -349,6 +349,8 @@ enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     case bowDraw
     case hydraulicBrake
     case ratchetDetents
+    case acceleratorPedal, brakePedal, handgun, revolver, rifle, automaticWeapon
+    case archery, crossbow, shield, chainsaw, flashlight, motorStart
 
     init(from decoder: Decoder) throws {
         self = Self.migrated(try decoder.singleValueContainer().decode(String.self))
@@ -396,6 +398,18 @@ enum AdaptiveTriggerCategory: String, CaseIterable, Identifiable, Sendable {
 extension AdaptiveTriggerPreset {
     var htmlName: String {
         switch self {
+        case .acceleratorPedal: "Acceleration Pedal"
+        case .brakePedal: "Brake Pedal"
+        case .handgun: "Pistol / Handgun"
+        case .revolver: "Revolver / Heavy Pistol"
+        case .rifle: "Rifle"
+        case .automaticWeapon: "Automatic Weapon"
+        case .archery: "Bow / Archery"
+        case .crossbow: "Crossbow"
+        case .shield: "Shield"
+        case .chainsaw: "Chainsaw"
+        case .flashlight: "Flashlight / Light Tool"
+        case .motorStart: "Engine / Motor Start"
         case .off: "Off"
         case .feedback: "Feedback"
         case .weapon: "Weapon"
@@ -431,6 +445,9 @@ extension AdaptiveTriggerPreset {
 
     var category: AdaptiveTriggerCategory {
         switch self {
+        case .acceleratorPedal, .brakePedal, .motorStart: .racing
+        case .handgun, .revolver, .rifle, .automaticWeapon, .archery, .crossbow: .weapons
+        case .shield, .chainsaw, .flashlight: .immersive
         case .off, .feedback, .weapon, .bowAndArrow, .vibration, .ratchetDetents: .standard
         case .acceleration, .deceleration, .engineStrain, .braking, .clutchBite, .hydraulicBrake: .racing
         case .pistolFire, .shotgunFire, .smgFire, .sniperFire, .twoStagePull, .softDetent, .progressiveRecoil, .precisionBreak, .stagedWall, .bowDraw: .weapons
@@ -439,9 +456,29 @@ extension AdaptiveTriggerPreset {
         }
     }
 
-    static let recommendedCatalog: [AdaptiveTriggerPreset] = [.off, .acceleration, .heartbeat, .precisionBreak, .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents]
+    static let recommendedCatalog: [AdaptiveTriggerPreset] = [.off, .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon, .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart]
 
     var designedResistance: [Float]? {
+        if Self.recommendedCatalog.contains(self), self != .off {
+            return (0..<10).map { i in
+                let t = Float(i) / 9
+                switch self {
+                case .acceleratorPedal: return 0.10 + 0.55*t
+                case .brakePedal: return 0.08 + 0.70*t*t
+                case .handgun: return t < 0.33 ? 0.22 : 0.48 + 0.07*(t-0.33)/0.67
+                case .revolver: return t < 0.22 ? 0.28 : 0.58 + 0.07*(t-0.22)/0.78
+                case .rifle: return 0.72
+                case .automaticWeapon: return 0.78
+                case .archery: return 0.08 + 0.70*t*t*t
+                case .crossbow: return 0.13 + 0.52*t
+                case .shield: return t < 0.10 ? 0.10 : 0.70
+                case .chainsaw: return t < 0.20 ? 0.30 : 0.48
+                case .flashlight: return 0.08
+                case .motorStart: return 0.65
+                default: return 0
+                }
+            }
+        }
         switch self {
         case .stagedWall: return [0, 0.06, 0.10, 0.14, 0.18, 0.65, 0.72, 0.78, 0.82, 0.82]
         case .clutchBite: return [0.04, 0.08, 0.18, 0.40, 0.62, 0.46, 0.28, 0.16, 0.12, 0.12]
@@ -1270,7 +1307,7 @@ struct ControllerWheelState {
             confidence = reading.source == .gravity ? 1 : max(0, min(1, (0.30 - abs(reading.vector.length - 1)) / 0.22))
         }
         // Predict from the previous trusted vector when linear acceleration corrupts the current one.
-        let basis = confidence >= 0.75 ? candidate?.vector : lastVector
+        let basis = lastVector ?? candidate?.vector
         var predicted = filtered
         if validRate, let last = filtered, let v = basis, dt > 0, dt <= 0.25 {
             let planar = v.x*v.x + v.y*v.y
@@ -1284,7 +1321,17 @@ struct ControllerWheelState {
             if confidence >= 0.75 {
                 // Reliable absolute position owns the target; no rate-dependent
                 // gain or smoothing bypass. Smooth after all stick mapping below.
-                filtered = measured
+                if reading.source == .acceleration, let prediction = predicted,
+                   filtered != nil, validRate, dt > 0, dt <= 0.10 {
+                    // Complementary fusion: gyro carries quick turns; absolute
+                    // acceleration slowly corrects drift without injecting every
+                    // hand translation into the wheel. Never move the centre.
+                    let correction = wrap(measured - prediction)
+                    let alpha = 1 - exp(-dt / 0.18)
+                    filtered = prediction + alpha * correction
+                } else {
+                    filtered = measured
+                }
             } else if let prediction = predicted, dt > 0, dt <= 0.25 {
                 let correction = (1 - exp(-dt / 0.25)) * confidence * wrap(measured - prediction)
                 let limit = max(0.002, dt * 1.5)
@@ -1633,6 +1680,86 @@ struct ControllerTouchServo {
             }
         }
         output = result
+        return result
+    }
+}
+
+/// Pressure-driven local effects. These are not game/weapon telemetry.
+/// Schedule against monotonic time; never replay missed pulses after a stall.
+struct ControllerTriggerEnvelope {
+    struct Output {
+        var intensity: Float = 0
+        var duration: Double = 0.03
+        var forceBoost: Float = 0
+    }
+    private var preset: AdaptiveTriggerPreset = .off
+    private var previous: Float = 0
+    private var peak: Float = 0
+    private var nextPulse: Double = 0
+    private var recoilEnd: Double = 0
+    private var lastTime: Double?
+    mutating func sample(preset mode: AdaptiveTriggerPreset, pressure: Float, now: Double) -> Output {
+        guard now.isFinite, pressure.isFinite else { self = Self(); return Output() }
+        if mode != preset || lastTime.map({ now - $0 > 0.25 || now < $0 }) == true {
+            self = Self(); preset = mode; previous = min(max(pressure, 0), 1)
+        }
+        lastTime = now
+        let p = min(max(pressure, 0), 1)
+        defer { previous = p }
+        peak = max(peak, p)
+        var result = Output()
+        let threshold: Float
+        let frequency: Double
+        switch mode {
+        case .handgun: threshold = 0.33; frequency = 0
+        case .revolver: threshold = 0.22; frequency = 0
+        case .rifle: threshold = 0.80; frequency = 7
+        case .automaticWeapon: threshold = 0.75; frequency = 12
+        case .archery: threshold = 0.20; frequency = 3
+        case .crossbow: threshold = 0.20; frequency = 4
+        case .shield: threshold = 0.10; frequency = 4
+        case .chainsaw: threshold = 0.20; frequency = 9
+        case .motorStart: threshold = 0.30; frequency = 6
+        case .brakePedal: threshold = 0.45; frequency = 8
+        case .flashlight: threshold = 0.10; frequency = 0
+        default: threshold = 1.1; frequency = 0
+        }
+        if p <= 0.04 {
+            if previous > 0.04, peak >= threshold {
+                switch mode {
+                case .handgun, .revolver: result.intensity = 0.60; result.duration = 0.06
+                case .archery: result.intensity = 0.80; result.duration = 0.05
+                case .crossbow: result.intensity = 0.60; result.duration = 0.04
+                default: break
+                }
+            }
+            peak = 0; nextPulse = 0; recoilEnd = 0
+            return result
+        }
+        let crossing = previous < threshold && p >= threshold
+        if crossing {
+            nextPulse = now
+            if mode == .handgun || mode == .revolver { result.intensity = mode == .revolver ? 0.7 : 0.55; result.duration = 0.025 }
+            if mode == .flashlight { result.intensity = 0.4; result.duration = 0.025 }
+        }
+        if p >= threshold, frequency > 0, now >= nextPulse {
+            nextPulse = max(nextPulse + 1 / frequency, now + 0.001)
+            switch mode {
+            case .rifle: result.intensity = 0.75; result.duration = 0.10; recoilEnd = now + 0.10
+            case .automaticWeapon: result.intensity = 0.80; result.duration = 0.025; recoilEnd = now + 0.025
+            case .brakePedal: result.intensity = 0.25*(p-threshold)/(1-threshold); result.duration = 0.08
+            case .archery: result.intensity = 0.5*p*p; result.duration = 0.30
+            case .crossbow: result.intensity = 0.3*p; result.duration = 0.20
+            case .shield: result.intensity = crossing ? 1 : 0.5; result.duration = crossing ? 0.08 : 0.20
+            case .chainsaw: result.intensity = 0.75; result.duration = 0.08; recoilEnd = now + 0.05
+            case .motorStart: result.intensity = 0.55; result.duration = 0.12; recoilEnd = now + 0.06
+            default: break
+            }
+        }
+        if p < threshold { recoilEnd = 0; nextPulse = 0 }
+        if now < recoilEnd {
+            result.forceBoost = mode == .automaticWeapon ? 0.22 : (mode == .motorStart ? 0.15 : 0.20)
+        }
         return result
     }
 }

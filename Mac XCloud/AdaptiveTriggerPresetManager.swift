@@ -279,5 +279,6 @@ struct AdaptiveTriggerPresetSelector: View {
                 Text("Current Custom Snapshot").tag(AdaptiveTriggerSelection.currentCustomSnapshot)
             }
         }.settingsPicker()
+        .help("Resistance stays active through the pull. New modes add pressure-driven handle haptics; these simulate actions locally and do not read the game's weapon. Adjust Haptic intensity to scale the pulses. Hardware approximates curves with ten resistance zones.")
     }
 }

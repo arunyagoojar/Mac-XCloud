@@ -256,6 +256,14 @@ struct SettingsRootView: View {
                     Text("5 main areas").foregroundStyle(.secondary)
                 }
             }
+            SettingsGroup("App shortcuts") {
+                SettingsRow("Back while browsing", note: "Backspace only works outside text fields and gameplay.") { Text("⌘[ or Backspace") }
+                SettingsRow("Forward") { Text("⌘]") }
+                SettingsRow("Xbox home") { Text("⇧⌘L") }
+                SettingsRow("Open Settings") { Text("⌘,") }
+                SettingsRow("Reload page") { Text("⌘R") }
+                SettingsRow("Fullscreen") { Text("⌃⌘F") }
+            }
             suggestedButton
             if let message = model.saveMessage {
                 Text(message).font(.caption).foregroundStyle(.secondary)

@@ -68,6 +68,16 @@ struct WebView: NSViewRepresentable {
               window.webkit.messageHandlers.spikeHandler.postMessage(Object.assign({ type: type }, data));
             } catch (e) {}
           }
+          // Browsing shortcut only: preserve text deletion and all game input.
+          document.addEventListener('keydown', function (event) {
+            if (event.key !== 'Backspace' || event.repeat || event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+            var path = event.composedPath ? event.composedPath() : [event.target];
+            if (path.some(function (node) { return node && (node.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName || '') || (node.getAttribute && node.getAttribute('role') === 'textbox')); })) return;
+            var bridge = window.BxCBridge;
+            if (!bridge || !bridge.streamInfo || bridge.streamInfo().playing) return;
+            event.preventDefault();
+            send('navigate-back', {});
+          });
           var didSendReady = false;
           function sendSiteReady() {
             if (didSendReady) return;

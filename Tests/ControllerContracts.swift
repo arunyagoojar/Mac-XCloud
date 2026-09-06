@@ -80,7 +80,7 @@ struct ControllerContracts {
         check(ControllerMotionProjection.yaw(x: 0, y: 0, z: 1, gx: 0, gy: 0, gz: -1) == 1, "Flat-held controller uses Z rotation for yaw")
         check(ControllerMotionProjection.yaw(x: 0, y: 1, z: 0, gx: 0, gy: -1, gz: 0) == 1, "Upright controller uses Y rotation for yaw")
         check(ControllerMotionProjection.yaw(x: .nan, y: 0, z: 0, gx: 0, gy: -1, gz: 0) == 0, "Invalid motion stays neutral")
-        check(!AdaptiveTriggerPreset.recommendedCatalog.contains(.rain) && AdaptiveTriggerPreset.recommendedCatalog.contains(.heartbeat), "Curated catalog removes legacy vibration presets but retains Heartbeat")
+        check(!AdaptiveTriggerPreset.recommendedCatalog.contains(.rain) && AdaptiveTriggerPreset.recommendedCatalog.contains(.brakePedal), "New catalog replaces legacy defaults with the requested pedal modes")
         for mode in [AdaptiveTriggerPreset.clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents, .stagedWall] {
             check(mode.designedResistance?.count == 10 && mode.designedResistance!.allSatisfy { $0 >= 0 && $0 <= 1 }, "Curated positional effect has ten bounded zones: \(mode.rawValue)")
         }
@@ -335,7 +335,7 @@ struct ControllerContracts {
                 // Deliberately inverted gyro projection: it must not fight angle input.
                 for frame in 1...600 {
                     let position = direction * Double(frame) / 60 * (Double.pi / 180)
-                    _ = preciseWheel.sample(wheelReading(position),
+                    _ = preciseWheel.sample(wheelReading(position, gravity: true),
                         rate: ControllerMotionVector(x: 0, y: 0, z: direction * Double.pi / 180), now: Double(frame)/60)
                     let mapped = ControllerAimMath.steering(angle: preciseWheel.angle, centre: 0, range: 25 * .pi/180, floor: 0)
                     let finalOutput = slowResponse.sample(target: Double(mapped), now: Double(frame)/60, smoothing: smooth)
@@ -346,7 +346,7 @@ struct ControllerContracts {
                 _ = preciseWheel.sample(wheelReading(0), rate: .zero, now: 0)
                 for frame in 1...60 {
                     let position = direction * Double(frame)/60 * 25 * .pi/180
-                    _ = preciseWheel.sample(wheelReading(position),
+                    _ = preciseWheel.sample(wheelReading(position, gravity: true),
                         rate: ControllerMotionVector(x: 0, y: 0, z: direction * 25 * .pi/180), now: Double(frame)/60)
                 }
                 let lock = ControllerAimMath.steering(angle: preciseWheel.angle, centre: 0, range: 25 * .pi/180, floor: 0)
@@ -439,6 +439,36 @@ struct ControllerContracts {
         check(restoredSteering.effectiveSteeringMaximum == 0.6, "Maximum steering survives profile serialization")
         limitedSteering.steeringMaximum = .nan
         check(limitedSteering.effectiveSteeringMaximum == 1, "Invalid maximum steering safely falls back to full output")
+        check(AdaptiveTriggerPreset.recommendedCatalog.count == 13, "Twelve requested modes plus Off are offered")
+        for mode in AdaptiveTriggerPreset.recommendedCatalog where mode != .off {
+            let zones = mode.designedResistance!
+            check(zones.count == 10 && zones.allSatisfy { $0 > 0 && $0 <= 1 }, "\(mode) keeps valid resistance through full pull")
+        }
+        var shot = ControllerTriggerEnvelope()
+        _ = shot.sample(preset: .handgun, pressure: 0, now: 0)
+        check(shot.sample(preset: .handgun, pressure: 0.5, now: 0.016).intensity > 0, "Pistol break produces one impulse")
+        check(shot.sample(preset: .handgun, pressure: 0.5, now: 0.032).intensity == 0, "Holding a pistol does not repeat break impulses")
+        check(shot.sample(preset: .handgun, pressure: 0, now: 0.048).intensity == 0.6, "Pistol release produces a separate kick")
+        check(shot.sample(preset: .handgun, pressure: 0, now: 0.064).intensity == 0, "Release kick cannot repeat at rest")
+        var automatic = ControllerTriggerEnvelope()
+        _ = automatic.sample(preset: .automaticWeapon, pressure: 0, now: 0)
+        let firing = automatic.sample(preset: .automaticWeapon, pressure: 1, now: 0.016)
+        check(firing.intensity > 0 && firing.forceBoost > 0, "Automatic fire combines haptics and bounded resistance recoil")
+        check(automatic.sample(preset: .automaticWeapon, pressure: 1, now: 0.05).forceBoost == 0, "Recoil spike expires while trigger stays held")
+        check(automatic.sample(preset: .automaticWeapon, pressure: 0, now: 0.07).forceBoost == 0, "Release clears recoil immediately")
+        var disturbed = ControllerWheelState()
+        _ = disturbed.sample(wheelReading(0), rate: .zero, now: 0)
+        let disturbedAngle = disturbed.sample(wheelReading(0.25), rate: .zero, now: 1.0/60)!
+        check(abs(disturbedAngle) < 0.03, "A one-frame accelerometer disturbance cannot abruptly steer by fourteen degrees")
+        var slowRaw = ControllerWheelState()
+        _ = slowRaw.sample(wheelReading(0), rate: .zero, now: 0)
+        var rawError: Float = 0
+        for frame in 1...600 {
+            let angle = Double(frame)/60 * Double.pi/180
+            let actual = slowRaw.sample(wheelReading(angle), rate: ControllerMotionVector(x: 0, y: 0, z: -Double.pi/180), now: Double(frame)/60)!
+            rawError = max(rawError, abs(actual - Float(angle)))
+        }
+        check(rawError < 0.001, "Gyro-assisted raw acceleration follows one-degree-per-second turns without deadband")
         print("\(checks) controller/model contract checks passed. No hardware or user data touched.")
     }
 }

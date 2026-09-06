@@ -60,12 +60,16 @@ jobs:
             -derivedDataPath build \
             ARCHS="arm64 x86_64" \
             ONLY_ACTIVE_ARCH=NO \
-                        MARKETING_VERSION=${{ steps.version.outputs.short }} \
+            MARKETING_VERSION=${{ steps.version.outputs.short }} \
             CURRENT_PROJECT_VERSION=${{ steps.version.outputs.build }} \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=YES \
             build
+
+      - name: Verify universal executable before publishing
+        run: |
+          lipo -verify_arch arm64 x86_64 "build/Build/Products/Release/Mac Xcloud.app/Contents/MacOS/Mac Xcloud"
 
       - name: Zip app bundle
         run: |
@@ -107,30 +111,12 @@ jobs:
           echo "sig=$SIG" >> "$GITHUB_OUTPUT"
           echo "len=$LEN" >> "$GITHUB_OUTPUT"
 
-      - name: Write release notes
+      - name: Prepare versioned release notes
+        env:
+          SHORT: ${{ steps.version.outputs.short }}
         run: |
-          cat > release-notes.md <<EOF
-          ## Mac Xcloud ${{ steps.version.outputs.short }}
-
-          ### Stability
-          - Restarts native controller polling after disconnect/reconnect.
-          - Unifies controller identity across native input, LED, haptics, and adaptive triggers.
-          - Prevents Controller Tools and profile windows from stealing browser controller input.
-          - Restores browser Gamepad polling after navigation and bridge readiness.
-          - Hardens window reuse and controller lifecycle cleanup.
-
-          ### Controller and triggers
-          - Detects controllers that were already connected before Mac Xcloud launched.
-          - Rescans the browser Gamepad list after native connect/current notifications.
-          - Starts native/browser controller synchronization as soon as the Xbox window is visible, so launch does not depend on switching away and back.
-          - Retries WebKit Gamepad availability during startup and synchronizes browser controller events.
-          - Keeps adaptive-trigger modes available from the Left Trigger and Right Trigger app menus.
-          - Coalesces touchpad fallback work and avoids unnecessary haptic engine rebuilds.
-
-          ### Compatibility
-          - Keeps macOS 12.0 as the minimum supported version.
-          - Corrects Sparkle update eligibility for macOS 12.0 and newer.
-          EOF
+          cp "docs/releases/$SHORT.md" release-notes.md
+          python3 tools/render-release-notes.py release-notes.md "$RUNNER_TEMP/release-notes.html"
 
       - name: Publish GitHub Release
         env:
@@ -167,6 +153,7 @@ jobs:
           export DOWNLOAD_URL REPO_NAME COMMIT_SHA
           python3 <<'PYEOF'
           import os, re, datetime
+          from pathlib import Path
 
           url = os.environ["DOWNLOAD_URL"]
           sig = "${{ steps.sign.outputs.sig }}"
@@ -174,7 +161,7 @@ jobs:
           version = os.environ["SHORT_VERSION"]
           build = os.environ["BUILD_VERSION"]
           repo = os.environ["REPO_NAME"]
-          sha = os.environ["COMMIT_SHA"]
+          release_html = Path(os.environ["RUNNER_TEMP"], "release-notes.html").read_text(encoding="utf-8")
           tag = os.environ["TAG_NAME"]
           date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
 
@@ -184,7 +171,7 @@ jobs:
           \t\t\t<sparkle:shortVersionString>{version}</sparkle:shortVersionString>
           \t\t\t<link>https://github.com/{repo}/releases/tag/{tag}</link>
           \t\t\t<sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-          \t\t\t<description><![CDATA[<p>Automatic build from commit {sha}.</p>]]></description>
+          \t\t\t<description><![CDATA[{release_html}]]></description>
           \t\t\t<pubDate>{date_str}</pubDate>
           \t\t\t<enclosure url="{url}" sparkle:edSignature="{sig}" length="{length}" type="application/octet-stream" />
           \t\t</item>

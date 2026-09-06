@@ -1,0 +1,11 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync(`${__dirname}/../Mac XCloud/better-xcloud.js`,'utf8');
+const code=source.slice(source.indexOf('class RemotePlayManager')).split('\n')[0];
+let shown=0,now=100000;
+const context={Date:{now:()=>now},BxLogger:{info(){}},Toast:{show(){}},t:x=>x,RemotePlayDialog:{getInstance:()=>({show(){shown++}})},getGlobalPref:()=>[]};
+vm.createContext(context);vm.runInContext(code+';globalThis.Manager=RemotePlayManager;',context);
+const m=new context.Manager();
+assert.equal(m.isReady(),false); m.consoles=[];assert.equal(m.isReady(),true);
+m.consoles=[{id:'test'}];m.consolesUpdatedAt=now;m.togglePopup();assert.equal(shown,1);
+let refreshed=0;m.getConsolesList=callback=>{refreshed++;callback()};now+=16000;m.togglePopup();assert.equal(refreshed,1);assert.equal(shown,2);
+console.log('PASS: undefined console list is not ready; expired list refreshes before reopening without recursion');

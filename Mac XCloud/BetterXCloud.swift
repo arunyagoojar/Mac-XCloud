@@ -684,6 +684,11 @@ enum BetterXCloud {
           setGlobal: function (k, v) {
             if (!isGlobalPref(k)) throw new Error("Setting is not global: " + k);
             setGlobalPref(k, v, "ui");
+            if (k === "ui.theme") {
+              var style = document.getElementById("xcg-live-theme");
+              if (!style) { style = document.createElement("style"); style.id = "xcg-live-theme"; (document.head || document.documentElement).appendChild(style); }
+              style.textContent = getGlobalPref(k) === "dark-oled" ? 'html,body,body[data-theme="dark"]{background-color:#000!important;--gds-containerSolidAppBackground:#000!important;--gds-backgroundPrimary:#000!important}' : '';
+            }
             return getGlobalPref(k);
           },
           getStream: function (k) {

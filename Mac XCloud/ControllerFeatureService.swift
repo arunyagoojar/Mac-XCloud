@@ -471,6 +471,7 @@ final class ControllerFeatureService: ObservableObject {
         let rawLeftTrigger = gamepad.leftTrigger.value
         let rawRightTrigger = gamepad.rightTrigger.value
         let dualSense = gamepad as? GCDualSenseGamepad
+        if let dualSense { updateTriggerEnvelopes(dualSense, at: timestamp) }
 
         let next = ControllerInputSnapshot(
             timestamp: timestamp,
@@ -760,9 +761,37 @@ final class ControllerFeatureService: ObservableObject {
         settings = newSettings
     }
 
+    private var leftTriggerEnvelope = ControllerTriggerEnvelope()
+    private var rightTriggerEnvelope = ControllerTriggerEnvelope()
+    private var leftTriggerBoost: Float = 0
+    private var rightTriggerBoost: Float = 0
+
+    private func updateTriggerEnvelopes(_ gamepad: GCDualSenseGamepad, at now: Double) {
+        let t = settings.adaptiveTriggers
+        let left = leftTriggerEnvelope.sample(preset: t.leftUsesCustom || enhancements.leftLock ? .off : t.leftPreset, pressure: gamepad.leftTrigger.value, now: now)
+        let right = rightTriggerEnvelope.sample(preset: t.rightUsesCustom || enhancements.rightLock ? .off : t.rightPreset, pressure: gamepad.rightTrigger.value, now: now)
+        for (event, locality) in [(left, HapticLocality.leftHandle), (right, HapticLocality.rightHandle)] where event.intensity > 0 {
+            playTestPulse(intensity: event.intensity, sharpness: 0.7, duration: event.duration, locality: locality, sustained: true)
+        }
+        if left.forceBoost != leftTriggerBoost {
+            leftTriggerBoost = left.forceBoost
+            if !t.leftUsesCustom && !enhancements.leftLock, let levels = t.leftPreset.designedResistance {
+                applyResistanceZones(gamepad.leftTrigger, levels: levels.map { min($0 + left.forceBoost, 1) }, fallback: levels.last ?? 0)
+            }
+        }
+        if right.forceBoost != rightTriggerBoost {
+            rightTriggerBoost = right.forceBoost
+            if !t.rightUsesCustom && !enhancements.rightLock, let levels = t.rightPreset.designedResistance {
+                applyResistanceZones(gamepad.rightTrigger, levels: levels.map { min($0 + right.forceBoost, 1) }, fallback: levels.last ?? 0)
+            }
+        }
+    }
+
     // MARK: - Adaptive triggers
 
     func applyAdaptiveTriggerSettings() {
+        leftTriggerEnvelope = ControllerTriggerEnvelope(); rightTriggerEnvelope = ControllerTriggerEnvelope()
+        leftTriggerBoost = 0; rightTriggerBoost = 0
         guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else { return }
         if settings.adaptiveTriggers.leftUsesCustom {
             applyCustomAdaptiveTrigger(dualSense.leftTrigger, parameters: settings.adaptiveTriggers.leftCustom)
@@ -789,6 +818,9 @@ final class ControllerFeatureService: ObservableObject {
             return
         }
         switch preset {
+        case .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon,
+             .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart:
+            break // Positional resistance above; independent haptics follow pull events.
         case .precisionBreak:
             trigger.setModeWeaponWithStartPosition(0.18, endPosition: 0.38, resistiveStrength: 0.65)
         case .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents:
@@ -934,7 +966,8 @@ final class ControllerFeatureService: ObservableObject {
         intensity: Float? = nil,
         sharpness: Float? = nil,
         duration: TimeInterval = 0.12,
-        locality: HapticLocality? = nil
+        locality: HapticLocality? = nil,
+        sustained: Bool = false
     ) {
         guard settings.haptics.mode != .off else { return }
         let target = locality ?? settings.haptics.preferredLocality
@@ -954,7 +987,7 @@ final class ControllerFeatureService: ObservableObject {
                 CHHapticEventParameter(parameterID: .hapticSharpness, value: finalSharpness),
             ]
             let event = CHHapticEvent(
-                eventType: finalDuration <= 0.08 ? .hapticTransient : .hapticContinuous,
+                eventType: !sustained && finalDuration <= 0.08 ? .hapticTransient : .hapticContinuous,
                 parameters: parameters,
                 relativeTime: 0,
                 duration: finalDuration

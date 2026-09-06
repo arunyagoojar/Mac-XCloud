@@ -849,6 +849,8 @@ final class BrowserModel: ObservableObject {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
 
         switch type {
+        case "navigate-back":
+            if !isStreaming && !isSettingsWindowOpen { goBack() }
         case "env":
             report.pageURL = body["url"] as? String
             report.gamepadAPI = (body["gamepadAPI"] as? Bool) ?? false
