@@ -13,7 +13,7 @@ You need the account, subscription and region access required by Xbox for the ga
 ## What's new in 1.3.7
 
 - More usable motion steering: gyro-assisted tracking reduces accelerometer jolts while preserving small corrections and held turns.
-- Twelve new default adaptive-trigger designs with pressure-driven haptics and release/recoil effects.
+- DualSenseX-style adaptive-trigger menu: GameCube, Resistance, Bow, Galloping, gun modes, Choppy, a Very Soft–Rigid resistance ladder, Calibrate and the Vibrate presets, with pressure-driven haptics and release/recoil effects.
 - Live OLED background updates and clearer reload requirements for settings.
 - A clean play area: browsing uses shortcuts instead of permanent Back/Home buttons.
 - Fresh console status when reopening Remote Play, plus a release check for both Mac architectures.
@@ -77,27 +77,31 @@ These are controller-to-stick translations, not a system-wide virtual steering-w
 
 ### Adaptive triggers
 
-The current default menu offers **Off** and twelve designs:
+The default menu mirrors the DualSenseX trigger list. "Custom Trigger Value" applies your custom editor settings; every named mode maps to the controller's documented effect primitives (positions ×9 zones, strengths ×8, frequencies ÷255):
 
-| Mode | Intended feel |
+| Mode | Mapped effect |
 | --- | --- |
-| Acceleration Pedal | Gradual linear resistance through the pull |
-| Brake Pedal | Progressive quadratic resistance and pressure-driven haptics |
-| Pistol / Handgun | Two stages, a break impulse and a release kick |
-| Revolver / Heavy Pistol | Earlier, heavier engagement and release feedback |
-| Rifle | Heavy resistance and paced recoil while deeply pressed |
-| Automatic Weapon | Sustained rhythmic recoil at deep pull |
-| Bow / Archery | Cubic resistance, building tension and release feedback |
-| Crossbow | Lighter linear draw and a crisp release |
-| Shield | Early resistance engagement and sustained haptics |
-| Chainsaw | Heavy resistance with mechanical pulses |
-| Flashlight / Light Tool | Light resistance and a short activation pulse |
-| Engine / Motor Start | Heavy resistance with an idle rhythm |
+| Normal Trigger | Off; the trigger keeps its physical spring |
+| Custom Trigger Value | Your custom editor values (mode, positions, strengths, amplitude, speed) |
+| GameCube Trigger | Light pull, then a hard digital wall near 78% travel with a release click |
+| Resistance Trigger | Continuous resistance (50%) from rest |
+| Bow Trigger | Draw resistance that snaps at 78% |
+| Galloping Trigger | Slow rhythmic vibration approximating the two-foot gallop |
+| Semi Automatic Gun | Resistance that breaks once per pull at 44% |
+| Automatic Gun | Full-amplitude vibration at DualSenseX's documented rate 15 |
+| Machine Trigger | Full-amplitude slow vibration with a mechanical handle-haptic rhythm |
+| Choppy Trigger | Stepped resistance alternating across the ten hardware zones |
+| Very Soft → Hardest | Continuous resistance from 25% to 88% |
+| Rigid Trigger | Full resistance from rest; travel is fully blocked |
+| Calibrate Trigger | Resistance sweeping from none to full across the whole pull |
+| Vibrate Trigger Pulse | Slow, strong vibration pulses |
+| Vibrate Trigger 10 Intensity | Gentle vibration (DualSenseX intensity 10 ≈ 3/8 amplitude) |
+| Vibrate Trigger Custom Intensity | Vibration using your custom amplitude and speed |
 
 - Independent effects for left and right triggers, also selectable from the Mac menus.
 - Custom constant, break/release, slope, smooth curve, staged, detent and vibration/ramp designs.
 - Editable strengths, travel positions, vibration amplitude/frequency and curve previews.
-- Saved custom-trigger library; older saved designs remain loadable as previous selections.
+- Saved custom-trigger library; older saved designs — including the previous twelve-design default menu — remain loadable as previous selections.
 - Resistance remains active while independent handle haptics provide local feedback. Locks and custom effects take priority.
 
 Adaptive resistance requires a supported DualSense. Positional resistance uses ten hardware zones on macOS 12.3+, with simpler fallback on 12.0–12.2. Effects approximate the intended feel; percentages are API strengths, not calibrated physical forces. These are **local simulations**, not Xbox weapon telemetry, and cannot automatically identify the gun you equip. The app does not promise native PS5 force-feedback parity.

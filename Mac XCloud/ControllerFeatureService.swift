@@ -796,12 +796,14 @@ final class ControllerFeatureService: ObservableObject {
         if settings.adaptiveTriggers.leftUsesCustom {
             applyCustomAdaptiveTrigger(dualSense.leftTrigger, parameters: settings.adaptiveTriggers.leftCustom)
         } else {
-            applyAdaptiveTrigger(dualSense.leftTrigger, preset: settings.adaptiveTriggers.leftPreset)
+            applyAdaptiveTrigger(dualSense.leftTrigger, preset: settings.adaptiveTriggers.leftPreset,
+                                 custom: settings.adaptiveTriggers.leftCustom)
         }
         if settings.adaptiveTriggers.rightUsesCustom {
             applyCustomAdaptiveTrigger(dualSense.rightTrigger, parameters: settings.adaptiveTriggers.rightCustom)
         } else {
-            applyAdaptiveTrigger(dualSense.rightTrigger, preset: settings.adaptiveTriggers.rightPreset)
+            applyAdaptiveTrigger(dualSense.rightTrigger, preset: settings.adaptiveTriggers.rightPreset,
+                                 custom: settings.adaptiveTriggers.rightCustom)
         }
         let e = enhancements
         let position = min(max(e.lockPosition, 0.05), 0.95)
@@ -809,9 +811,12 @@ final class ControllerFeatureService: ObservableObject {
         if e.rightLock { dualSense.rightTrigger.setModeFeedbackWithStartPosition(position, resistiveStrength: 1) }
     }
 
+    /// DualSenseX default-menu mapping. DSX raw values convert to Apple's
+    /// normalized scales as positions ×9 zones, strengths ×8, frequencies ÷255.
     private func applyAdaptiveTrigger(
         _ trigger: GCDualSenseAdaptiveTrigger,
-        preset: AdaptiveTriggerPreset
+        preset: AdaptiveTriggerPreset,
+        custom: AdaptiveTriggerCustomParameters
     ) {
         if let strengths = preset.designedResistance ?? preset.pedalStrengths {
             applyResistanceZones(trigger, levels: strengths, fallback: strengths.last ?? 0.2)
@@ -821,16 +826,42 @@ final class ControllerFeatureService: ObservableObject {
         case .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon,
              .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart:
             break // Positional resistance above; independent haptics follow pull events.
-        case .precisionBreak:
-            trigger.setModeWeaponWithStartPosition(0.18, endPosition: 0.38, resistiveStrength: 0.65)
-        case .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents:
-            break // The positional design above owns these effects.
+        case .gameCubeTrigger, .choppyTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger,
+             .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger, .calibrateTrigger:
+            break // Positional resistance above; independent haptics follow pull events.
+        case .resistanceTrigger:
+            trigger.setModeFeedbackWithStartPosition(0, resistiveStrength: 0.50)
+        case .bowTrigger:
+            // DSX Bow (start, end, strength, snap): draw resistance, then the release.
+            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.78, resistiveStrength: 0.90)
+        case .semiAutomaticGun:
+            // Official weapon effect, formerly named SemiAutomaticGun.
+            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.44, resistiveStrength: 0.90)
+        case .automaticGun:
+            // DSX documented example (0)(8)(15): full amplitude, rate 15/255.
+            trigger.setModeVibrationWithStartPosition(0, amplitude: 1.0, frequency: 0.06)
+        case .galloping:
+            // Discernable only at low rates; approximate the two-foot rhythm.
+            trigger.setModeVibrationWithStartPosition(0.10, amplitude: 0.65, frequency: 0.07)
+        case .machineGun:
+            // DSX example (0)(9)(7)(7)(10): full amplitude, slow mechanical rate.
+            trigger.setModeVibrationWithStartPosition(0, amplitude: 1.0, frequency: 0.04)
+        case .vibrateTriggerPulse:
+            trigger.setModeVibrationWithStartPosition(0.05, amplitude: 0.90, frequency: 0.09)
+        case .vibrateTriggerTenIntensity:
+            // DSX VibrateTriggerIntensity=10 of 0-255 ≈ 3/8 on the official 0-8 scale.
+            trigger.setModeVibrationWithStartPosition(0.05, amplitude: 0.31, frequency: 0.50)
+        case .vibrateTriggerCustomIntensity:
+            let value = custom.clamped
+            trigger.setModeVibrationWithStartPosition(0.05, amplitude: value.amplitude, frequency: value.frequency)
         case .off:
             trigger.setModeOff()
         case .feedback:
             trigger.setModeFeedbackWithStartPosition(0.25, resistiveStrength: 0.35)
         case .weapon:
             trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.67, resistiveStrength: 0.75)
+        case .precisionBreak:
+            trigger.setModeWeaponWithStartPosition(0.18, endPosition: 0.38, resistiveStrength: 0.65)
         case .bowAndArrow:
             applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .slopeFeedback, startPosition: 0.10, endPosition: 0.90, startStrength: 0.15, endStrength: 0.95, amplitude: 0, frequency: 0))
         case .vibration:
@@ -849,10 +880,6 @@ final class ControllerFeatureService: ObservableObject {
             trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.32, frequency: 0.48)
         case .sniperFire:
             trigger.setModeWeaponWithStartPosition(0.38, endPosition: 0.48, resistiveStrength: 0.86)
-        case .galloping:
-            trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.42, frequency: 0.24)
-        case .machineGun:
-            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.78, frequency: 0.72)
         case .fishing:
             applySlopeFeedback(trigger, start: 0.18, end: 0.90, startStrength: 0.12, endStrength: 0.65)
         case .triggerJam:
@@ -871,6 +898,8 @@ final class ControllerFeatureService: ObservableObject {
             applyResistanceZones(trigger, levels: [0.04, 0.06, 0.10, 0.34, 0.50, 0.30, 0.14, 0.10, 0.10, 0.10], fallback: 0.20)
         case .progressiveRecoil:
             applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .vibrationRamp, startPosition: 0.18, endPosition: 0.85, startStrength: 0, endStrength: 0, amplitude: 0.72, frequency: 0.42))
+        case .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents:
+            break // The positional design above owns these effects.
         }
     }
 

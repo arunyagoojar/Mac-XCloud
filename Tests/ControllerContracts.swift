@@ -80,7 +80,7 @@ struct ControllerContracts {
         check(ControllerMotionProjection.yaw(x: 0, y: 0, z: 1, gx: 0, gy: 0, gz: -1) == 1, "Flat-held controller uses Z rotation for yaw")
         check(ControllerMotionProjection.yaw(x: 0, y: 1, z: 0, gx: 0, gy: -1, gz: 0) == 1, "Upright controller uses Y rotation for yaw")
         check(ControllerMotionProjection.yaw(x: .nan, y: 0, z: 0, gx: 0, gy: -1, gz: 0) == 0, "Invalid motion stays neutral")
-        check(!AdaptiveTriggerPreset.recommendedCatalog.contains(.rain) && AdaptiveTriggerPreset.recommendedCatalog.contains(.brakePedal), "New catalog replaces legacy defaults with the requested pedal modes")
+        check(!AdaptiveTriggerPreset.recommendedCatalog.contains(.rain) && AdaptiveTriggerPreset.recommendedCatalog.contains(.resistanceTrigger), "New catalog replaces legacy defaults with the DualSenseX-style modes")
         for mode in [AdaptiveTriggerPreset.clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents, .stagedWall] {
             check(mode.designedResistance?.count == 10 && mode.designedResistance!.allSatisfy { $0 >= 0 && $0 <= 1 }, "Curated positional effect has ten bounded zones: \(mode.rawValue)")
         }
@@ -439,11 +439,29 @@ struct ControllerContracts {
         check(restoredSteering.effectiveSteeringMaximum == 0.6, "Maximum steering survives profile serialization")
         limitedSteering.steeringMaximum = .nan
         check(limitedSteering.effectiveSteeringMaximum == 1, "Invalid maximum steering safely falls back to full output")
-        check(AdaptiveTriggerPreset.recommendedCatalog.count == 13, "Twelve requested modes plus Off are offered")
-        for mode in AdaptiveTriggerPreset.recommendedCatalog where mode != .off {
+        check(AdaptiveTriggerPreset.recommendedCatalog.count == 20, "DualSenseX-style default menu offers twenty built-in modes; Custom Trigger Value uses the editor")
+        check(AdaptiveTriggerPreset.recommendedCatalog.first == .off && AdaptiveTriggerPreset.recommendedCatalog.last == .vibrateTriggerCustomIntensity, "Catalog order mirrors the DualSenseX menu")
+        for mode in [AdaptiveTriggerPreset.gameCubeTrigger, .choppyTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger,
+                     .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger, .calibrateTrigger] {
             let zones = mode.designedResistance!
-            check(zones.count == 10 && zones.allSatisfy { $0 > 0 && $0 <= 1 }, "\(mode) keeps valid resistance through full pull")
+            check(zones.count == 10 && zones.allSatisfy { $0 >= 0 && $0 <= 1 }, "\(mode) keeps ten bounded resistance zones")
         }
+        let ladder = [AdaptiveTriggerPreset.verySoftTrigger, .softTrigger, .mediumTrigger, .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger]
+            .map { $0.designedResistance![0] }
+        check(zip(ladder, ladder.dropFirst()).allSatisfy { $0 < $1 }, "Resistance ladder rises from Very Soft to Rigid")
+        check(AdaptiveTriggerPreset.rigidTrigger.designedResistance![0] == 1 && AdaptiveTriggerPreset.hardestTrigger.designedResistance![0] < 1, "Rigid alone fully blocks travel")
+        var click = ControllerTriggerEnvelope()
+        _ = click.sample(preset: .gameCubeTrigger, pressure: 0, now: 0)
+        check(click.sample(preset: .gameCubeTrigger, pressure: 0.9, now: 1.0/60).intensity == 0, "GameCube wall holds without repeating impulses")
+        check(click.sample(preset: .gameCubeTrigger, pressure: 0, now: 2.0/60).intensity == 0.70, "GameCube release produces the digital click kick")
+        var semi = ControllerTriggerEnvelope()
+        _ = semi.sample(preset: .semiAutomaticGun, pressure: 0, now: 0)
+        _ = semi.sample(preset: .semiAutomaticGun, pressure: 0.6, now: 1.0/60)
+        check(semi.sample(preset: .semiAutomaticGun, pressure: 0, now: 2.0/60).intensity == 0.65, "Semi-automatic release kicks after the break")
+        var machine = ControllerTriggerEnvelope()
+        _ = machine.sample(preset: .machineGun, pressure: 0, now: 0)
+        let bursts = machine.sample(preset: .machineGun, pressure: 0.8, now: 1.0/60)
+        check(bursts.intensity > 0 && bursts.forceBoost > 0, "Machine mode rhythm combines haptics and bounded recoil")
         var shot = ControllerTriggerEnvelope()
         _ = shot.sample(preset: .handgun, pressure: 0, now: 0)
         check(shot.sample(preset: .handgun, pressure: 0.5, now: 0.016).intensity > 0, "Pistol break produces one impulse")

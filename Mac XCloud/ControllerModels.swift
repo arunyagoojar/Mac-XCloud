@@ -351,6 +351,9 @@ enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     case ratchetDetents
     case acceleratorPedal, brakePedal, handgun, revolver, rifle, automaticWeapon
     case archery, crossbow, shield, chainsaw, flashlight, motorStart
+    case gameCubeTrigger, resistanceTrigger, bowTrigger, semiAutomaticGun, automaticGun, choppyTrigger
+    case verySoftTrigger, softTrigger, mediumTrigger, hardTrigger, veryHardTrigger, hardestTrigger, rigidTrigger
+    case calibrateTrigger, vibrateTriggerPulse, vibrateTriggerTenIntensity, vibrateTriggerCustomIntensity
 
     init(from decoder: Decoder) throws {
         self = Self.migrated(try decoder.singleValueContainer().decode(String.self))
@@ -423,8 +426,8 @@ extension AdaptiveTriggerPreset {
         case .shotgunFire: "Shotgun Fire"
         case .smgFire: "SMG Fire"
         case .sniperFire: "Sniper Fire"
-        case .galloping: "Galloping"
-        case .machineGun: "Machine Gun"
+        case .galloping: "Galloping Trigger"
+        case .machineGun: "Machine Trigger"
         case .fishing: "Fishing"
         case .triggerJam: "Trigger Jam"
         case .doorResistance: "Door Resistance"
@@ -440,6 +443,23 @@ extension AdaptiveTriggerPreset {
         case .bowDraw: "Bow Draw & Let-off"
         case .hydraulicBrake: "Hydraulic Brake"
         case .ratchetDetents: "Ratchet Detents"
+        case .gameCubeTrigger: "GameCube Trigger"
+        case .resistanceTrigger: "Resistance Trigger"
+        case .bowTrigger: "Bow Trigger"
+        case .semiAutomaticGun: "Semi Automatic Gun"
+        case .automaticGun: "Automatic Gun"
+        case .choppyTrigger: "Choppy Trigger"
+        case .verySoftTrigger: "Very Soft Trigger"
+        case .softTrigger: "Soft Trigger"
+        case .mediumTrigger: "Medium Trigger"
+        case .hardTrigger: "Hard Trigger"
+        case .veryHardTrigger: "Very Hard Trigger"
+        case .hardestTrigger: "Hardest Trigger"
+        case .rigidTrigger: "Rigid Trigger"
+        case .calibrateTrigger: "Calibrate Trigger"
+        case .vibrateTriggerPulse: "Vibrate Trigger Pulse"
+        case .vibrateTriggerTenIntensity: "Vibrate Trigger 10 Intensity"
+        case .vibrateTriggerCustomIntensity: "Vibrate Trigger Custom Intensity"
         }
     }
 
@@ -451,15 +471,32 @@ extension AdaptiveTriggerPreset {
         case .off, .feedback, .weapon, .bowAndArrow, .vibration, .ratchetDetents: .standard
         case .acceleration, .deceleration, .engineStrain, .braking, .clutchBite, .hydraulicBrake: .racing
         case .pistolFire, .shotgunFire, .smgFire, .sniperFire, .twoStagePull, .softDetent, .progressiveRecoil, .precisionBreak, .stagedWall, .bowDraw: .weapons
-        case .galloping, .machineGun: .specialized
+        case .galloping, .machineGun, .gameCubeTrigger, .choppyTrigger, .calibrateTrigger,
+             .vibrateTriggerPulse, .vibrateTriggerTenIntensity, .vibrateTriggerCustomIntensity: .specialized
         case .fishing, .triggerJam, .doorResistance, .electricShock, .heartbeat, .rain: .immersive
+        case .resistanceTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger, .hardTrigger,
+             .veryHardTrigger, .hardestTrigger, .rigidTrigger: .standard
+        case .bowTrigger, .semiAutomaticGun, .automaticGun: .weapons
         }
     }
 
-    static let recommendedCatalog: [AdaptiveTriggerPreset] = [.off, .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon, .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart]
+    /// The default menu mirrors the DualSenseX trigger list, in that order.
+    /// "Custom Trigger Value" is the custom editor, not a built-in preset.
+    static let recommendedCatalog: [AdaptiveTriggerPreset] = [
+        .off, .gameCubeTrigger, .resistanceTrigger, .bowTrigger, .galloping, .semiAutomaticGun,
+        .automaticGun, .machineGun, .choppyTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger,
+        .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger, .calibrateTrigger,
+        .vibrateTriggerPulse, .vibrateTriggerTenIntensity, .vibrateTriggerCustomIntensity
+    ]
 
+    /// Ten feedback zones, including the final zone. The legacy designs and the
+    /// DualSenseX resistance presets are positional; weapon and vibration modes
+    /// return nil and are applied directly by the feature service.
     var designedResistance: [Float]? {
-        if Self.recommendedCatalog.contains(self), self != .off {
+        switch self {
+        // Legacy designs stay loadable for selections saved by earlier releases.
+        case .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon,
+             .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart:
             return (0..<10).map { i in
                 let t = Float(i) / 9
                 switch self {
@@ -478,8 +515,24 @@ extension AdaptiveTriggerPreset {
                 default: return 0
                 }
             }
-        }
-        switch self {
+        // DualSenseX menu: resistance lives in the controller's documented
+        // 0-8 force scale, mapped to Apple's 0-1 strengths.
+        case .gameCubeTrigger:
+            // Analog pull, then the digital stop near the end of travel.
+            return [0.12, 0.12, 0.13, 0.13, 0.14, 0.15, 0.16, 1.0, 1.0, 1.0]
+        case .choppyTrigger:
+            // Stepped bands approximating DSX's choppy resistance.
+            return [0.50, 0.10, 0.45, 0.12, 0.55, 0.14, 0.60, 0.16, 0.65, 0.18]
+        case .verySoftTrigger: return Self.flatZones(0.25)   // 2/8
+        case .softTrigger: return Self.flatZones(0.375)      // 3/8
+        case .mediumTrigger: return Self.flatZones(0.50)     // 4/8
+        case .hardTrigger: return Self.flatZones(0.625)      // 5/8
+        case .veryHardTrigger: return Self.flatZones(0.75)   // 6/8
+        case .hardestTrigger: return Self.flatZones(0.875)   // 7/8
+        case .rigidTrigger: return Self.flatZones(1.0)       // 8/8 blocks travel
+        case .calibrateTrigger:
+            // Full-travel exercise: resistance sweeps from none to maximum.
+            return (0..<10).map { Float($0) / 9 }
         case .stagedWall: return [0, 0.06, 0.10, 0.14, 0.18, 0.65, 0.72, 0.78, 0.82, 0.82]
         case .clutchBite: return [0.04, 0.08, 0.18, 0.40, 0.62, 0.46, 0.28, 0.16, 0.12, 0.12]
         case .bowDraw: return [0.04, 0.10, 0.22, 0.38, 0.56, 0.72, 0.85, 0.92, 0.48, 0.30]
@@ -487,6 +540,10 @@ extension AdaptiveTriggerPreset {
         case .ratchetDetents: return [0, 0.10, 0.55, 0.12, 0.65, 0.12, 0.75, 0.12, 0.80, 0.18]
         default: return nil
         }
+    }
+
+    private static func flatZones(_ strength: Float) -> [Float] {
+        Array(repeating: min(max(strength, 0), 1), count: 10)
     }
 
     static func catalog(in category: AdaptiveTriggerCategory) -> [AdaptiveTriggerPreset] {
@@ -711,7 +768,8 @@ struct AdaptiveTriggerSettings: Codable, Equatable, Sendable {
             guard let saved = library.first(where: { $0.id == id }) else { return }
             applySnapshot(saved.parameters, for: side, presetID: id)
         case .currentCustomSnapshot:
-            break
+            // The custom editor supplies the values; switch the side onto them.
+            if side == .left { leftUsesCustom = true } else { rightUsesCustom = true }
         }
     }
 
@@ -1722,6 +1780,13 @@ struct ControllerTriggerEnvelope {
         case .motorStart: threshold = 0.30; frequency = 6
         case .brakePedal: threshold = 0.45; frequency = 8
         case .flashlight: threshold = 0.10; frequency = 0
+        case .gameCubeTrigger: threshold = 0.72; frequency = 0
+        case .bowTrigger: threshold = 0.20; frequency = 3
+        case .semiAutomaticGun: threshold = 0.44; frequency = 0
+        case .automaticGun: threshold = 0.20; frequency = 12
+        case .machineGun: threshold = 0.18; frequency = 16
+        case .galloping: threshold = 0.15; frequency = 4
+        case .choppyTrigger: threshold = 0.10; frequency = 7
         default: threshold = 1.1; frequency = 0
         }
         if p <= 0.04 {
@@ -1730,6 +1795,9 @@ struct ControllerTriggerEnvelope {
                 case .handgun, .revolver: result.intensity = 0.60; result.duration = 0.06
                 case .archery: result.intensity = 0.80; result.duration = 0.05
                 case .crossbow: result.intensity = 0.60; result.duration = 0.04
+                case .gameCubeTrigger: result.intensity = 0.70; result.duration = 0.04
+                case .bowTrigger: result.intensity = 0.80; result.duration = 0.05
+                case .semiAutomaticGun: result.intensity = 0.65; result.duration = 0.035
                 default: break
                 }
             }
@@ -1753,6 +1821,10 @@ struct ControllerTriggerEnvelope {
             case .shield: result.intensity = crossing ? 1 : 0.5; result.duration = crossing ? 0.08 : 0.20
             case .chainsaw: result.intensity = 0.75; result.duration = 0.08; recoilEnd = now + 0.05
             case .motorStart: result.intensity = 0.55; result.duration = 0.12; recoilEnd = now + 0.06
+            case .automaticGun: result.intensity = 0.70; result.duration = 0.020; recoilEnd = now + 0.030
+            case .machineGun: result.intensity = 0.85; result.duration = 0.030; recoilEnd = now + 0.040
+            case .galloping: result.intensity = 0.35 + 0.35*p; result.duration = 0.06
+            case .choppyTrigger: result.intensity = 0.25*p; result.duration = 0.04
             default: break
             }
         }

@@ -40,6 +40,7 @@ struct AdaptiveTriggerCommands: Commands {
         ForEach(AdaptiveTriggerPreset.recommendedCatalog, id: \.self) { preset in
             Button(preset.htmlName) { select(.builtIn(preset), side: side) }
         }
+        Button("Custom Trigger Value") { select(.currentCustomSnapshot, side: side) }
         if !library.items.isEmpty {
             Divider()
             Text("Saved custom presets")

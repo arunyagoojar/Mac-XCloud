@@ -257,17 +257,10 @@ struct AdaptiveTriggerPresetSelector: View {
                 }
             }
         )) {
-            ForEach(AdaptiveTriggerCategory.allCases) { category in
-                Section(category.rawValue) {
-                    ForEach(AdaptiveTriggerPreset.catalog(in: category), id: \.self) { preset in
-                        Text(preset.htmlName).tag(AdaptiveTriggerSelection.builtIn(preset))
-                    }
-                }
+            ForEach(AdaptiveTriggerPreset.recommendedCatalog, id: \.self) { preset in
+                Text(preset.htmlName).tag(AdaptiveTriggerSelection.builtIn(preset))
             }
-            let current = side == .left ? service.settings.adaptiveTriggers.leftPreset : service.settings.adaptiveTriggers.rightPreset
-            if !AdaptiveTriggerPreset.recommendedCatalog.contains(current) {
-                Text("Previous: " + current.htmlName).tag(AdaptiveTriggerSelection.builtIn(current))
-            }
+            Text("Custom Trigger Value").tag(AdaptiveTriggerSelection.currentCustomSnapshot)
             if !store.customTriggerPresets.isEmpty {
                 Section("Custom Presets") {
                     ForEach(store.customTriggerPresets) { preset in
@@ -275,10 +268,11 @@ struct AdaptiveTriggerPresetSelector: View {
                     }
                 }
             }
-            if service.settings.adaptiveTriggers.selection(for: side, library: store.customTriggerPresets) == .currentCustomSnapshot {
-                Text("Current Custom Snapshot").tag(AdaptiveTriggerSelection.currentCustomSnapshot)
+            let current = side == .left ? service.settings.adaptiveTriggers.leftPreset : service.settings.adaptiveTriggers.rightPreset
+            if !AdaptiveTriggerPreset.recommendedCatalog.contains(current) {
+                Text("Previous: " + current.htmlName).tag(AdaptiveTriggerSelection.builtIn(current))
             }
         }.settingsPicker()
-        .help("Resistance stays active through the pull. New modes add pressure-driven handle haptics; these simulate actions locally and do not read the game's weapon. Adjust Haptic intensity to scale the pulses. Hardware approximates curves with ten resistance zones.")
+        .help("The default menu mirrors the DualSenseX trigger list. Custom Trigger Value applies your custom editor settings. Resistance stays active through the pull; handle haptics simulate release and recoil locally. Hardware approximates curves with ten resistance zones.")
     }
 }
