@@ -229,5 +229,49 @@
 			<pubDate>Sun, 06 Sep 2026 21:59:47 +0000</pubDate>
 			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.3.7-b24/MacXcloud.zip" sparkle:edSignature="1oNPm/SjTn+T6jFDX27Ugb97vfOw90VdB+WRkDDI0i1nqjSUp/Zx/2UytHlj+mbF12ZPeSo/icaJ8JmddJ5LDw==" length="5387092" type="application/octet-stream" />
 		</item>
+		<item>
+			<title>Version 1.3.7</title>
+			<sparkle:version>25</sparkle:version>
+			<sparkle:shortVersionString>1.3.7</sparkle:shortVersionString>
+			<link>https://github.com/arunyagoojar/Mac-XCloud/releases/tag/v1.3.7-b25</link>
+			<sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+			<description><![CDATA[<h2>Mac Xcloud 1.3.7</h2>
+<h3>Steering and controller feedback</h3>
+<ul>
+<li>Improved steering-wheel motion tracking: gyro prediction follows quick turns while absolute sensor correction reduces accelerometer jolts and keeps held turns steady.</li>
+<li>Preserved gyro aiming, touchpad aiming and bidirectional flick shifting. For flick shifting, enable manual gears and map right-stick up to upshift and right-stick down to downshift inside the game.</li>
+<li>Replaced the default adaptive-trigger menu with the DualSenseX-style list: Normal Trigger, Custom Trigger Value, GameCube, Resistance, Bow, Galloping, Semi Automatic Gun, Automatic Gun, Machine, Choppy, Very Soft through Hardest, Rigid, Calibrate and the Vibrate presets. Each name maps to the controller&#x27;s documented effect primitives; the previous twelve designs stay loadable for saved selections.</li>
+<li>Added pressure-driven haptic rhythms, pistol/bow release feedback and bounded recoil resistance. Existing saved and custom effects remain loadable.</li>
+</ul>
+<h3>Settings and navigation</h3>
+<ul>
+<li>Removed the persistent on-screen Back and Home buttons.</li>
+<li>Added Backspace for browsing back, with protection for typing, text editing and gameplay. Existing Mac navigation shortcuts remain available.</li>
+<li>Listed app shortcuts in Settings → App → About.</li>
+<li>The menu bar status icon is removed as soon as the app quits.</li>
+<li>Fixed immediate OLED background updates and made global settings show when a reload is needed.</li>
+<li>Removed remaining keyboard/mouse gaming settings. WKWebView limitations made reliable gaming support impractical; ordinary typing, clicking and app shortcuts remain available.</li>
+</ul>
+<h3>Profiles and usability</h3>
+<ul>
+<li>Per-game profile recall restores controller, motion, trigger and selected picture/audio settings, using game IDs with website-title fallback.</li>
+<li>Native settings use five main groups, with advanced steering controls and diagnostics collapsed.</li>
+<li>Rewrote the README with the current feature list, controller requirements, limitations and a Forza Horizon 5 cruising setup.</li>
+</ul>
+<h3>Compatibility and remote play</h3>
+<ul>
+<li>Verified Intel and Apple Silicon compilation and added a release check requiring both executable architectures.</li>
+<li>Fixed console-list readiness and refreshes stale console status when reopening Remote Play.</li>
+<li>Xbox waking from standby remains unresolved; streaming from an already powered-on console is supported.</li>
+</ul>
+<h3>Notes</h3>
+<ul>
+<li>Trigger effects are local simulations, not weapon telemetry from Xbox games. Hardware resistance zones and scheduled haptics approximate the requested effects.</li>
+<li>Steering feel depends on your controller, connection, car and in-game settings. The user has confirmed the revised steering is usable; further tuning is personal.</li>
+<li>Automatic-update dialogs now display these release notes instead of a commit hash.</li>
+</ul>]]></description>
+			<pubDate>Mon, 07 Sep 2026 15:37:38 +0000</pubDate>
+			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.3.7-b25/MacXcloud.zip" sparkle:edSignature="6YQ1Y2eDcDpnHELMhbd3MWR7/+KppkbgDALurC9vBAAf4VmcmfbBBj4hXxMovtnZyMpxoXFU+Whw47+5XDAICw==" length="5384015" type="application/octet-stream" />
+		</item>
 	</channel>
 </rss>
