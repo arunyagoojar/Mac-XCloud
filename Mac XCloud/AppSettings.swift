@@ -96,9 +96,9 @@ struct SettingsCategory: Identifiable {
             SettingDef(id: "stream.video.codecProfile", label: "Visual quality",
                        note: "Chooses the H.264 codec profile for new streams. High gives the best compression quality. Select it, then use Reload to Apply.",
                        scope: .global, kind: .option(
-                            values: ["default", "low", "normal", "high"],
-                            labels: ["Default", "Low", "Normal", "High"],
-                            defaultValue: "default")),
+                            values: ["low", "normal", "high"],
+                            labels: ["Low", "Normal", "High"],
+                            defaultValue: "high")),
             SettingDef(id: "stream.video.maxBitrate", label: "Max video bitrate",
                        note: "⚠️ Limits the video bitrate. Low caps can look blocky in fast scenes.",
                        scope: .global, kind: .numberOption(
@@ -167,14 +167,20 @@ struct SettingsCategory: Identifiable {
         ]),
         SettingsCategory(id: "clarity", title: "Clarity", icon: "sparkles.rectangle.stack", rows: [
             SettingDef(id: "app.clarityInfo", label: "Recommended for this M1 Mac",
-                       note: "AMD FSR 1 — Retina is best for 720p or compressed streams: EASU reconstructs edges at Retina resolution, then RCAS sharpens. For native 1080p/1440p streams, WebGL 2 + AMD CAS is lighter and avoids unnecessary scaling.",
-                       scope: .stream, kind: .info(text: "FSR 1 for low-resolution · WebGL2 + CAS for high-resolution")),
+                       note: "For native 1080p/1440p streams, WebGL 2 or WebGPU + AMD CAS is recommended for optimal sharpness.",
+                       scope: .stream, kind: .info(text: "WebGPU + CAS for high-resolution")),
             SettingDef(id: "app.clarityPipeline", label: "Clarity pipeline",
-                       note: "One setting selects a compatible renderer and algorithm. WebGL/WebGPU changes require Reload to Apply. FSR 1 applies live.",
+                       note: "Select an upscaling or sharpening pipeline. WebGL/WebGPU changes apply live.",
                        scope: .stream, kind: .option(
-                            values: ["native", "fsr1", "webgl-usm", "webgl-cas", "webgpu-usm", "webgpu-cas"],
-                            labels: ["Native video (off)", "AMD FSR 1 — Retina", "WebGL 2 + Unsharp Mask", "WebGL 2 + AMD CAS", "WebGPU + Unsharp Mask (experimental)", "WebGPU + AMD CAS (experimental)"],
-                            defaultValue: "fsr1")),
+                            values: ["native", "webgpu-cas", "webgpu-usm", "webgl-cas", "webgl-usm"],
+                            labels: [
+                                "Native video (off)",
+                                "WebGPU + AMD CAS (Apple Metal)",
+                                "WebGPU + Unsharp Mask (Apple Metal)",
+                                "WebGL 2 + AMD CAS",
+                                "WebGL 2 + Unsharp Mask"
+                            ],
+                            defaultValue: "native")),
             SettingDef(id: "video.processing.mode", label: "Processing mode",
                        note: "Quality gives the best image on Apple Silicon; Performance reduces GPU use.",
                        scope: .stream, kind: .option(
@@ -343,8 +349,8 @@ extension SettingsModel {
         .init(key: "server.ipv6.prefer", scope: .global, value: true),
         .init(key: "stream.video.resolution", scope: .global, value: "1080p-hq"),
         .init(key: "stream.video.codecProfile", scope: .global, value: "high"),
-        // Better xCloud transforms its maximum value into raw 0 (unlimited).
-        .init(key: "stream.video.maxBitrate", scope: .global, value: 15_360_000.0),
+        // Unlimited bitrate allows full resolution/quality without artificial cap.
+        .init(key: "stream.video.maxBitrate", scope: .global, value: 0.0),
         .init(key: "stream.video.preventResolutionDrops", scope: .global, value: false),
         .init(key: "ui.splashVideo.skip", scope: .global, value: true),
         .init(key: "ui.feedbackDialog.disabled", scope: .global, value: true),
@@ -432,8 +438,8 @@ extension SettingsModel {
 
         let script: String
         if id == "app.clarityPipeline" {
-            let pipeline = (value as? String) ?? "fsr1"
-            let mode = pipeline == "fsr1" ? "fsr1" : "off"
+            let pipeline = (value as? String) ?? "native"
+            UserDefaults.standard.set(pipeline, forKey: "app.clarityPipeline")
             let renderer: String
             let processing: String
             switch pipeline {
@@ -446,15 +452,25 @@ extension SettingsModel {
             script = """
             (function () {
               try {
-                if (typeof BxCBridge === 'undefined') return JSON.stringify({ok:false,error:'Better xCloud is not ready'});
-                BxCBridge.setStream('video.player.type', \(jsonEncoded(renderer)));
-                BxCBridge.setStream('video.processing', \(jsonEncoded(processing)));
-                localStorage.setItem('XCG.Upscaler', \(jsonEncoded(mode)));
-                window.postMessage({type:'xcg-upscaler', mode:\(jsonEncoded(mode))}, '*');
+                var hasBridge = typeof BxCBridge !== 'undefined';
+                if (hasBridge) {
+                  try { BxCBridge.setStream('video.player.type', \(jsonEncoded(renderer))); } catch (_) {}
+                  try { BxCBridge.setStream('video.processing', \(jsonEncoded(processing))); } catch (_) {}
+                }
+                localStorage.setItem('XCG.Upscaler', 'off');
+                window.postMessage({type:'xcg-upscaler', mode:'off'}, '*');
+                if (\(jsonEncoded(pipeline)) !== 'native' && hasBridge) {
+                  try {
+                    var sh = BxCBridge.getStream('video.processing.sharpness');
+                    if (sh === 0 || sh === '0' || typeof sh === 'undefined') {
+                      BxCBridge.setStream('video.processing.sharpness', 3);
+                    }
+                  } catch (_) {}
+                }
                 var up = localStorage.getItem('XCG.Upscaler');
-                var r = BxCBridge.getStream('video.player.type');
-                var p = BxCBridge.getStream('video.processing');
-                return JSON.stringify({ok: up === \(jsonEncoded(mode)) && r === \(jsonEncoded(renderer)) && p === \(jsonEncoded(processing)), accepted:\(jsonEncoded(pipeline)), raw:up, renderer:r, processing:p});
+                var r = hasBridge ? (function(){ try { return BxCBridge.getStream('video.player.type'); } catch(_){ return \(jsonEncoded(renderer)); } })() : \(jsonEncoded(renderer));
+                var p = hasBridge ? (function(){ try { return BxCBridge.getStream('video.processing'); } catch(_){ return \(jsonEncoded(processing)); } })() : \(jsonEncoded(processing));
+                return JSON.stringify({ok:true, accepted:\(jsonEncoded(pipeline)), raw:up, renderer:r, processing:p, bridgeAvailable:hasBridge});
               } catch (e) { return JSON.stringify({ok:false,error:String(e)}); }
             })();
             """
@@ -463,11 +479,18 @@ extension SettingsModel {
             script = """
             (function () {
               try {
-                if (typeof BxCBridge === 'undefined') return JSON.stringify({ok:false,error:'Better xCloud is not ready'});
-                var accepted = BxCBridge.setPublic('\(scopeName)', \(jsonEncoded(id)), \(jsonEncoded(value)));
+                var val = \(jsonEncoded(value));
+                if (typeof BxCBridge === 'undefined') {
+                  var lsKey = '\(scopeName)' === 'global' ? 'BetterXcloud' : 'BetterXcloud.Stream';
+                  var current = JSON.parse(localStorage.getItem(lsKey) || '{}');
+                  current[\(jsonEncoded(id))] = val;
+                  localStorage.setItem(lsKey, JSON.stringify(current));
+                  return JSON.stringify({ok:true, accepted:val, readback:val, raw:val, bridgeAvailable:false});
+                }
+                var accepted = BxCBridge.setPublic('\(scopeName)', \(jsonEncoded(id)), val);
                 var readback = BxCBridge.getPublic('\(scopeName)', \(jsonEncoded(id)));
                 var raw = BxCBridge.rawSameScope('\(scopeName)', \(jsonEncoded(id)));
-                return JSON.stringify({ok:true,accepted:accepted,readback:readback,raw:raw});
+                return JSON.stringify({ok:true,accepted:accepted,readback:readback,raw:raw, bridgeAvailable:true});
               } catch (e) { return JSON.stringify({ok:false,error:String(e)}); }
             })();
             """
@@ -530,9 +553,24 @@ extension SettingsModel {
                 // value than requested (e.g. unsupported quality), say so.
                 // The setting id is included so a mismatch can be reported
                 // against the exact row instead of a generic error.
-                if let readback = response["readback"], !(readback is [Any] || readback is [String: Any]),
-                   String(describing: readback) != String(describing: value) {
-                    self.saveMessage = "Saved as '\(readback)' — requested '\(value)' is not supported here for '\(id)'"
+                if let readback = response["readback"], !(readback is [Any] || readback is [String: Any]) {
+                    let isEquivalent: Bool
+                    if let b1 = readback as? Bool, let b2 = value as? Bool {
+                        isEquivalent = (b1 == b2)
+                    } else if let b1 = (readback as? NSNumber)?.boolValue, let b2 = value as? Bool {
+                        isEquivalent = (b1 == b2)
+                    } else if let b1 = readback as? Bool, let b2 = (value as? NSNumber)?.boolValue {
+                        isEquivalent = (b1 == b2)
+                    } else if let n1 = readback as? NSNumber, let n2 = value as? NSNumber {
+                        isEquivalent = (n1.doubleValue == n2.doubleValue)
+                    } else {
+                        isEquivalent = String(describing: readback) == String(describing: value)
+                    }
+                    if !isEquivalent {
+                        self.saveMessage = "Saved as '\(readback)' — requested '\(value)' is not supported here for '\(id)'"
+                    } else {
+                        self.saveMessage = "Saved"
+                    }
                 } else {
                     self.saveMessage = "Saved"
                 }
@@ -569,10 +607,12 @@ final class SettingsModel: ObservableObject {
     @Published var saveMessage: String?
     @Published var needsReload = false
     @Published var isPingingRegions = false
+    @Published var pingStatusText: String?
     @Published var bestRegionResult: RegionPingResult?
 
     struct RegionPingResult: Equatable {
         let name: String
+        let displayName: String
         let baseURI: String
         let averageMs: Int
         let samples: Int
@@ -583,56 +623,92 @@ final class SettingsModel: ObservableObject {
     func testRegions() {
         guard !isPingingRegions else { return }
         isPingingRegions = true
-        saveMessage = ""
+        pingStatusText = "Finding servers…"
+        saveMessage = "Starting latency test across all servers…"
+        bestRegionResult = nil
         browser?.evaluateJS("window.__xcgRegionPingCancelled = false")
         regionPingTask?.cancel()
         regionPingTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let result = try await browser?.callAsyncJS("""
+                let listResult = try await browser?.callAsyncJS("""
                     try {
                       if (typeof BxCBridge === 'undefined') return JSON.stringify({error:'Xbox page is not ready'});
-                      var regions = BxCBridge.regionList();
-                      var out = [];
-                      for (var i = 0; i < regions.length; i++) {
-                        if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
-                        var r = regions[i]; if (!r.baseUri) continue;
-                        var times = [];
-                        for (var n = 0; n < 3; n++) {
-                          if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
-                          var t = performance.now();
-                          try { await fetch(r.baseUri + '/v2/servers/home?mr=50', {method:'GET', cache:'no-store'}); times.push(Math.round(performance.now()-t)); } catch (e) {}
-                        }
-                        if (times.length) out.push({name:r.name, baseURI:r.baseUri, times:times});
-                      }
-                      return JSON.stringify(out);
+                      return JSON.stringify(BxCBridge.regionList());
                     } catch (e) { return JSON.stringify({error:String(e)}); }
                     """)
-                isPingingRegions = false
-                regionPingTask = nil
-                guard let text = result as? String else {
-                    saveMessage = "Region test failed"
+                guard let listText = listResult as? String,
+                      let listData = listText.data(using: .utf8),
+                      let regionItems = try? JSONSerialization.jsonObject(with: listData) as? [[String: Any]],
+                      !regionItems.isEmpty else {
+                    self.isPingingRegions = false
+                    self.pingStatusText = nil
+                    self.saveMessage = "Could not retrieve region list"
+                    self.regionPingTask = nil
                     return
                 }
-                if text == "{\"cancelled\":true}" { saveMessage = "Region test stopped"; return }
-                guard let data = text.data(using: .utf8),
-                      let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                    saveMessage = "Region test failed"
-                    return
+
+                var pingResults: [RegionPingResult] = []
+
+                for r in regionItems {
+                    if Task.isCancelled { break }
+                    guard let name = r["name"] as? String,
+                          let baseUri = r["baseUri"] as? String, !baseUri.isEmpty else { continue }
+                    let displayName = (r["displayName"] as? String) ?? (r["shortName"] as? String) ?? name
+                    self.pingStatusText = "Now pinging \(displayName)…"
+                    self.saveMessage = "Now pinging \(displayName)…"
+                    self.objectWillChange.send()
+
+                    let probeScript = """
+                    try {
+                      if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
+                      var times = [];
+                      for (var i = 0; i < 2; i++) {
+                        if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
+                        var t = performance.now();
+                        try {
+                          await fetch('\(baseUri)/v2/servers/home?mr=50', {method:'GET', cache:'no-store'});
+                          times.push(Math.round(performance.now() - t));
+                        } catch (_) {}
+                      }
+                      return JSON.stringify({ok:true, times:times});
+                    } catch (e) { return JSON.stringify({error:String(e)}); }
+                    """
+                    let probeResult = try await browser?.callAsyncJS(probeScript)
+                    if let pText = probeResult as? String, pText.contains("cancelled") {
+                        self.isPingingRegions = false
+                        self.pingStatusText = nil
+                        self.saveMessage = "Region test stopped"
+                        self.regionPingTask = nil
+                        return
+                    }
+                    if let pText = probeResult as? String,
+                       let pData = pText.data(using: .utf8),
+                       let pRoot = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
+                       let times = pRoot["times"] as? [NSNumber], !times.isEmpty {
+                        let avg = Int(times.map(\.intValue).reduce(0, +) / times.count)
+                        pingResults.append(RegionPingResult(name: name, displayName: displayName, baseURI: baseUri, averageMs: avg, samples: times.count))
+                    }
                 }
-                let parsed = records.compactMap { r -> RegionPingResult? in
-                    guard let name = r["name"] as? String, let uri = r["baseURI"] as? String,
-                          let times = r["times"] as? [NSNumber], !times.isEmpty else { return nil }
-                    let average = Int(times.map(\.intValue).reduce(0, +) / times.count)
-                    return RegionPingResult(name: name, baseURI: uri, averageMs: average, samples: times.count)
-                }.sorted { $0.averageMs < $1.averageMs }
-                bestRegionResult = parsed.first
-                saveMessage = parsed.first.map { "Best region: \($0.name) (\($0.averageMs) ms)" } ?? "No regions responded"
-                objectWillChange.send()
+
+                self.isPingingRegions = false
+                self.pingStatusText = nil
+                self.regionPingTask = nil
+
+                // Sort strictly by minimum ping to objectively choose the fastest server
+                let sorted = pingResults.sorted { $0.averageMs < $1.averageMs }
+                if let best = sorted.first {
+                    self.bestRegionResult = best
+                    self.saveMessage = "The best server for you is \(best.displayName) (\(best.averageMs) ms)"
+                } else {
+                    self.saveMessage = "No regions responded to latency test"
+                }
+                self.objectWillChange.send()
             } catch {
-                isPingingRegions = false
-                regionPingTask = nil
-                if !Task.isCancelled { saveMessage = "Region test failed: \(error.localizedDescription)" }
+                self.isPingingRegions = false
+                self.pingStatusText = nil
+                self.regionPingTask = nil
+                if !Task.isCancelled { self.saveMessage = "Region test failed: \(error.localizedDescription)" }
             }
         }
     }
@@ -642,17 +718,37 @@ final class SettingsModel: ObservableObject {
         regionPingTask?.cancel()
         regionPingTask = nil
         isPingingRegions = false
+        pingStatusText = nil
         saveMessage = "Region test stopped"
     }
 
     func useBestRegion() {
-        guard let bestRegionResult,
-              regions.contains(where: { $0.value == bestRegionResult.name }) else {
+        guard let bestRegionResult else {
             saveMessage = "Run the region test first"
             return
         }
         write(id: "server.region", scope: .global, value: bestRegionResult.name)
-        saveMessage = "Selecting \(bestRegionResult.name)…"
+        if let idx = regions.firstIndex(where: { $0.value == bestRegionResult.name }) {
+            regionIndex = idx
+        }
+        saveMessage = "Selected \(bestRegionResult.displayName) (\(bestRegionResult.averageMs) ms)"
+    }
+
+    static func clarityDescription(for pipeline: String) -> String {
+        switch pipeline {
+        case "webgpu-cas":
+            return "WebGPU AMD CAS: Modern compute shader contrast-adaptive sharpening with minimal WebKit CPU overhead."
+        case "webgpu-usm":
+            return "WebGPU Unsharp Mask: Modern compute shader unsharp masking running on Apple Silicon WebGPU."
+        case "webgl-cas":
+            return "WebGL 2 AMD CAS: High-performance contrast-adaptive sharpening that enhances textures without halos."
+        case "webgl-usm":
+            return "WebGL 2 Unsharp Mask: Classic high-frequency convolution filter that accentuates edges with low GPU overhead."
+        case "native":
+            return "Native video pass-through: WebKit hardware decoding with zero post-processing overhead or added latency."
+        default:
+            return "Select a clarity and upscaling pipeline for your stream."
+        }
     }
 
     /// App-local: a custom LED color chosen with the color picker.
@@ -802,12 +898,10 @@ final class SettingsModel: ObservableObject {
                 }
                 self.globalValues = root["global"] as? [String: Any] ?? [:]
                 self.streamValues = root["stream"] as? [String: Any] ?? [:]
-                let upscaler = root["upscaler"] as? String ?? "off"
                 let renderer = self.streamValues["video.player.type"] as? String ?? "default"
                 let processing = self.streamValues["video.processing"] as? String ?? "usm"
-                self.globalValues["app.clarityPipeline"] = upscaler == "fsr1" ? "fsr1" :
-                    (renderer == "webgpu" ? (processing == "cas" ? "webgpu-cas" : "webgpu-usm") :
-                     renderer == "webgl2" ? (processing == "cas" ? "webgl-cas" : "webgl-usm") : "native")
+                self.globalValues["app.clarityPipeline"] = renderer == "webgpu" ? (processing == "cas" ? "webgpu-cas" : "webgpu-usm") :
+                     renderer == "webgl2" ? (processing == "cas" ? "webgl-cas" : "webgl-usm") : "native"
                 if let selected = root["selectedRegion"] as? [String: Any] {
                     self.resolvedRegionName = (selected["displayName"] as? String) ?? (selected["shortName"] as? String)
                 }
@@ -835,7 +929,9 @@ final class SettingsModel: ObservableObject {
         return nil
     }
 
-    // MARK: - Value access for controls
+    var clarityPipeline: String {
+        (rawValue("app.clarityPipeline") as? String) ?? "fsr1"
+    }
 
     func isOn(_ def: SettingDef) -> Bool {
         if let value = rawValue(def.id) as? Bool { return value }
@@ -981,9 +1077,7 @@ final class SettingsModel: ObservableObject {
             }
         case .numberOption(let values, _, _):
             guard values.indices.contains(index) else { return }
-            // BxC expects its maximum value, then transforms max -> raw 0.
-            let proposed = def.id == "stream.video.maxBitrate" && values[index] == 0 ? 15_360_000.0 : values[index]
-            write(def, proposed)
+            write(def, values[index])
         case .serverRegion:
             guard regions.indices.contains(index) else { return }
             regionIndex = index

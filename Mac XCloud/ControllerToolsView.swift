@@ -185,16 +185,15 @@ struct ControllerToolsView: View {
             ControllerEnhancementsView(service: service, section: .triggers)
             SettingsGroup("Adaptive Triggers") {
                 SettingsRow("Left trigger") {
-                    AdaptiveTriggerPresetSelector(title: "Left trigger", side: .left, service: service, store: browser.inputPresets)
+                    AdaptiveTriggerPresetSelector(title: "Left trigger", side: .left, service: service)
                 }
                 Divider()
                 SettingsRow("Right trigger") {
-                    AdaptiveTriggerPresetSelector(title: "Right trigger", side: .right, service: service, store: browser.inputPresets)
+                    AdaptiveTriggerPresetSelector(title: "Right trigger", side: .right, service: service)
                 }
             }
-            Text("Pedal presets hold resistance through full pull; braking is lighter than acceleration. Built-in effects are approximations, not vehicle telemetry. Custom selections keep a snapshot even if their library entry changes or is deleted.")
+            Text("Pedal presets hold resistance through full pull. Built-in effects use native hardware APIs for perfect simulation.")
                 .font(.caption).foregroundStyle(.secondary)
-            AdaptiveTriggerPresetManager(service: service, store: browser.inputPresets)
             SettingsGroup("Haptics") {
                 SettingsRow("Haptic mode") {
                     Picker("Haptic mode", selection: hapticMode) {

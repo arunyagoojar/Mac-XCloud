@@ -320,40 +320,19 @@ struct ControllerCalibrationProgress: Codable, Equatable, Sendable {
 
 enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     case off
-    case feedback
-    case weapon
-    case bowAndArrow
-    case vibration
-    case acceleration
-    case deceleration
-    case engineStrain
-    case braking
-    case pistolFire
-    case shotgunFire
-    case smgFire
-    case sniperFire
-    case galloping
+    case pistol
+    case sniper
+    case automatic
     case machineGun
-    case fishing
-    case triggerJam
-    case doorResistance
-    case electricShock
+    case bow
+    case accelerator
+    case brake
+    case twoStage
+    case stiffSpring
+    case softSpring
     case heartbeat
-    case rain
-    case twoStagePull
-    case softDetent
-    case progressiveRecoil
-    case precisionBreak
-    case stagedWall
-    case clutchBite
-    case bowDraw
-    case hydraulicBrake
-    case ratchetDetents
-    case acceleratorPedal, brakePedal, handgun, revolver, rifle, automaticWeapon
-    case archery, crossbow, shield, chainsaw, flashlight, motorStart
-    case gameCubeTrigger, resistanceTrigger, bowTrigger, semiAutomaticGun, automaticGun, choppyTrigger
-    case verySoftTrigger, softTrigger, mediumTrigger, hardTrigger, veryHardTrigger, hardestTrigger, rigidTrigger
-    case calibrateTrigger, vibrateTriggerPulse, vibrateTriggerTenIntensity, vibrateTriggerCustomIntensity
+    case galloping
+    case choppy
 
     init(from decoder: Decoder) throws {
         self = Self.migrated(try decoder.singleValueContainer().decode(String.self))
@@ -361,26 +340,15 @@ enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
 
     static func migrated(_ value: String) -> Self {
         if let current = Self(rawValue: value) { return current }
-        // One-way migration for presets saved by earlier native builds.
-        return switch value {
-        case "softResistance": .feedback
-        case "firmResistance": .doorResistance
-        case "pistolBreakpoint", "heavyPistol": .pistolFire
-        case "shotgunBreak": .shotgunFire
-        case "hairTrigger": .triggerJam
-        case "triggerLock": .triggerJam
-        case "automaticRecoil": .machineGun
-        case "smgRapidPulse": .smgFire
-        case "burstPulse": .machineGun
-        case "flamethrower": .electricShock
-        case "bow": .bowAndArrow
-        case "accelerator": .acceleration
-        case "brakeComfort", "brakeFirm", "absPulse": .braking
-        case "platformerEndStop": .feedback
-        case "cinematic": .heartbeat
-        case "custom": .feedback
-        default: .off
+        let legacy = value.lowercased()
+        if legacy.contains("gun") || legacy.contains("pistol") || legacy.contains("sniper") || legacy.contains("shotgun") {
+            return legacy.contains("automatic") || legacy.contains("machine") || legacy.contains("smg") ? .automatic : .pistol
         }
+        if legacy.contains("bow") || legacy.contains("archery") { return .bow }
+        if legacy.contains("accel") || legacy.contains("gas") { return .accelerator }
+        if legacy.contains("brake") || legacy.contains("clutch") { return .brake }
+        if legacy.contains("twostage") || legacy.contains("staged") || legacy.contains("detent") { return .twoStage }
+        return .off
     }
 
     func encode(to encoder: Encoder) throws {
@@ -389,166 +357,30 @@ enum AdaptiveTriggerPreset: String, CaseIterable, Sendable, Codable {
     }
 }
 
-enum AdaptiveTriggerCategory: String, CaseIterable, Identifiable, Sendable {
-    case standard = "Standard"
-    case racing = "Racing"
-    case weapons = "Weapons"
-    case specialized = "Specialized"
-    case immersive = "Immersive"
-    var id: String { rawValue }
-}
-
 extension AdaptiveTriggerPreset {
     var htmlName: String {
         switch self {
-        case .acceleratorPedal: "Acceleration Pedal"
-        case .brakePedal: "Brake Pedal"
-        case .handgun: "Pistol / Handgun"
-        case .revolver: "Revolver / Heavy Pistol"
-        case .rifle: "Rifle"
-        case .automaticWeapon: "Automatic Weapon"
-        case .archery: "Bow / Archery"
-        case .crossbow: "Crossbow"
-        case .shield: "Shield"
-        case .chainsaw: "Chainsaw"
-        case .flashlight: "Flashlight / Light Tool"
-        case .motorStart: "Engine / Motor Start"
         case .off: "Off"
-        case .feedback: "Feedback"
-        case .weapon: "Weapon"
-        case .bowAndArrow: "Bow & Arrow"
-        case .vibration: "Vibration"
-        case .acceleration: "Acceleration"
-        case .deceleration: "Deceleration"
-        case .engineStrain: "Engine Strain"
-        case .braking: "Braking"
-        case .pistolFire: "Pistol Fire"
-        case .shotgunFire: "Shotgun Fire"
-        case .smgFire: "SMG Fire"
-        case .sniperFire: "Sniper Fire"
-        case .galloping: "Galloping Trigger"
-        case .machineGun: "Machine Trigger"
-        case .fishing: "Fishing"
-        case .triggerJam: "Trigger Jam"
-        case .doorResistance: "Door Resistance"
-        case .electricShock: "Electric Shock"
-        case .heartbeat: "Heartbeat"
-        case .rain: "Rain"
-        case .twoStagePull: "Two-stage Pull"
-        case .softDetent: "Soft Detent"
-        case .progressiveRecoil: "Progressive Recoil"
-        case .precisionBreak: "Precision Break"
-        case .stagedWall: "Two-stage Wall"
-        case .clutchBite: "Clutch Bite"
-        case .bowDraw: "Bow Draw & Let-off"
-        case .hydraulicBrake: "Hydraulic Brake"
-        case .ratchetDetents: "Ratchet Detents"
-        case .gameCubeTrigger: "GameCube Trigger"
-        case .resistanceTrigger: "Resistance Trigger"
-        case .bowTrigger: "Bow Trigger"
-        case .semiAutomaticGun: "Semi Automatic Gun"
-        case .automaticGun: "Automatic Gun"
-        case .choppyTrigger: "Choppy Trigger"
-        case .verySoftTrigger: "Very Soft Trigger"
-        case .softTrigger: "Soft Trigger"
-        case .mediumTrigger: "Medium Trigger"
-        case .hardTrigger: "Hard Trigger"
-        case .veryHardTrigger: "Very Hard Trigger"
-        case .hardestTrigger: "Hardest Trigger"
-        case .rigidTrigger: "Rigid Trigger"
-        case .calibrateTrigger: "Calibrate Trigger"
-        case .vibrateTriggerPulse: "Vibrate Trigger Pulse"
-        case .vibrateTriggerTenIntensity: "Vibrate Trigger 10 Intensity"
-        case .vibrateTriggerCustomIntensity: "Vibrate Trigger Custom Intensity"
+        case .pistol: "Pistol / Rifle"
+        case .sniper: "Sniper (Heavy Break)"
+        case .automatic: "Automatic Weapon (Fast)"
+        case .machineGun: "Heavy Machine Gun (Slow)"
+        case .bow: "Bow & Arrow"
+        case .accelerator: "Accelerator Pedal"
+        case .brake: "Brake Pedal"
+        case .twoStage: "Two-Stage (Aim & Fire)"
+        case .stiffSpring: "Stiff Spring (Heavy)"
+        case .softSpring: "Soft Spring (Light)"
+        case .heartbeat: "Heartbeat Pulse"
+        case .galloping: "Galloping / Footsteps"
+        case .choppy: "Choppy / Grinding"
         }
     }
 
-    var category: AdaptiveTriggerCategory {
-        switch self {
-        case .acceleratorPedal, .brakePedal, .motorStart: .racing
-        case .handgun, .revolver, .rifle, .automaticWeapon, .archery, .crossbow: .weapons
-        case .shield, .chainsaw, .flashlight: .immersive
-        case .off, .feedback, .weapon, .bowAndArrow, .vibration, .ratchetDetents: .standard
-        case .acceleration, .deceleration, .engineStrain, .braking, .clutchBite, .hydraulicBrake: .racing
-        case .pistolFire, .shotgunFire, .smgFire, .sniperFire, .twoStagePull, .softDetent, .progressiveRecoil, .precisionBreak, .stagedWall, .bowDraw: .weapons
-        case .galloping, .machineGun, .gameCubeTrigger, .choppyTrigger, .calibrateTrigger,
-             .vibrateTriggerPulse, .vibrateTriggerTenIntensity, .vibrateTriggerCustomIntensity: .specialized
-        case .fishing, .triggerJam, .doorResistance, .electricShock, .heartbeat, .rain: .immersive
-        case .resistanceTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger, .hardTrigger,
-             .veryHardTrigger, .hardestTrigger, .rigidTrigger: .standard
-        case .bowTrigger, .semiAutomaticGun, .automaticGun: .weapons
-        }
-    }
-
-    /// The default menu mirrors the DualSenseX trigger list, in that order.
-    /// "Custom Trigger Value" is the custom editor, not a built-in preset.
     static let recommendedCatalog: [AdaptiveTriggerPreset] = [
-        .off, .gameCubeTrigger, .resistanceTrigger, .bowTrigger, .galloping, .semiAutomaticGun,
-        .automaticGun, .machineGun, .choppyTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger,
-        .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger, .calibrateTrigger,
-        .vibrateTriggerPulse, .vibrateTriggerTenIntensity, .vibrateTriggerCustomIntensity
+        .off, .pistol, .sniper, .automatic, .machineGun, .bow, .twoStage,
+        .accelerator, .brake, .stiffSpring, .softSpring, .heartbeat, .galloping, .choppy
     ]
-
-    /// Ten feedback zones, including the final zone. The legacy designs and the
-    /// DualSenseX resistance presets are positional; weapon and vibration modes
-    /// return nil and are applied directly by the feature service.
-    var designedResistance: [Float]? {
-        switch self {
-        // Legacy designs stay loadable for selections saved by earlier releases.
-        case .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon,
-             .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart:
-            return (0..<10).map { i in
-                let t = Float(i) / 9
-                switch self {
-                case .acceleratorPedal: return 0.10 + 0.55*t
-                case .brakePedal: return 0.08 + 0.70*t*t
-                case .handgun: return t < 0.33 ? 0.22 : 0.48 + 0.07*(t-0.33)/0.67
-                case .revolver: return t < 0.22 ? 0.28 : 0.58 + 0.07*(t-0.22)/0.78
-                case .rifle: return 0.72
-                case .automaticWeapon: return 0.78
-                case .archery: return 0.08 + 0.70*t*t*t
-                case .crossbow: return 0.13 + 0.52*t
-                case .shield: return t < 0.10 ? 0.10 : 0.70
-                case .chainsaw: return t < 0.20 ? 0.30 : 0.48
-                case .flashlight: return 0.08
-                case .motorStart: return 0.65
-                default: return 0
-                }
-            }
-        // DualSenseX menu: resistance lives in the controller's documented
-        // 0-8 force scale, mapped to Apple's 0-1 strengths.
-        case .gameCubeTrigger:
-            // Analog pull, then the digital stop near the end of travel.
-            return [0.12, 0.12, 0.13, 0.13, 0.14, 0.15, 0.16, 1.0, 1.0, 1.0]
-        case .choppyTrigger:
-            // Stepped bands approximating DSX's choppy resistance.
-            return [0.50, 0.10, 0.45, 0.12, 0.55, 0.14, 0.60, 0.16, 0.65, 0.18]
-        case .verySoftTrigger: return Self.flatZones(0.25)   // 2/8
-        case .softTrigger: return Self.flatZones(0.375)      // 3/8
-        case .mediumTrigger: return Self.flatZones(0.50)     // 4/8
-        case .hardTrigger: return Self.flatZones(0.625)      // 5/8
-        case .veryHardTrigger: return Self.flatZones(0.75)   // 6/8
-        case .hardestTrigger: return Self.flatZones(0.875)   // 7/8
-        case .rigidTrigger: return Self.flatZones(1.0)       // 8/8 blocks travel
-        case .calibrateTrigger:
-            // Full-travel exercise: resistance sweeps from none to maximum.
-            return (0..<10).map { Float($0) / 9 }
-        case .stagedWall: return [0, 0.06, 0.10, 0.14, 0.18, 0.65, 0.72, 0.78, 0.82, 0.82]
-        case .clutchBite: return [0.04, 0.08, 0.18, 0.40, 0.62, 0.46, 0.28, 0.16, 0.12, 0.12]
-        case .bowDraw: return [0.04, 0.10, 0.22, 0.38, 0.56, 0.72, 0.85, 0.92, 0.48, 0.30]
-        case .hydraulicBrake: return [0.02, 0.03, 0.06, 0.12, 0.24, 0.40, 0.60, 0.78, 0.90, 0.95]
-        case .ratchetDetents: return [0, 0.10, 0.55, 0.12, 0.65, 0.12, 0.75, 0.12, 0.80, 0.18]
-        default: return nil
-        }
-    }
-
-    private static func flatZones(_ strength: Float) -> [Float] {
-        Array(repeating: min(max(strength, 0), 1), count: 10)
-    }
-
-    static func catalog(in category: AdaptiveTriggerCategory) -> [AdaptiveTriggerPreset] {
-        recommendedCatalog.filter { $0.category == category }
-    }
 }
 
 enum AdaptiveTriggerEffectMode: String, Codable, CaseIterable, Sendable {
@@ -670,114 +502,42 @@ enum AdaptiveTriggerSelection: Hashable, Sendable {
     case currentCustomSnapshot
 }
 
-extension AdaptiveTriggerPreset {
-    /// Ten feedback zones, including the final zone: unlike slope feedback these
-    /// do not terminate resistance before full pull. Braking is deliberately lighter.
-    var pedalStrengths: [Float]? {
-        switch self {
-        case .acceleration: [0.04, 0.06, 0.09, 0.12, 0.16, 0.20, 0.24, 0.28, 0.31, 0.34]
-        case .braking: [0.03, 0.04, 0.06, 0.08, 0.10, 0.12, 0.15, 0.18, 0.21, 0.24]
-        case .deceleration: [0.03, 0.05, 0.07, 0.09, 0.11, 0.14, 0.17, 0.20, 0.23, 0.26]
-        default: nil
-        }
-    }
-}
 
 struct AdaptiveTriggerSettings: Codable, Equatable, Sendable {
     var leftPreset: AdaptiveTriggerPreset
     var rightPreset: AdaptiveTriggerPreset
-    var leftCustom: AdaptiveTriggerCustomParameters
-    var rightCustom: AdaptiveTriggerCustomParameters
-    var leftUsesCustom: Bool
-    var rightUsesCustom: Bool
-    var leftCustomPresetID: UUID?
-    var rightCustomPresetID: UUID?
 
     static let `default` = AdaptiveTriggerSettings(
         leftPreset: .off,
-        rightPreset: .off,
-        leftCustom: .default,
-        rightCustom: .default,
-        leftUsesCustom: false,
-        rightUsesCustom: false
+        rightPreset: .off
     )
 
     private enum CodingKeys: String, CodingKey {
-        case leftPreset, rightPreset, leftCustom, rightCustom, leftUsesCustom, rightUsesCustom
-        case leftCustomPresetID, rightCustomPresetID
+        case leftPreset, rightPreset
     }
 
-    init(leftPreset: AdaptiveTriggerPreset, rightPreset: AdaptiveTriggerPreset, leftCustom: AdaptiveTriggerCustomParameters, rightCustom: AdaptiveTriggerCustomParameters, leftUsesCustom: Bool, rightUsesCustom: Bool, leftCustomPresetID: UUID? = nil, rightCustomPresetID: UUID? = nil) {
+    init(leftPreset: AdaptiveTriggerPreset, rightPreset: AdaptiveTriggerPreset) {
         self.leftPreset = leftPreset
         self.rightPreset = rightPreset
-        self.leftCustom = leftCustom
-        self.rightCustom = rightCustom
-        self.leftUsesCustom = leftUsesCustom
-        self.rightUsesCustom = rightUsesCustom
-        self.leftCustomPresetID = leftCustomPresetID
-        self.rightCustomPresetID = rightCustomPresetID
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         leftPreset = try container.decodeIfPresent(AdaptiveTriggerPreset.self, forKey: .leftPreset) ?? .off
         rightPreset = try container.decodeIfPresent(AdaptiveTriggerPreset.self, forKey: .rightPreset) ?? .off
-        // Preserve encoded snapshots verbatim, including during checksum validation.
-        leftCustom = try container.decodeIfPresent(AdaptiveTriggerCustomParameters.self, forKey: .leftCustom) ?? .default
-        rightCustom = try container.decodeIfPresent(AdaptiveTriggerCustomParameters.self, forKey: .rightCustom) ?? .default
-        leftUsesCustom = try container.decodeIfPresent(Bool.self, forKey: .leftUsesCustom) ?? false
-        rightUsesCustom = try container.decodeIfPresent(Bool.self, forKey: .rightUsesCustom) ?? false
-        leftCustomPresetID = try container.decodeIfPresent(UUID.self, forKey: .leftCustomPresetID)
-        rightCustomPresetID = try container.decodeIfPresent(UUID.self, forKey: .rightCustomPresetID)
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(leftPreset, forKey: .leftPreset)
         try container.encode(rightPreset, forKey: .rightPreset)
-        try container.encode(leftCustom, forKey: .leftCustom)
-        try container.encode(rightCustom, forKey: .rightCustom)
-        try container.encode(leftUsesCustom, forKey: .leftUsesCustom)
-        try container.encode(rightUsesCustom, forKey: .rightUsesCustom)
-        // Omitting absent IDs keeps existing preset checksums stable.
-        try container.encodeIfPresent(leftCustomPresetID, forKey: .leftCustomPresetID)
-        try container.encodeIfPresent(rightCustomPresetID, forKey: .rightCustomPresetID)
     }
 
-    func selection(for side: AdaptiveTriggerSide, library: [CustomAdaptiveTriggerPreset]) -> AdaptiveTriggerSelection {
-        let usesCustom = side == .left ? leftUsesCustom : rightUsesCustom
-        guard usesCustom else { return .builtIn(side == .left ? leftPreset : rightPreset) }
-        let id = side == .left ? leftCustomPresetID : rightCustomPresetID
-        let snapshot = side == .left ? leftCustom : rightCustom
-        if let id, let saved = library.first(where: { $0.id == id }), saved.parameters.clamped == snapshot.clamped {
-            return .custom(id)
-        }
-        // Deleted or edited library entries never rewrite an applied/saved snapshot.
-        return .currentCustomSnapshot
-    }
-
-    mutating func select(_ selection: AdaptiveTriggerSelection, for side: AdaptiveTriggerSide, library: [CustomAdaptiveTriggerPreset]) {
-        switch selection {
-        case .builtIn(let preset):
-            if side == .left {
-                leftPreset = preset; leftUsesCustom = false; leftCustomPresetID = nil
-            } else {
-                rightPreset = preset; rightUsesCustom = false; rightCustomPresetID = nil
-            }
-        case .custom(let id):
-            guard let saved = library.first(where: { $0.id == id }) else { return }
-            applySnapshot(saved.parameters, for: side, presetID: id)
-        case .currentCustomSnapshot:
-            // The custom editor supplies the values; switch the side onto them.
-            if side == .left { leftUsesCustom = true } else { rightUsesCustom = true }
-        }
-    }
-
-    mutating func applySnapshot(_ parameters: AdaptiveTriggerCustomParameters, for side: AdaptiveTriggerSide, presetID: UUID? = nil) {
+    mutating func select(_ preset: AdaptiveTriggerPreset, for side: AdaptiveTriggerSide) {
         if side == .left {
-            leftCustom = parameters.clamped; leftUsesCustom = true; leftCustomPresetID = presetID
+            leftPreset = preset
         } else {
-            rightCustom = parameters.clamped; rightUsesCustom = true; rightCustomPresetID = presetID
+            rightPreset = preset
         }
     }
 }
@@ -1561,7 +1321,7 @@ struct ControllerFlickState {
     mutating func reset() { self = Self() }
     mutating func sample(rate: Float, angle: Float, now: Double) -> Float {
         guard rate.isFinite, angle.isFinite, now.isFinite else { reset(); return 0 }
-        guard let neutral else {
+        guard neutral != nil else {
             if abs(rate) < 0.2 { self.neutral = angle }
             return 0
         }
@@ -1769,35 +1529,22 @@ struct ControllerTriggerEnvelope {
         let threshold: Float
         let frequency: Double
         switch mode {
-        case .handgun: threshold = 0.33; frequency = 0
-        case .revolver: threshold = 0.22; frequency = 0
-        case .rifle: threshold = 0.80; frequency = 7
-        case .automaticWeapon: threshold = 0.75; frequency = 12
-        case .archery: threshold = 0.20; frequency = 3
-        case .crossbow: threshold = 0.20; frequency = 4
-        case .shield: threshold = 0.10; frequency = 4
-        case .chainsaw: threshold = 0.20; frequency = 9
-        case .motorStart: threshold = 0.30; frequency = 6
-        case .brakePedal: threshold = 0.45; frequency = 8
-        case .flashlight: threshold = 0.10; frequency = 0
-        case .gameCubeTrigger: threshold = 0.72; frequency = 0
-        case .bowTrigger: threshold = 0.20; frequency = 3
-        case .semiAutomaticGun: threshold = 0.44; frequency = 0
-        case .automaticGun: threshold = 0.20; frequency = 12
-        case .machineGun: threshold = 0.18; frequency = 16
-        case .galloping: threshold = 0.15; frequency = 4
-        case .choppyTrigger: threshold = 0.10; frequency = 7
+        case .pistol: threshold = 0.30; frequency = 0
+        case .sniper: threshold = 0.60; frequency = 0
+        case .automatic: threshold = 0.20; frequency = 12
+        case .machineGun: threshold = 0.30; frequency = 6
+        case .bow: threshold = 0.20; frequency = 3
+        case .twoStage: threshold = 0.70; frequency = 0
+        case .heartbeat: threshold = 0.10; frequency = 1.2
+        case .galloping: threshold = 0.20; frequency = 4.0
+        case .choppy: threshold = 0.10; frequency = 15.0
         default: threshold = 1.1; frequency = 0
         }
         if p <= 0.04 {
             if previous > 0.04, peak >= threshold {
                 switch mode {
-                case .handgun, .revolver: result.intensity = 0.60; result.duration = 0.06
-                case .archery: result.intensity = 0.80; result.duration = 0.05
-                case .crossbow: result.intensity = 0.60; result.duration = 0.04
-                case .gameCubeTrigger: result.intensity = 0.70; result.duration = 0.04
-                case .bowTrigger: result.intensity = 0.80; result.duration = 0.05
-                case .semiAutomaticGun: result.intensity = 0.65; result.duration = 0.035
+                case .pistol, .twoStage, .sniper: result.intensity = 0.60; result.duration = 0.06
+                case .bow: result.intensity = 0.80; result.duration = 0.05
                 default: break
                 }
             }
@@ -1807,30 +1554,23 @@ struct ControllerTriggerEnvelope {
         let crossing = previous < threshold && p >= threshold
         if crossing {
             nextPulse = now
-            if mode == .handgun || mode == .revolver { result.intensity = mode == .revolver ? 0.7 : 0.55; result.duration = 0.025 }
-            if mode == .flashlight { result.intensity = 0.4; result.duration = 0.025 }
+            if mode == .pistol || mode == .twoStage || mode == .sniper { result.intensity = 0.7; result.duration = 0.025 }
         }
         if p >= threshold, frequency > 0, now >= nextPulse {
             nextPulse = max(nextPulse + 1 / frequency, now + 0.001)
             switch mode {
-            case .rifle: result.intensity = 0.75; result.duration = 0.10; recoilEnd = now + 0.10
-            case .automaticWeapon: result.intensity = 0.80; result.duration = 0.025; recoilEnd = now + 0.025
-            case .brakePedal: result.intensity = 0.25*(p-threshold)/(1-threshold); result.duration = 0.08
-            case .archery: result.intensity = 0.5*p*p; result.duration = 0.30
-            case .crossbow: result.intensity = 0.3*p; result.duration = 0.20
-            case .shield: result.intensity = crossing ? 1 : 0.5; result.duration = crossing ? 0.08 : 0.20
-            case .chainsaw: result.intensity = 0.75; result.duration = 0.08; recoilEnd = now + 0.05
-            case .motorStart: result.intensity = 0.55; result.duration = 0.12; recoilEnd = now + 0.06
-            case .automaticGun: result.intensity = 0.70; result.duration = 0.020; recoilEnd = now + 0.030
-            case .machineGun: result.intensity = 0.85; result.duration = 0.030; recoilEnd = now + 0.040
-            case .galloping: result.intensity = 0.35 + 0.35*p; result.duration = 0.06
-            case .choppyTrigger: result.intensity = 0.25*p; result.duration = 0.04
+            case .automatic: result.intensity = 0.80; result.duration = 0.025; recoilEnd = now + 0.025
+            case .machineGun: result.intensity = 1.0; result.duration = 0.04; recoilEnd = now + 0.04
+            case .bow: result.intensity = 0.5*p*p; result.duration = 0.30
+            case .heartbeat: result.intensity = 0.60; result.duration = 0.10
+            case .galloping: result.intensity = 0.70; result.duration = 0.08
+            case .choppy: result.intensity = 0.40; result.duration = 0.02; recoilEnd = now + 0.02
             default: break
             }
         }
         if p < threshold { recoilEnd = 0; nextPulse = 0 }
         if now < recoilEnd {
-            result.forceBoost = mode == .automaticWeapon ? 0.22 : (mode == .motorStart ? 0.15 : 0.20)
+            result.forceBoost = 0.20
         }
         return result
     }

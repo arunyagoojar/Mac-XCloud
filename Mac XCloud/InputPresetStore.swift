@@ -92,21 +92,6 @@ struct InputPreset: Codable, Equatable, Identifiable, Sendable {
     )
 }
 
-struct CustomAdaptiveTriggerPreset: Codable, Equatable, Identifiable, Sendable {
-    var id: UUID
-    var name: String
-    var parameters: AdaptiveTriggerCustomParameters
-    var createdAt: Date
-    var updatedAt: Date
-
-    init(id: UUID = UUID(), name: String, parameters: AdaptiveTriggerCustomParameters = .default, createdAt: Date = .now, updatedAt: Date = .now) {
-        self.id = id
-        self.name = name
-        self.parameters = parameters
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
-    }
-}
 
 private struct PresetEnvelope<Value: Codable>: Codable {
     let schemaVersion: Int
@@ -139,7 +124,6 @@ private struct PresetIndex: Codable {
     let schemaVersion: Int
     let generatedAt: Date
     let presets: [Entry]
-    let adaptiveTriggerPresets: [Entry]
 }
 
 enum InputPresetStorageStatus: Equatable {
@@ -175,7 +159,6 @@ final class InputPresetStore: ObservableObject {
     static let schemaVersion = 2
 
     @Published private(set) var presets: [InputPreset] = [.default]
-    @Published private(set) var customTriggerPresets: [CustomAdaptiveTriggerPreset] = []
     @Published private(set) var storageStatus: InputPresetStorageStatus = .checking
     @Published private(set) var activePresetID: UUID = InputPreset.defaultID
     @Published var operationMessage: String?
@@ -221,6 +204,9 @@ final class InputPresetStore: ObservableObject {
             }
         }
         guard key != currentGameID else { return }
+        if let browser {
+            try? saveNativeSettings(browser.controllerFeatures.settings.perPreset, for: activePresetID)
+        }
         gameTransition &+= 1
         let transition = gameTransition
         if currentGameID.isEmpty && !key.isEmpty {
@@ -274,9 +260,6 @@ final class InputPresetStore: ObservableObject {
         preset.id = UUID()
         preset.name = uniqueName(from: String(preset.name.prefix(100)).trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Imported Profile")
         preset.createdAt = .now; preset.updatedAt = .now
-        // Custom effects are self-contained snapshots; source library UUIDs are local.
-        preset.controller.adaptiveTriggers.leftCustomPresetID = nil
-        preset.controller.adaptiveTriggers.rightCustomPresetID = nil
         try write(preset)
         presets.append(preset); sortPresets(); updateIndexAfterSave()
         return preset.id
@@ -326,7 +309,6 @@ final class InputPresetStore: ObservableObject {
     }
 
     private var presetsURL: URL? { rootURL?.appendingPathComponent("presets", isDirectory: true) }
-    private var triggersURL: URL? { rootURL?.appendingPathComponent("adaptive-trigger-presets", isDirectory: true) }
     private var tombstonesURL: URL? { rootURL?.appendingPathComponent("tombstones.json") }
 
     init(browser: BrowserModel, fileManager: FileManager = .default, defaults: UserDefaults = .standard) {
@@ -376,7 +358,6 @@ final class InputPresetStore: ObservableObject {
             let decoder = decoder()
             unreadablePresetIDs.removeAll()
             var loadedPresets: [InputPreset] = []
-            var loadedTriggers: [CustomAdaptiveTriggerPreset] = []
             if let presetsURL {
                 for url in try jsonFiles(in: presetsURL) {
                     do {
@@ -391,16 +372,6 @@ final class InputPresetStore: ObservableObject {
                     }
                 }
             }
-            if let triggersURL {
-                for url in try jsonFiles(in: triggersURL) {
-                    do {
-                        let data = try Data(contentsOf: url)
-                        try validateEnvelope(data, kind: "adaptive-trigger-preset")
-                        let envelope = try decoder.decode(PresetEnvelope<CustomAdaptiveTriggerPreset>.self, from: data)
-                        loadedTriggers.append(envelope.value)
-                    } catch { operationMessage = "Skipped unreadable file: \(url.lastPathComponent)" }
-                }
-            }
             let defaultURL = presetURL(for: InputPreset.defaultID)
             let migrationKey = "inputPresets.defaultMigrated.v2"
             var savedDefault = loadedPresets.first(where: \.isDefault) ?? .default
@@ -410,9 +381,7 @@ final class InputPresetStore: ObservableObject {
                 savedDefault.updatedAt = .now
             }
             presets = [savedDefault] + loadedPresets.filter { !$0.isDefault }
-            customTriggerPresets = loadedTriggers
             sortPresets()
-            sortTriggerPresets()
             if !fileManager.fileExists(atPath: defaultURL.path) { try write(savedDefault) }
             try writeIndex()
             if shouldMigrateDefault { defaults.set(true, forKey: migrationKey) }
@@ -422,7 +391,6 @@ final class InputPresetStore: ObservableObject {
             rootURL = nil
             storageStatus = .unavailable(error.localizedDescription)
             presets = [.default]
-            customTriggerPresets = []
         }
     }
 
@@ -711,62 +679,7 @@ final class InputPresetStore: ObservableObject {
     }
 
 
-    // MARK: - Adaptive trigger preset CRUD
 
-    func createTriggerPreset(named proposedName: String, parameters: AdaptiveTriggerCustomParameters) -> UUID? {
-        let name = uniqueTriggerName(from: proposedName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Custom Trigger")
-        let preset = CustomAdaptiveTriggerPreset(name: name, parameters: parameters.clamped)
-        do {
-            try write(preset)
-            customTriggerPresets.append(preset)
-            sortTriggerPresets()
-            try writeIndex()
-            operationMessage = "Created \(name)"
-            return preset.id
-        } catch { operationMessage = "Could not create trigger preset: \(error.localizedDescription)"; return nil }
-    }
-
-    func saveTriggerPreset(_ preset: CustomAdaptiveTriggerPreset) {
-        guard let index = customTriggerPresets.firstIndex(where: { $0.id == preset.id }) else { return }
-        var updated = preset
-        updated.name = uniqueTriggerName(from: preset.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Custom Trigger", excluding: preset.id)
-        updated.parameters = updated.parameters.clamped
-        updated.updatedAt = .now
-        do {
-            try write(updated)
-            customTriggerPresets[index] = updated
-            sortTriggerPresets()
-            try writeIndex()
-            operationMessage = "Saved \(updated.name)"
-        } catch { operationMessage = "Could not save trigger preset: \(error.localizedDescription)" }
-    }
-
-    func duplicateTriggerPreset(id: UUID) -> UUID? {
-        guard var copy = customTriggerPresets.first(where: { $0.id == id }) else { return nil }
-        copy.id = UUID()
-        copy.name = uniqueTriggerName(from: copy.name + " Copy")
-        copy.createdAt = .now
-        copy.updatedAt = .now
-        do {
-            try write(copy)
-            customTriggerPresets.append(copy)
-            sortTriggerPresets()
-            try writeIndex()
-            return copy.id
-        } catch { operationMessage = "Could not duplicate trigger preset: \(error.localizedDescription)"; return nil }
-    }
-
-    func deleteTriggerPreset(id: UUID) {
-        guard let preset = customTriggerPresets.first(where: { $0.id == id }) else { return }
-        do {
-            let revision = triggerRevision(at: triggerURL(for: id)) + 1
-            try recordTombstone(id: id, kind: "adaptive-trigger-preset", revision: revision)
-            try removeLocal(triggerURL(for: id))
-            customTriggerPresets.removeAll { $0.id == id }
-            try writeIndex()
-            operationMessage = "Deleted \(preset.name)"
-        } catch { operationMessage = "Could not delete trigger preset: \(error.localizedDescription)" }
-    }
 
     // MARK: - Autosave
 
@@ -882,7 +795,6 @@ final class InputPresetStore: ObservableObject {
     private func createLayout(at root: URL) throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: root.appendingPathComponent("presets", isDirectory: true), withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: root.appendingPathComponent("adaptive-trigger-presets", isDirectory: true), withIntermediateDirectories: true)
     }
 
     private func jsonFiles(in directory: URL) throws -> [URL] {
@@ -900,19 +812,10 @@ final class InputPresetStore: ObservableObject {
         try writeData(encoded(envelope), to: presetURL(for: preset.id))
     }
 
-    private func write(_ preset: CustomAdaptiveTriggerPreset) throws {
-        guard rootURL != nil else { throw CocoaError(.fileWriteUnknown) }
-        let revision = max(triggerRevision(at: triggerURL(for: preset.id)),
-                           tombstoneRevision(id: preset.id, kind: "adaptive-trigger-preset")) + 1
-        let envelope = PresetEnvelope(schemaVersion: Self.schemaVersion, kind: "adaptive-trigger-preset", revision: revision, checksum: try checksum(for: preset), value: preset)
-        try writeData(encoded(envelope), to: triggerURL(for: preset.id))
-    }
-
     private func writeIndex() throws {
         guard let rootURL else { return }
         let entries = presets.map { PresetIndex.Entry(id: $0.id, name: $0.name, revision: inputRevision(at: presetURL(for: $0.id)), updatedAt: $0.updatedAt, file: $0.isDefault ? "default.json" : "\($0.id.uuidString.lowercased()).json") }
-        let triggers = customTriggerPresets.map { PresetIndex.Entry(id: $0.id, name: $0.name, revision: triggerRevision(at: triggerURL(for: $0.id)), updatedAt: $0.updatedAt, file: "\($0.id.uuidString.lowercased()).json") }
-        try writeData(encoded(PresetIndex(schemaVersion: Self.schemaVersion, generatedAt: .now, presets: entries, adaptiveTriggerPresets: triggers)), to: rootURL.appendingPathComponent("index.json"))
+        try writeData(encoded(PresetIndex(schemaVersion: Self.schemaVersion, generatedAt: .now, presets: entries)), to: rootURL.appendingPathComponent("index.json"))
     }
 
     private func writeData(_ data: Data, to url: URL) throws {
@@ -957,28 +860,14 @@ final class InputPresetStore: ObservableObject {
         return envelope.revision
     }
 
-    private func triggerRevision(at url: URL) -> Int {
-        guard let data = try? Data(contentsOf: url), let envelope = try? decoder().decode(PresetEnvelope<CustomAdaptiveTriggerPreset>.self, from: data) else { return 0 }
-        return envelope.revision
-    }
-
     private func presetURL(for id: UUID) -> URL {
         let name = id == InputPreset.defaultID ? "default.json" : "\(id.uuidString.lowercased()).json"
         return presetsURL!.appendingPathComponent(name)
     }
 
-    private func triggerURL(for id: UUID) -> URL { triggersURL!.appendingPathComponent("\(id.uuidString.lowercased()).json") }
-
     private func validateEnvelope(_ data: Data, kind: String) throws {
         if kind == "input-preset" {
             let envelope = try decoder().decode(PresetEnvelope<InputPreset>.self, from: data)
-            guard (1...Self.schemaVersion).contains(envelope.schemaVersion),
-                  envelope.kind == kind,
-                  try checksum(for: envelope.value) == envelope.checksum else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
-        } else {
-            let envelope = try decoder().decode(PresetEnvelope<CustomAdaptiveTriggerPreset>.self, from: data)
             guard (1...Self.schemaVersion).contains(envelope.schemaVersion),
                   envelope.kind == kind,
                   try checksum(for: envelope.value) == envelope.checksum else {
@@ -1020,16 +909,8 @@ final class InputPresetStore: ObservableObject {
         presets = presets.filter(\.isDefault) + presets.filter { !$0.isDefault }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private func sortTriggerPresets() {
-        customTriggerPresets.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
     private func uniqueName(from base: String, excluding id: UUID? = nil) -> String {
         unique(base, used: Set(presets.filter { $0.id != id }.map { $0.name.lowercased() }))
-    }
-
-    private func uniqueTriggerName(from base: String, excluding id: UUID? = nil) -> String {
-        unique(base, used: Set(customTriggerPresets.filter { $0.id != id }.map { $0.name.lowercased() }))
     }
 
     private func unique(_ base: String, used: Set<String>) -> String {

@@ -60,7 +60,7 @@ struct Mac_XCloudApp: App {
                 Divider()
 
             }
-            AdaptiveTriggerCommands(service: browser.controllerFeatures, store: browser.inputPresets)
+            AdaptiveTriggerCommands(service: browser.controllerFeatures)
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
                     .keyboardShortcut("r", modifiers: .command)

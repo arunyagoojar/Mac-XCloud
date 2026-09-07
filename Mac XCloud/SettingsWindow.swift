@@ -361,10 +361,20 @@ struct SettingsRootView: View {
     }
 
     private func settingRow(_ model: SettingsModel, def: SettingDef) -> some View {
-        SettingsRow(def.label) {
-            control(model, def: def)
-                .frame(width: 168, alignment: .trailing)
-        }.help(def.note ?? def.label)
+        VStack(alignment: .leading, spacing: 4) {
+            SettingsRow(def.label, note: def.note) {
+                control(model, def: def)
+                    .frame(width: 168, alignment: .trailing)
+            }.help(def.note ?? def.label)
+
+            if def.id == "app.clarityPipeline" {
+                Text(SettingsModel.clarityDescription(for: model.clarityPipeline))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 2)
+                    .padding(.bottom, 2)
+            }
+        }
     }
 
     @ViewBuilder
@@ -448,12 +458,14 @@ struct SettingsRootView: View {
                 if model.isPingingRegions {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Testing…").font(.caption).foregroundStyle(.secondary)
+                        Text(model.pingStatusText ?? "Testing…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 } else if let best = model.bestRegionResult {
-                    Text("\(best.name) · \(best.averageMs) ms")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("best of \(best.samples) samples")
+                    Text("The best server for you is \(best.displayName)")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("\(best.averageMs) ms · lowest latency")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {

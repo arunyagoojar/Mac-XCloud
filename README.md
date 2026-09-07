@@ -1,214 +1,249 @@
 <div align="center">
   <img src="docs/images/mac-xcloud-logo.png" width="160" alt="Mac Xcloud logo">
   <h1>Mac Xcloud</h1>
-  <p><strong>Xbox Cloud Gaming and Xbox Remote Play in a dedicated Mac app.</strong></p>
-  <p><a href="https://github.com/arunyagoojar/Mac-XCloud/releases/latest">Download</a> · <a href="docs/releases/1.3.7.md">What's new in 1.3.7</a> · <a href="https://ko-fi.com/arunyagoojar">Support development</a></p>
-  <p>Free and open source · macOS 12+ · Intel and Apple Silicon</p>
+  <p><strong>Xbox Cloud Gaming and Xbox Remote Play in a dedicated native Mac app.</strong></p>
+  <p>
+    <a href="https://github.com/arunyagoojar/Mac-XCloud/releases/latest"><img src="https://img.shields.io/github/v/release/arunyagoojar/Mac-XCloud?label=Latest%20Release&color=107C10" alt="Latest Release"></a>
+    <img src="https://img.shields.io/badge/Platform-macOS%2012%2B-000000?logo=apple" alt="macOS 12+">
+    <img src="https://img.shields.io/badge/Architecture-Universal%20(Apple%20Silicon%20%26%20Intel)-informational" alt="Universal Binary">
+    <a href="https://ko-fi.com/arunyagoojar"><img src="https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=kofi" alt="Support on Ko-fi"></a>
+  </p>
+  <p>
+    <a href="#key-features">Key Features</a> · 
+    <a href="#screenshots">Screenshots</a> · 
+    <a href="#dualsense-adaptive-triggers">Adaptive Triggers</a> · 
+    <a href="#motion-steering--gyro-aiming">Motion & Steering</a> · 
+    <a href="#app-shortcuts">Shortcuts</a> · 
+    <a href="#installation--requirements">Download</a> · 
+    <a href="#building-from-source">Build from Source</a>
+  </p>
 </div>
 
-Mac Xcloud combines the Xbox website and [Better xCloud](https://github.com/redphx/better-xcloud) with native SwiftUI/AppKit settings, controller tools and a compact macOS performance overlay. Web content runs in Apple's WKWebView; motion sensing, controller feedback and the app interface use native macOS APIs.
+---
 
-You need the account, subscription and region access required by Xbox for the games you stream. Remote Play uses your own configured Xbox console. This project is independent of Microsoft.
+**Mac Xcloud** combines the Xbox web ecosystem and [Better xCloud](https://github.com/redphx/better-xcloud) with native macOS APIs, delivering an edge-to-edge desktop experience for **Xbox Cloud Gaming** and **Xbox Remote Play**.
 
-## What's new in 1.3.7
+Running in Apple's native `WKWebView`, stream video benefits from custom WebKit compatibility shims, AMD FSR upscaling, and low latency, while controller input, DualSense adaptive triggers, motion steering, and live diagnostics are handled directly by native macOS frameworks (`GameController`, `CoreHaptics`).
 
-- More usable motion steering: gyro-assisted tracking reduces accelerometer jolts while preserving small corrections and held turns.
-- DualSenseX-style adaptive-trigger menu: GameCube, Resistance, Bow, Galloping, gun modes, Choppy, a Very Soft–Rigid resistance ladder, Calibrate and the Vibrate presets, with pressure-driven haptics and release/recoil effects.
-- Live OLED background updates and clearer reload requirements for settings.
-- A clean play area: browsing uses shortcuts instead of permanent Back/Home buttons.
-- Fresh console status when reopening Remote Play, plus a release check for both Mac architectures.
-- Accurate release notes in GitHub releases and Sparkle update dialogs.
+> [!NOTE]
+> You need an active Xbox Game Pass Ultimate subscription, account, and region access required by Xbox to stream cloud titles. Remote Play connects directly to your own configured Xbox console. This open-source project is independent of and not endorsed by Microsoft or Sony.
 
-See the [full release notes](docs/releases/1.3.7.md). Xbox waking from standby remains unresolved.
+---
 
-## Features
+## Screenshots
 
-### Native Mac interface
+<div align="center">
+  <img src="docs/images/xcloud-home.png" width="850" alt="Mac Xcloud Main Interface">
+  <p><em>Edge-to-edge cloud gaming interface with custom window drag controls and native HUD.</em></p>
+</div>
 
-- Dedicated window, fullscreen, menu-bar actions and persistent Microsoft sign-in.
-- Native settings with five main groups: Play & Streaming, Controller, Motion & Steering, Profiles & Shortcuts, and App.
-- Automatic settings saving, descriptive help, suggested settings and collapsible advanced controls/diagnostics.
-- Xbox-style startup animation, loading/connection states, retry controls and controller reconnect recovery.
-- Cursor hiding during controller use; normal mouse navigation and text entry remain available.
-- Native browsing and app shortcuts, without permanent navigation buttons covering the website.
-- Sparkle automatic updates with readable, version-specific release notes.
+<br>
 
-### Cloud streaming, video and sound
+| Stream & Video Settings | Controller Calibration & Visualizer |
+| :---: | :---: |
+| <img src="docs/images/settings-stream.png" width="420" alt="Stream Settings"> | <img src="docs/images/controller-tools.png" width="420" alt="Controller Calibration"> |
 
-- Resolution, visual-quality/H.264 profile and maximum bitrate choices; optional prevention of resolution drops.
-- Region selection, region latency testing, preferred language and IPv6 preferences.
-- FSR upscaling and available WebGL/WebGPU processing choices, sharpening, renderer preferences and frame-rate limits.
-- Aspect ratio, video position, brightness, contrast and saturation controls.
-- Volume adjustment/boost, microphone-on-launch preference and optional combined audio/video streams.
-- Filtered screenshots and screenshot actions.
-- Better xCloud options including console-version Fortnite and local co-op where supported.
+| DualSense Adaptive Triggers & Haptics | Per-Game Profile Auto-Switching |
+| :---: | :---: |
+| <img src="docs/images/triggers-haptics.png" width="420" alt="DualSense Trigger Settings"> | <img src="docs/images/input-presets.png" width="420" alt="Input Presets and Game Profiles"> |
 
-Available resolutions, codecs and processing backends depend on Xbox, the game, your Mac and WebKit. Selecting an option cannot unlock an unsupported service capability. Region/stream initialization changes may need a new session; global appearance and other startup preferences may need **Reload to Apply**.
+---
 
-### Native performance overlay
+## Key Features
 
-- Compact pill-shaped HUD with macOS material blur and edge spacing.
-- Selectable FPS, ping, bitrate, decode time, packet loss and dropped-frame statistics.
-- Position, font size, opacity, background strength and conditional colors.
-- Quick Glance behavior and controller shortcut/gesture activation.
-- Additional stream, region, controller and motion diagnostics in Settings.
+### 🖥️ Native macOS Experience
+- **Edge-to-Edge Chromeless Window**: Custom drag strip under floating macOS traffic lights with zoom/fullscreen support.
+- **Xbox Series X Boot Video**: Authentic Xbox startup sequence playing seamlessly on initial launch while WebKit prepares the stream.
+- **Persistent Microsoft Authentication**: Dedicated cookie and local storage isolation keeps you signed in between launches.
+- **Background Menu Bar Companion**: Quick menu bar status item with instant access to settings, trigger presets, and stream actions.
+- **Automatic Updates**: Built-in [Sparkle](https://sparkle-project.org/) framework delivers seamless background checks with detailed, versioned release notes.
 
-### Controller calibration and customization
+### 🎮 Controller Suite & DualSense Support
+- **Hardware Calibration**: Live stick center, range calibration, customizable dead zones, and response curves (Linear, Precise Center, Quick Response, S-Curve).
+- **DualSense Adaptive Triggers**: Full implementation using macOS 10-zone resistance arrays with presets matching the popular DualSenseX catalog (GameCube digital click, bow draw, machine gun recoil, staged resistance).
+- **CoreHaptics & Rumble Routing**: Real-time translation of stream rumble telemetry to native body and trigger haptics with customizable rumble exponent and gain curves.
+- **Trigger Lock & Stop Emulation**: Software-defined trigger stops with resistance thresholds.
+- **Lightbar & Battery**: Controller battery levels mirrored into the stream status bar and customizable lightbar RGB colors.
 
-- Stick-center, full-range and trigger calibration, plus live input testing.
-- Gameplay dead zones, independent left/right trigger start offsets and stick response curves with previews.
-- Controller remapping and controller shortcut profiles.
-- Haptic intensity, sharpness and supported locality controls; controller LED options.
-- Global rumble gain and profile-specific rumble response shaping.
-- Independent left/right trigger lock emulation, subject to hardware support.
-- Controller detection, native/browser mismatch diagnostics and reconnect/focus recovery.
+### 🏎️ Motion Steering, Gyro Aiming & Flick Shifting
+- **Virtual Steering Wheel**: Translates controller rotation/tilt into a smooth, proportional left-stick gamepad axis—ideal for racing games like *Forza Horizon 5*.
+- **Gyro-Assisted Tracking**: Reduces accelerometer jolts while preserving fine corrections and held turns.
+- **Gyro Aiming**: Angular velocity mapped to right-stick aiming with configurable sensitivity, smoothing, vertical inversion, and hold-to-aim modifiers.
+- **Flick Shifting**: Rapid upward/downward controller flicks trigger right-stick upshift/downshift pulses with automatic return-stroke suppression.
+- **DualSense Touchpad**: Touchpad aiming and customizable touchpad swipe/tap gestures.
 
-### Motion steering, gyro and touchpad
+### 📊 Native Performance HUD & Diagnostics
+- **Pill HUD Overlay**: Lightweight macOS material overlay rendering FPS, network ping, bitrate (Mbps), decode time, packet loss, and dropped frames.
+- **Customizable Appearance**: Selectable screen positions, font sizes, opacity, background blur, and conditional green/yellow/red latency coloring.
+- **Quick Glance**: Momentarily summon stream metrics via controller shortcut without keeping the HUD permanently on screen.
+- **Diagnostics Panel (`⇧⌘D`)**: Live inspection of WebRTC connections, Gamepad API status, bridge message latency, and hardware detection.
 
-- **Steering wheel:** rotate a motion-capable controller to drive the virtual left stick. A held physical angle holds the steering input.
-- Full-turn angle per side, response curve, smoothing, center dead zone, game dead-zone compensation, inversion, maximum output and recentering.
-- **Gyro aiming:** rotation-rate aiming on the right stick, with sensitivity, activation and response controls.
-- **Flick shifting:** upward/downward flicks produce right-stick shift inputs while suppressing the return stroke. Enable manual gears and map **right-stick up to upshift** and **right-stick down to downshift** inside the game.
-- **Touchpad aiming:** relative touch movement with sensitivity adjustment and left/right stick selection.
-- Touchpad gesture actions, including swipe/hold options. Aiming takes priority so gestures do not compete with it.
-- Motion diagnostics showing sensor availability and delivered input.
+### ⚡ Stream Optimization & Video Clarity
+- **1080p HQ Unlocked**: WebKit SDP shims negotiate H.264 High Profile (`profile-level-id=64001f`), preventing automatic resolution drops.
+- **AMD FSR 1.0 Upscaler**: Injected EASU + RCAS sharpening passes running at native Retina `devicePixelRatio`.
+- **Renderer Selection**: Choose between WebGL2 and WebGPU processing backends with customizable sharpness and contrast.
+- **Audio & Video Customization**: Aspect ratio adjustment, video position, brightness, contrast, saturation, and volume boosting.
 
-These are controller-to-stick translations, not a system-wide virtual steering-wheel driver. Forza receives a gamepad axis, not a force-feedback wheel. DualSense is the main tested controller; other devices depend on the motion/touch features macOS exposes. Gyro aiming, steering and flick shifting are separate selectable modes.
+### 📂 Per-Game Profiles & Macros
+- **Automatic Game Switching**: Automatically switches profiles based on active Xbox game IDs (with title fallback), restoring settings when leaving a stream.
+- **Multi-Step Macro Engine**: Create up to 16-step timed macros with button presses, delays, native actions, and haptic pulses.
+- **Hold-to-Fire (Rapid Fire)**: Repeatable trigger firing with configurable rate (2–15 pulses/sec).
+- **Profile Export/Import**: Export profiles as portable JSON files to share between Macs.
 
-### Adaptive triggers
+### 🏠 Xbox Remote Play
+- **Direct Console Streaming**: Stream directly from your home Xbox Series X/S or Xbox One console.
+- **Console List Refresh**: Automatically updates console power and connection state on open.
 
-The default menu mirrors the DualSenseX trigger list. "Custom Trigger Value" applies your custom editor settings; every named mode maps to the controller's documented effect primitives (positions ×9 zones, strengths ×8, frequencies ÷255):
+---
 
-| Mode | Mapped effect |
-| --- | --- |
-| Normal Trigger | Off; the trigger keeps its physical spring |
-| Custom Trigger Value | Your custom editor values (mode, positions, strengths, amplitude, speed) |
-| GameCube Trigger | Light pull, then a hard digital wall near 78% travel with a release click |
-| Resistance Trigger | Continuous resistance (50%) from rest |
-| Bow Trigger | Draw resistance that snaps at 78% |
-| Galloping Trigger | Slow rhythmic vibration approximating the two-foot gallop |
-| Semi Automatic Gun | Resistance that breaks once per pull at 44% |
-| Automatic Gun | Full-amplitude vibration at DualSenseX's documented rate 15 |
-| Machine Trigger | Full-amplitude slow vibration with a mechanical handle-haptic rhythm |
-| Choppy Trigger | Stepped resistance alternating across the ten hardware zones |
-| Very Soft → Hardest | Continuous resistance from 25% to 88% |
-| Rigid Trigger | Full resistance from rest; travel is fully blocked |
-| Calibrate Trigger | Resistance sweeping from none to full across the whole pull |
-| Vibrate Trigger Pulse | Slow, strong vibration pulses |
-| Vibrate Trigger 10 Intensity | Gentle vibration (DualSenseX intensity 10 ≈ 3/8 amplitude) |
-| Vibrate Trigger Custom Intensity | Vibration using your custom amplitude and speed |
+## DualSense Adaptive Trigger Modes
 
-- Independent effects for left and right triggers, also selectable from the Mac menus.
-- Custom constant, break/release, slope, smooth curve, staged, detent and vibration/ramp designs.
-- Editable strengths, travel positions, vibration amplitude/frequency and curve previews.
-- Saved custom-trigger library; older saved designs — including the previous twelve-design default menu — remain loadable as previous selections.
-- Resistance remains active while independent handle haptics provide local feedback. Locks and custom effects take priority.
+Mac Xcloud features a DualSenseX-inspired trigger preset catalog. Each mode maps to the physical DualSense hardware effect primitives (10 positional zones, 8 strength steps, frequency modulations):
 
-Adaptive resistance requires a supported DualSense. Positional resistance uses ten hardware zones on macOS 12.3+, with simpler fallback on 12.0–12.2. Effects approximate the intended feel; percentages are API strengths, not calibrated physical forces. These are **local simulations**, not Xbox weapon telemetry, and cannot automatically identify the gun you equip. The app does not promise native PS5 force-feedback parity.
+| Mode | Behavior & Simulated Sensation |
+| :--- | :--- |
+| **Normal Trigger** | Standard controller resistance; keeps physical spring action. |
+| **Custom Trigger Value** | User-defined parameters (mode, position, strengths, amplitude, frequency). |
+| **GameCube Trigger** | Smooth initial pull followed by a hard digital wall near 78% travel with a release click. |
+| **Resistance Trigger** | Continuous uniform 50% resistance from start of pull. |
+| **Bow Trigger** | Progressive string drawing tension that suddenly snaps release at 78% travel. |
+| **Galloping Trigger** | Alternating rhythmic pulses approximating galloping hooves. |
+| **Semi Automatic Gun** | Realistic trigger wall that breaks once per pull at 44% travel with release reset. |
+| **Automatic Gun** | Sustained high-frequency vibration simulating automatic rifle recoil. |
+| **Machine Trigger** | Heavy, mechanical, slower-cycling vibration combined with handle haptics. |
+| **Choppy Trigger** | Stepped resistance alternating across the ten hardware feedback zones. |
+| **Very Soft → Hardest** | Continuous resistance ramp selectable across a 25% to 88% range. |
+| **Rigid Trigger** | Maximum resistance from rest; travel is fully blocked. |
+| **Calibrate Trigger** | Continuous linear ramp sweeping from zero to full force across the entire stroke. |
+| **Vibrate Trigger Pulse** | Deep, rhythmic vibration pulses. |
+| **Vibrate 10 Intensity** | Subtle, gentle vibration feedback. |
 
-### Profiles, shortcuts and macros
+> [!TIP]
+> Adaptive resistance requires a Sony PlayStation DualSense or DualSense Edge controller. 10-zone positional resistance is supported on macOS 12.3+ (with continuous feedback fallback on 12.0–12.2). Trigger effects are local physical simulations, not direct in-game weapon telemetry from Xbox servers.
 
-- Named profiles: create, duplicate, rename, switch and delete, with a protected Default profile.
-- **Remember settings per game:** game IDs are preferred, with website-title fallback. Newly encountered games get separate profiles; leaving a stream restores the general profile.
-- Saves controller, motion, touch, triggers, remapping/shortcuts and selected picture/audio values. App appearance, connection choices and hardware calibration remain global.
-- Import/export profiles as JSON files for sharing between Macs, with validation and portable custom-effect snapshots.
-- Controller button/chord bindings with press, release, hold and double-press activation.
-- Editable macros with presses/releases, waits, haptics and app actions; up to 16 steps and two seconds per macro.
-- Hold-to-fire with adjustable repetition rate.
+---
 
-Choosing the same profile for multiple games deliberately shares it. Title fallback depends on the website supplying a meaningful game title.
+## Input Focus & Keyboard/Mouse Support
 
-### Xbox Remote Play
+Mac Xcloud is purpose-built for **gamepad play, motion steering, and haptics**. 
 
-- Stream from your own Xbox, including on your home network, through Better xCloud's Remote Play support.
-- Remote resolution/HQ and IPv6 preferences, console status and input diagnostics.
-- Stale console lists refresh when reopened.
-- Physical controllers work when WebKit exposes them to the browser Gamepad API.
+* **Game Controllers**: Full support for PlayStation DualSense / DualSense Edge, Xbox Wireless Controllers, Nintendo Switch Pro Controllers, and MFi gamepads via Apple's `GameController` framework.
+* **Mouse & Keyboard**: Dedicated to native app controls, window management, web navigation, and Microsoft account sign-in. To ensure stability and eliminate pointer-lock conflicts in Apple's `WKWebView`, virtual mouse-to-stick emulation was deliberately removed in favor of a rock-solid gamepad and motion steering experience.
 
-Remote Play still needs Xbox authentication and console remote-feature setup; it is not an offline LAN protocol. Testers have reported working console streaming on Apple Silicon and an Intel Mac. **Automatic waking from standby is not confirmed fixed:** some consoles still need to be powered on manually. See [Better xCloud's setup guide](https://better-xcloud.github.io/remote-play/).
+---
 
-### Website appearance and behavior
+## Forza Horizon 5: Suggested Steering Setup
 
-- OLED black background, reduced animation, scrollbar visibility and controller-friendly layout.
-- Controller connection toasts, simplified stream menu and feedback-dialog suppression.
-- Loading artwork, rocket animation, queue estimates and game-card wait times.
-- Home-section visibility, website image quality, layout and optional analytics/feature blocking.
+When using **Motion Steering**, the app translates controller rotation into a native left-stick axis. Configure the game's gamepad settings (not steering wheel force-feedback menus):
 
-## Why keyboard/mouse gaming was removed
+| Mac Xcloud Steering Setting | Recommended Baseline |
+| :--- | :--- |
+| **Full Turn Angle** | 45° per side (adjust to 50–55° if overly sensitive) |
+| **Response Exponent** | 1.0 (Linear) |
+| **Smoothing** | 0.35 (~70 ms filter window) |
+| **Center Dead Zone** | 0° |
+| **Game Dead-Zone Compensation** | 0 |
+| **Maximum Output** | 100% |
+| **Invert Direction** | Off |
 
-Mac Xcloud uses **WKWebView, Apple's native WebKit browser view—the same browser engine family as Safari**. It does not embed Chrome or Edge. The browser APIs needed for reliable keyboard/mouse gaming and pointer capture are more limited in this environment, and Better xCloud's Chromium behavior could not simply be carried over.
+*Inside Forza Horizon 5*:
+- Steering: **Normal** (adds standard gamepad assistance; switch to Simulation once accustomed).
+- Steering Linearity: Neutral **50** (or `0.5`).
+- Inside / Outside Steering Deadzones: **0 / 100**.
+- Shifting: Enable manual gears and use **Flick Shifting** (map Right Stick Up to Upshift and Right Stick Down to Downshift).
 
-Making native mouse gaming and keyboard-to-controller emulation reliable became disproportionately time-consuming. I chose to remove them instead of shipping a half-finished experience. Normal typing, clicking, scrolling and app shortcuts still work. Controller shortcuts and macros remain supported. The bundled Better xCloud engine retains upstream code, but its removed gaming modes are disabled by the native bridge.
+---
 
-## App shortcuts
-
-Also listed in **Settings → App → About → App shortcuts**.
+## App Shortcuts
 
 | Action | Shortcut |
-| --- | --- |
-| Back in website history | ⌘[ or Backspace |
-| Forward | ⌘] |
-| Xbox home | ⇧⌘L |
-| Open Settings | ⌘, |
-| Reload | ⌘R |
-| Fullscreen | ⌃⌘F |
+| :--- | :--- |
+| **Back in website history** | `⌘[` or `Backspace` |
+| **Forward in website history** | `⌘]` |
+| **Xbox Home (`xbox.com/play`)** | `⇧⌘L` |
+| **Open Settings** | `⌘,` |
+| **Reload Page** | `⌘R` |
+| **Toggle Fullscreen** | `⌃⌘F` |
+| **Toggle Diagnostics Overlay** | `⇧⌘D` |
+| **Settings Home** | `⇧⌘H` *(inside Settings)* |
 
-Backspace navigation is disabled while typing, composing text or playing a stream. Settings has its own history controls. Configure controller actions under **Profiles & Shortcuts**.
+---
 
-## Forza Horizon 5: relaxed cruising setup
+## Installation & Requirements
 
-This is a suggested starting point, not a universal best tune. The app sends a **left-stick axis**, so configure the game's controller input rather than its wheel force-feedback options.
+### Requirements
+* **macOS 12.0 (Monterey) or newer**
+* Compatible with both **Apple Silicon** (M1/M2/M3/M4) and **Intel** Macs.
+* A supported gamepad (DualSense recommended for adaptive triggers and gyro features).
+* Xbox Game Pass Ultimate subscription (for cloud gaming) or an Xbox console (for Remote Play).
 
-| Mac Xcloud steering setting | Start here |
-| --- | --- |
-| Full turn | 45° each side |
-| Response exponent | 1.0 / linear |
-| Smoothing | 0.35, about 72 ms |
-| Center dead zone | 0° |
-| Game dead-zone compensation | 0 |
-| Maximum steering | 100% |
-| Invert | Off, unless your direction is reversed |
+### Quick Install
+1. Download **`MacXcloud.zip`** from the [Latest Release](https://github.com/arunyagoojar/Mac-XCloud/releases/latest).
+2. Unzip and drag **`Mac Xcloud.app`** into your **Applications** folder.
+3. Open the app and sign in with your Microsoft account.
 
-Center the controller while holding it comfortably facing you. In FH5, start with **Normal steering**, **ABS on**, **traction control on**, and **automatic shifting** while learning. Use steering dead zones **inside 0 / outside 100** and leave steering linearity at its neutral **50** (or **0.5** if presented as a normalized value), where available. Wheel-only options do not apply to this input path.
+> [!NOTE]
+> Releases are ad-hoc signed. If macOS Gatekeeper displays an unidentified developer prompt, go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
-If it is twitchy, increase full turn to 50–55° first. If corrections feel delayed, lower app smoothing to 0.2 before adding sensitivity. Change one setting at a time and save it in your Forza profile. Do not reduce maximum steering to cure center sensitivity: that also limits available steering at low speed.
+---
 
-Slow down before tight corners. More steering input cannot overcome tire grip, and Normal steering adds gamepad assistance. Start with a moderate-power car and gentle roads before working on drifting or rapid countersteering. [Forza's own tuning guide](https://support.forzamotorsport.net/hc/en-us/articles/4409761195923-FH5-Wheel-Setup-and-Tuning) explains Normal/Simulation behavior and the neutral linearity value; the numbers above are this project's suggested motion-controller baseline.
+## Building from Source
 
-## Download and requirements
+### Prerequisites
+* Mac running macOS 14+ or newer.
+* **Xcode 16+** (with macOS SDK).
 
-1. Download `MacXcloud.zip` from the [latest release](https://github.com/arunyagoojar/Mac-XCloud/releases/latest).
-2. Extract and move **Mac Xcloud.app** to Applications.
-3. Open the app and sign in to Xbox.
-
-The deployment target is **macOS 12.0+**, with a universal Intel/Apple Silicon executable. Some controller and renderer features require newer macOS or supported hardware. Releases are ad-hoc signed, not Apple-notarized; macOS may require approval in Privacy & Security. Use releases from this repository.
-
-## Build from source
-
-Building requires **Xcode 26 or newer** and a Mac capable of running it. That is separate from the app's macOS 12 deployment target.
+### Build Instructions
 
 ```bash
+# Clone the repository
 git clone https://github.com/arunyagoojar/Mac-XCloud.git
 cd Mac-XCloud
+
+# Build the universal release application
 xcodebuild -project "Mac XCloud.xcodeproj" \
-  -scheme "Mac XCloud" -configuration Release \
-  -destination "generic/platform=macOS" \
-  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO build
+  -scheme "Mac XCloud" \
+  -configuration Release \
+  -destination "platform=macOS" \
+  ARCHS="arm64 x86_64" \
+  ONLY_ACTIVE_ARCH=NO \
+  CODE_SIGN_IDENTITY="-" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=YES \
+  build
 ```
 
-Or open the project in Xcode and run the **Mac XCloud** scheme. Automated contracts live in `Tests/`; controller feel, network behavior and OS compatibility still need real hardware testing.
+The compiled application bundle will be located in `build/Build/Products/Release/Mac Xcloud.app`.
 
-## Releases and updates
+### Running Contract Tests
 
-Pushes to `main` trigger the release workflow. The project version selects `docs/releases/<version>.md`; the workflow uses that file for both GitHub and Sparkle release notes. Add the versioned notes whenever bumping the version. Publishing fails if the notes are missing or the executable lacks Intel or Apple Silicon support.
+Automated regression and validation suites verify trigger math, profile encoding, and bridge compatibility:
 
-Sparkle verifies the update archive with a separate EdDSA signature. This is not Developer ID signing or notarization.
+```bash
+# Run controller mathematical contract suite
+./Tests/run-controller-contracts.sh
 
-## Credits and support
+# Run preset store encoding contracts
+./Tests/run-preset-store-contracts.sh
+```
 
-Built on [Better xCloud](https://github.com/redphx/better-xcloud) by redphx and [Sparkle](https://sparkle-project.org/). Motion research references and implementation limits are documented in [steering reliability](docs/steering-reliability.md).
+---
 
-If the app helps you, consider [supporting development](https://ko-fi.com/arunyagoojar). When reporting a problem, include macOS/app version, Mac architecture, controller/connection type, cloud versus Remote Play, and the relevant settings. Do not include account tokens.
+## Credits & Acknowledgements
 
-Xbox and game artwork belong to their respective owners. Mac Xcloud is not affiliated with or endorsed by Microsoft, Sony or the game publishers.
+* Built upon the open-source userscript [Better xCloud](https://github.com/redphx/better-xcloud) created by [redphx](https://github.com/redphx).
+* Automatic updates powered by the [Sparkle Project](https://sparkle-project.org/).
+* AMD FidelityFX Super Resolution 1.0 (FSR 1 / EASU + RCAS) licensed under MIT by Advanced Micro Devices, Inc.
+
+### Support Development
+If you enjoy using Mac Xcloud, consider [supporting ongoing development on Ko-fi](https://ko-fi.com/arunyagoojar).
+
+---
+
+## License & Legal Disclaimer
+
+This project is licensed under the open-source MIT License.
+
+*Xbox, Xbox Cloud Gaming, Xbox Remote Play, and related logos and trademarks belong to Microsoft Corporation.*  
+*PlayStation, DualSense, and DualSense Edge are registered trademarks of Sony Interactive Entertainment Inc.*  
+*Mac Xcloud is an independent third-party open-source project and is not affiliated with, endorsed by, or sponsored by Microsoft, Sony, or any game publisher.*

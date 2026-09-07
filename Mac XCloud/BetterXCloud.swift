@@ -87,6 +87,7 @@ enum BetterXCloud {
           if (kind !== 'video') return caps;
           var codecs = Array.isArray(caps.codecs) ? caps.codecs.slice() : [];
           var profiles = [
+            'profile-level-id=42001f;packetization-mode=1',
             'profile-level-id=42e01f;packetization-mode=1',
             'profile-level-id=4d401f;packetization-mode=1',
             'profile-level-id=64001f;packetization-mode=1'
@@ -236,23 +237,8 @@ enum BetterXCloud {
         //    the mouse is idle (native side enables/disables this).
         scripts.append(WKUserScript(source: cursorHideScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
-        // 8. AMD FSR 1 (EASU + RCAS) upscaler engine, rendered at native
-        //    devicePixelRatio over the stream video.
-        if let upscaler = upscalerScript() {
-            scripts.append(upscaler)
-        }
-
         return scripts
     }
-
-    /// The upscaler engine ships precomposed (FSR1 EASU/RCAS blocks inlined,
-    /// AMD MIT license attributed in the file header).
-    private static func upscalerScript() -> WKUserScript? {
-        guard let coreURL = Bundle.main.url(forResource: "upscaler-core", withExtension: "js"),
-              let source = try? String(contentsOf: coreURL, encoding: .utf8) else { return nil }
-        return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-    }
-
     /// The native side enables this when a controller is connected. After 2.5s
     /// of no mouse movement the cursor hides; any movement brings it back.
     static let cursorHideScript = #"""
@@ -353,8 +339,6 @@ enum BetterXCloud {
             .joined(separator: "\n")
         // The final send path handles both physical and native-only changes.
         let cleaned = stripped
-        let macroOverlayAvailable = true
-
         let inputAdapter = #"""
         // Install before Better xCloud or Xbox captures getGamepads.
         // Keep the actual controller identity, buttons and actuator; change only input values.
@@ -366,9 +350,9 @@ enum BetterXCloud {
           __xcgPollInput.reads++;
           const connected = pads.filter(p => p && p.connected !== false);
           const now = performance.now(), n = __xcgPollInput.values;
-          const active = now - __xcgPollInput.at < 200 && n.nativeControllerCount === 1 &&
+          const active = now - __xcgPollInput.at < 200 && n.nativeControllerCount >= 1 &&
             !document.hidden && !window.BX_EXPOSED?.disableGamepadPolling;
-          if (connected.length !== 1 || !Number.isFinite(__xcgPollInput.at)) return pads;
+          if (connected.length === 0 || !Number.isFinite(__xcgPollInput.at)) return pads;
           const p = connected[0];
           // A standard four-axis controller is required; leave virtual MKB alone.
           if (p.mapping !== "standard" || p.axes.length < 4 || /virtual/i.test(p.id)) return pads;
@@ -444,7 +428,7 @@ enum BetterXCloud {
         let __xcgNativeInput = {}, __xcgNativeInputAt = 0, __xcgMergedSamples = 0;
         const __xcgBridgeCapability = {
           profileCapture: true,
-          macroOverlay: \#(macroOverlayAvailable ? "true" : "false"),
+          macroOverlay: true,
           nativeRumble: false
         };
 
@@ -633,9 +617,10 @@ enum BetterXCloud {
           mergeMacroButtons: function (sample) {
             if (!__xcgBridgeCapability.macroOverlay || !sample || typeof sample !== "object") return sample;
             let pads = Array.from(navigator.getGamepads()).filter(Boolean);
-            if (!window.__xcgPollInput?.installed && sample.Virtual !== true && pads.length === 1 && sample.GamepadIndex === pads[0].index &&
-                __xcgNativeInput.nativeControllerCount === 1 &&
-                performance.now() - __xcgNativeInputAt < 200 && !document.hidden && !BX_EXPOSED.disableGamepadPolling) {
+            let padMatches = pads.length === 0 || sample.GamepadIndex === pads[0].index;
+            if (!window.__xcgPollInput?.installed && sample.Virtual !== true && padMatches &&
+                __xcgNativeInput.nativeControllerCount >= 1 &&
+                performance.now() - __xcgNativeInputAt < 500 && !document.hidden && !BX_EXPOSED.disableGamepadPolling) {
               __xcgMergedSamples++;
               const n = __xcgNativeInput;
               ["LeftTrigger", "RightTrigger", "LeftThumbXAxis", "LeftThumbYAxis", "RightThumbXAxis", "RightThumbYAxis"].forEach(key => {
@@ -888,7 +873,7 @@ enum BetterXCloud {
               decodeTime: finite(dt.current, 0)
             };
           },
-          regionList: function () { try { return Object.keys(STATES.serverRegions).map(function (k) { var r = STATES.serverRegions[k]; return { name: k, baseUri: r.baseUri || '' }; }); } catch (e) { return []; } },
+          regionList: function () { try { return Object.keys(STATES.serverRegions).map(function (k) { var r = STATES.serverRegions[k]; return { name: k, displayName: r.displayName || k, shortName: r.shortName || k, baseUri: r.baseUri || '' }; }); } catch (e) { return []; } },
           refreshProfiles: async function (kind) {
             return await StreamSettings.refreshControllerSettings();
           },

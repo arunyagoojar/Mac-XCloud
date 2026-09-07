@@ -378,6 +378,15 @@ final class ControllerFeatureService: ObservableObject {
         attach(to: GCController.current ?? GCController.controllers().first)
     }
 
+    func recheckMotionSensors() {
+        if controller == nil { attachFirstAvailableController() }
+        guard let controller else { return }
+        gyroAvailable = controller.motion?.hasRotationRate == true
+        if enhancements.gyroEnabled {
+            controller.motion?.sensorsActive = true
+        }
+    }
+
     func startPolling(interval: TimeInterval = 1.0 / 60.0) {
         guard pollTimer == nil else { return }
         let safeInterval = min(max(interval, 1.0 / 240.0), 0.25)
@@ -532,6 +541,9 @@ final class ControllerFeatureService: ObservableObject {
                           "RightThumbXAxis": Double(next.rightStick.x), "RightThumbYAxis": Double(next.rightStick.y)]
             }
             let e = enhancements
+            if e.gyroEnabled, let motion = controller.motion {
+                if !motion.sensorsActive { motion.sensorsActive = true }
+            }
             if e.gyroEnabled, let motion = controller.motion,
                (e.gyroStick == .left) || e.gyroFlickMode == true || !e.gyroAimOnly || rawLeftTrigger > 0.25 {
                 if e.gyroStick == .left {
@@ -768,22 +780,16 @@ final class ControllerFeatureService: ObservableObject {
 
     private func updateTriggerEnvelopes(_ gamepad: GCDualSenseGamepad, at now: Double) {
         let t = settings.adaptiveTriggers
-        let left = leftTriggerEnvelope.sample(preset: t.leftUsesCustom || enhancements.leftLock ? .off : t.leftPreset, pressure: gamepad.leftTrigger.value, now: now)
-        let right = rightTriggerEnvelope.sample(preset: t.rightUsesCustom || enhancements.rightLock ? .off : t.rightPreset, pressure: gamepad.rightTrigger.value, now: now)
+        let left = leftTriggerEnvelope.sample(preset: enhancements.leftLock ? .off : t.leftPreset, pressure: gamepad.leftTrigger.value, now: now)
+        let right = rightTriggerEnvelope.sample(preset: enhancements.rightLock ? .off : t.rightPreset, pressure: gamepad.rightTrigger.value, now: now)
         for (event, locality) in [(left, HapticLocality.leftHandle), (right, HapticLocality.rightHandle)] where event.intensity > 0 {
             playTestPulse(intensity: event.intensity, sharpness: 0.7, duration: event.duration, locality: locality, sustained: true)
         }
         if left.forceBoost != leftTriggerBoost {
             leftTriggerBoost = left.forceBoost
-            if !t.leftUsesCustom && !enhancements.leftLock, let levels = t.leftPreset.designedResistance {
-                applyResistanceZones(gamepad.leftTrigger, levels: levels.map { min($0 + left.forceBoost, 1) }, fallback: levels.last ?? 0)
-            }
         }
         if right.forceBoost != rightTriggerBoost {
             rightTriggerBoost = right.forceBoost
-            if !t.rightUsesCustom && !enhancements.rightLock, let levels = t.rightPreset.designedResistance {
-                applyResistanceZones(gamepad.rightTrigger, levels: levels.map { min($0 + right.forceBoost, 1) }, fallback: levels.last ?? 0)
-            }
         }
     }
 
@@ -793,18 +799,8 @@ final class ControllerFeatureService: ObservableObject {
         leftTriggerEnvelope = ControllerTriggerEnvelope(); rightTriggerEnvelope = ControllerTriggerEnvelope()
         leftTriggerBoost = 0; rightTriggerBoost = 0
         guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else { return }
-        if settings.adaptiveTriggers.leftUsesCustom {
-            applyCustomAdaptiveTrigger(dualSense.leftTrigger, parameters: settings.adaptiveTriggers.leftCustom)
-        } else {
-            applyAdaptiveTrigger(dualSense.leftTrigger, preset: settings.adaptiveTriggers.leftPreset,
-                                 custom: settings.adaptiveTriggers.leftCustom)
-        }
-        if settings.adaptiveTriggers.rightUsesCustom {
-            applyCustomAdaptiveTrigger(dualSense.rightTrigger, parameters: settings.adaptiveTriggers.rightCustom)
-        } else {
-            applyAdaptiveTrigger(dualSense.rightTrigger, preset: settings.adaptiveTriggers.rightPreset,
-                                 custom: settings.adaptiveTriggers.rightCustom)
-        }
+        applyAdaptiveTrigger(dualSense.leftTrigger, preset: settings.adaptiveTriggers.leftPreset)
+        applyAdaptiveTrigger(dualSense.rightTrigger, preset: settings.adaptiveTriggers.rightPreset)
         let e = enhancements
         let position = min(max(e.lockPosition, 0.05), 0.95)
         if e.leftLock { dualSense.leftTrigger.setModeFeedbackWithStartPosition(position, resistiveStrength: 1) }
@@ -813,93 +809,36 @@ final class ControllerFeatureService: ObservableObject {
 
     /// DualSenseX default-menu mapping. DSX raw values convert to Apple's
     /// normalized scales as positions ×9 zones, strengths ×8, frequencies ÷255.
-    private func applyAdaptiveTrigger(
-        _ trigger: GCDualSenseAdaptiveTrigger,
-        preset: AdaptiveTriggerPreset,
-        custom: AdaptiveTriggerCustomParameters
-    ) {
-        if let strengths = preset.designedResistance ?? preset.pedalStrengths {
-            applyResistanceZones(trigger, levels: strengths, fallback: strengths.last ?? 0.2)
-            return
-        }
+    private func applyAdaptiveTrigger(_ trigger: GCDualSenseAdaptiveTrigger, preset: AdaptiveTriggerPreset) {
         switch preset {
-        case .acceleratorPedal, .brakePedal, .handgun, .revolver, .rifle, .automaticWeapon,
-             .archery, .crossbow, .shield, .chainsaw, .flashlight, .motorStart:
-            break // Positional resistance above; independent haptics follow pull events.
-        case .gameCubeTrigger, .choppyTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger,
-             .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger, .calibrateTrigger:
-            break // Positional resistance above; independent haptics follow pull events.
-        case .resistanceTrigger:
-            trigger.setModeFeedbackWithStartPosition(0, resistiveStrength: 0.50)
-        case .bowTrigger:
-            // DSX Bow (start, end, strength, snap): draw resistance, then the release.
-            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.78, resistiveStrength: 0.90)
-        case .semiAutomaticGun:
-            // Official weapon effect, formerly named SemiAutomaticGun.
-            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.44, resistiveStrength: 0.90)
-        case .automaticGun:
-            // DSX documented example (0)(8)(15): full amplitude, rate 15/255.
-            trigger.setModeVibrationWithStartPosition(0, amplitude: 1.0, frequency: 0.06)
-        case .galloping:
-            // Discernable only at low rates; approximate the two-foot rhythm.
-            trigger.setModeVibrationWithStartPosition(0.10, amplitude: 0.65, frequency: 0.07)
-        case .machineGun:
-            // DSX example (0)(9)(7)(7)(10): full amplitude, slow mechanical rate.
-            trigger.setModeVibrationWithStartPosition(0, amplitude: 1.0, frequency: 0.04)
-        case .vibrateTriggerPulse:
-            trigger.setModeVibrationWithStartPosition(0.05, amplitude: 0.90, frequency: 0.09)
-        case .vibrateTriggerTenIntensity:
-            // DSX VibrateTriggerIntensity=10 of 0-255 ≈ 3/8 on the official 0-8 scale.
-            trigger.setModeVibrationWithStartPosition(0.05, amplitude: 0.31, frequency: 0.50)
-        case .vibrateTriggerCustomIntensity:
-            let value = custom.clamped
-            trigger.setModeVibrationWithStartPosition(0.05, amplitude: value.amplitude, frequency: value.frequency)
         case .off:
             trigger.setModeOff()
-        case .feedback:
-            trigger.setModeFeedbackWithStartPosition(0.25, resistiveStrength: 0.35)
-        case .weapon:
-            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.67, resistiveStrength: 0.75)
-        case .precisionBreak:
-            trigger.setModeWeaponWithStartPosition(0.18, endPosition: 0.38, resistiveStrength: 0.65)
-        case .bowAndArrow:
-            applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .slopeFeedback, startPosition: 0.10, endPosition: 0.90, startStrength: 0.15, endStrength: 0.95, amplitude: 0, frequency: 0))
-        case .vibration:
-            trigger.setModeVibrationWithStartPosition(0.20, amplitude: 0.60, frequency: 0.55)
-        case .acceleration, .deceleration:
-            break // Sustained positional feedback is applied above.
-        case .engineStrain:
-            trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.30, frequency: 0.16)
-        case .braking:
-            break // Sustained positional feedback is applied above.
-        case .pistolFire:
-            trigger.setModeWeaponWithStartPosition(0.22, endPosition: 0.36, resistiveStrength: 0.42)
-        case .shotgunFire:
-            trigger.setModeWeaponWithStartPosition(0.25, endPosition: 0.65, resistiveStrength: 0.78)
-        case .smgFire:
-            trigger.setModeVibrationWithStartPosition(0.18, amplitude: 0.32, frequency: 0.48)
-        case .sniperFire:
-            trigger.setModeWeaponWithStartPosition(0.38, endPosition: 0.48, resistiveStrength: 0.86)
-        case .fishing:
-            applySlopeFeedback(trigger, start: 0.18, end: 0.90, startStrength: 0.12, endStrength: 0.65)
-        case .triggerJam:
-            trigger.setModeFeedbackWithStartPosition(0.20, resistiveStrength: 0.92)
-        case .doorResistance:
-            applySlopeFeedback(trigger, start: 0.12, end: 0.92, startStrength: 0.08, endStrength: 0.72)
-        case .electricShock:
-            trigger.setModeVibrationWithStartPosition(0.15, amplitude: 0.75, frequency: 0.90)
+        case .pistol:
+            trigger.setModeWeaponWithStartPosition(0.25, endPosition: 0.40, resistiveStrength: 0.85)
+        case .sniper:
+            trigger.setModeWeaponWithStartPosition(0.50, endPosition: 0.60, resistiveStrength: 1.0)
+        case .automatic:
+            trigger.setModeVibrationWithStartPosition(0, amplitude: 0.90, frequency: 0.12)
+        case .machineGun:
+            trigger.setModeVibrationWithStartPosition(0, amplitude: 1.0, frequency: 0.05)
+        case .bow:
+            applySlopeFeedback(trigger, start: 0.10, end: 0.90, startStrength: 0.10, endStrength: 0.95)
+        case .accelerator:
+            trigger.setModeFeedbackWithStartPosition(0, resistiveStrength: 0.35)
+        case .brake:
+            applyResistanceZones(trigger, levels: [0.05, 0.10, 0.20, 0.30, 0.45, 0.65, 0.85, 0.95, 1.0, 1.0], fallback: 0.80)
+        case .twoStage:
+            applyResistanceZones(trigger, levels: [0.10, 0.10, 0.10, 0.10, 0.10, 0.90, 1.0, 1.0, 0.0, 0.0], fallback: 0.50)
+        case .stiffSpring:
+            trigger.setModeFeedbackWithStartPosition(0, resistiveStrength: 0.85)
+        case .softSpring:
+            trigger.setModeFeedbackWithStartPosition(0, resistiveStrength: 0.25)
         case .heartbeat:
-            trigger.setModeVibrationWithStartPosition(0.30, amplitude: 0.48, frequency: 0.10)
-        case .rain:
-            trigger.setModeVibrationWithStartPosition(0.12, amplitude: 0.18, frequency: 0.82)
-        case .twoStagePull:
-            applyResistanceZones(trigger, levels: [0.05, 0.08, 0.10, 0.12, 0.14, 0.52, 0.60, 0.66, 0.70, 0.70], fallback: 0.45)
-        case .softDetent:
-            applyResistanceZones(trigger, levels: [0.04, 0.06, 0.10, 0.34, 0.50, 0.30, 0.14, 0.10, 0.10, 0.10], fallback: 0.20)
-        case .progressiveRecoil:
-            applyCustomAdaptiveTrigger(trigger, parameters: .init(mode: .vibrationRamp, startPosition: 0.18, endPosition: 0.85, startStrength: 0, endStrength: 0, amplitude: 0.72, frequency: 0.42))
-        case .stagedWall, .clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents:
-            break // The positional design above owns these effects.
+            trigger.setModeVibrationWithStartPosition(0, amplitude: 0.60, frequency: 0.03)
+        case .galloping:
+            trigger.setModeVibrationWithStartPosition(0.2, amplitude: 0.70, frequency: 0.06)
+        case .choppy:
+            applyResistanceZones(trigger, levels: [0.8, 0.1, 0.8, 0.1, 0.8, 0.1, 0.8, 0.1, 0.8, 0.1], fallback: 0.45)
         }
     }
 
@@ -916,76 +855,11 @@ final class ControllerFeatureService: ObservableObject {
         }
     }
 
-    func previewAdaptiveTrigger(_ parameters: AdaptiveTriggerCustomParameters) {
-        guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else {
-            lastError = "Adaptive triggers require a connected DualSense controller."
-            return
-        }
-        applyCustomAdaptiveTrigger(dualSense.leftTrigger, parameters: parameters)
-        applyCustomAdaptiveTrigger(dualSense.rightTrigger, parameters: parameters)
-    }
-
-    func stopTriggerPreview() {
-        guard let dualSense = controller?.extendedGamepad as? GCDualSenseGamepad else { return }
-        dualSense.leftTrigger.setModeOff()
-        dualSense.rightTrigger.setModeOff()
-        applyAdaptiveTriggerSettings()
-    }
-
     private func applySlopeFeedback(_ trigger: GCDualSenseAdaptiveTrigger, start: Float, end: Float, startStrength: Float, endStrength: Float) {
         if #available(macOS 12.3, *) {
             trigger.setModeSlopeFeedback(startPosition: start, endPosition: end, startStrength: startStrength, endStrength: endStrength)
         } else {
             trigger.setModeFeedbackWithStartPosition(start, resistiveStrength: startStrength)
-        }
-    }
-
-    private func applyCustomAdaptiveTrigger(
-        _ trigger: GCDualSenseAdaptiveTrigger,
-        parameters: AdaptiveTriggerCustomParameters
-    ) {
-        let value = parameters.clamped
-        switch value.mode {
-        case .off:
-            trigger.setModeOff()
-        case .feedback:
-            trigger.setModeFeedbackWithStartPosition(value.startPosition, resistiveStrength: value.startStrength)
-        case .weapon:
-            trigger.setModeWeaponWithStartPosition(
-                value.startPosition,
-                endPosition: value.endPosition,
-                resistiveStrength: value.startStrength
-            )
-        case .vibration:
-            trigger.setModeVibrationWithStartPosition(
-                value.startPosition,
-                amplitude: value.amplitude,
-                frequency: value.frequency
-            )
-        case .resistanceCurve, .twoStageFeedback, .detent:
-            applyResistanceZones(trigger, levels: value.travelLevels, fallback: value.startStrength)
-        case .vibrationRamp:
-            if #available(macOS 12.3, *) {
-                let levels = value.travelLevels
-                let zones = GCDualSenseAdaptiveTrigger.PositionalAmplitudes(values: (
-                    levels[0], levels[1], levels[2], levels[3], levels[4],
-                    levels[5], levels[6], levels[7], levels[8], levels[9]
-                ))
-                trigger.setModeVibration(amplitudes: zones, frequency: value.frequency)
-            } else {
-                trigger.setModeVibrationWithStartPosition(value.startPosition, amplitude: value.amplitude, frequency: value.frequency)
-            }
-        case .slopeFeedback:
-            if #available(macOS 12.3, iOS 15.4, tvOS 15.4, visionOS 1.0, *) {
-                trigger.setModeSlopeFeedback(
-                    startPosition: value.startPosition,
-                    endPosition: value.endPosition,
-                    startStrength: value.startStrength,
-                    endStrength: value.endStrength
-                )
-            } else {
-                trigger.setModeFeedbackWithStartPosition(value.startPosition, resistiveStrength: value.startStrength)
-            }
         }
     }
 

@@ -7,14 +7,14 @@ struct PingTestControl: View {
         HStack(spacing: 8) {
             if model.isPingingRegions {
                 ProgressView().controlSize(.small)
-                Text("Testing…")
+                Text(model.pingStatusText ?? "Testing…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let best = model.bestRegionResult {
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text("\(best.name) · \(best.averageMs) ms")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("best of \(best.samples) samples")
+                    Text("The best server for you is \(best.displayName)")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("\(best.averageMs) ms · lowest latency")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

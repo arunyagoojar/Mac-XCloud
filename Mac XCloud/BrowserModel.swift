@@ -759,6 +759,8 @@ final class BrowserModel: ObservableObject {
         isGamepadPollingPaused = false
         isLoading = true
         reconcileControllerOwnerState()
+        controllerFeatures.recheckMotionSensors()
+        streamInputInFlight = false
         loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
         loadingTimeout?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -886,6 +888,7 @@ final class BrowserModel: ObservableObject {
             bridgeReady = true
             evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
             reconcileControllerOwnerState()
+            controllerFeatures.recheckMotionSensors()
             setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
             if isSettingsWindowOpen { settingsModel.load() }
