@@ -296,6 +296,11 @@ final class InputPresetStore: ObservableObject {
     private var webApplyTask: Task<String, Never>?
     private var webApplyGeneration: UInt64 = 0
     private var readinessRetryTask: Task<Void, Never>?
+    private var webReadinessRetryTask: Task<Void, Never>?
+    /// Bounded backoff retries for an apply the page could not confirm yet.
+    /// Streams start faster than the page finishes loading its input stack.
+    private var webReadinessRetries = 0
+    private let webReadinessDelays: [UInt64] = [1_000_000_000, 2_000_000_000, 4_000_000_000, 8_000_000_000, 16_000_000_000]
     private var suppressAutosave = false
     private var nativeAutosaveGeneration: UInt64 = 0
     private var explicitSaveToken: UUID?
@@ -551,6 +556,50 @@ final class InputPresetStore: ObservableObject {
         } catch { operationMessage = "Could not delete preset: \(error.localizedDescription)" }
     }
 
+    /// Full factory reset: deletes every saved profile (including per-game
+    /// ones), clears game links, and reapplies the factory Default preset.
+    /// Called from the settings window's Reset All action after the user
+    /// confirms the destructive warning.
+    func resetAllToFactory() async {
+        invalidateAsyncOperations()
+        defaults.removeObject(forKey: "inputPresets.games.v1")
+        defaults.removeObject(forKey: "inputPresets.gameBaseID")
+        defaults.removeObject(forKey: "inputPresets.activeID")
+        defaults.removeObject(forKey: "inputPresets.defaultWebMigrated.v2")
+        defaults.removeObject(forKey: "inputPresets.defaultMigrated.v2")
+        defaults.removeObject(forKey: "inputPresets.autoGameProfiles")
+        gameBasePresetID = nil
+        currentGameID = ""
+        currentGameTitle = ""
+        gameTransition &+= 1
+        autoGameProfiles = true
+        // A reset is explicitly allowed to replace a corrupt local profile.
+        // Keeping this guard would make the recovery button fail precisely
+        // when it is most useful.
+        unreadablePresetIDs.removeAll()
+        var firstError: Error?
+        for preset in presets where !preset.isDefault {
+            let revision = inputRevision(at: presetURL(for: preset.id)) + 1
+            do {
+                try recordTombstone(id: preset.id, kind: "input-preset", revision: revision)
+                try removeLocal(presetURL(for: preset.id))
+            } catch { firstError = firstError ?? error }
+        }
+        do {
+            if let firstError { throw firstError }
+            presets = [.default]
+            try write(InputPreset.default)
+            try writeIndex()
+            setActive(InputPreset.defaultID)
+            if let browser {
+                browser.controllerFeatures.updateSettings { $0.apply(InputPreset.default.controller) }
+            }
+            operationMessage = "All profiles and per-game settings were reset"
+        } catch {
+            operationMessage = "Could not fully reset profiles: \(error.localizedDescription)"
+        }
+    }
+
     func applyPreset(id: UUID, rememberGame: Bool = true) async {
         guard let browser, presets.contains(where: { $0.id == id }) else { return }
         do {
@@ -585,6 +634,7 @@ final class InputPresetStore: ObservableObject {
         webApplyTask = nil
         suppressAutosave = false
         isBusy = false
+        if !webSettingsReady { scheduleWebReadinessRetry(id: id) }
         operationMessage = "Selected \(preset.name)\(webMessage)"
         browser.statusController?.refreshMenu()
     }
@@ -664,10 +714,16 @@ final class InputPresetStore: ObservableObject {
                 return " · The Xbox page did not confirm the input settings"
             }
             let warnings = response["warnings"] as? [String] ?? []
-            webSettingsReady = response["ok"] as? Bool == true && warnings.isEmpty
-            if webSettingsReady { onSettingsApplied?() }
+            // A parsed response proves the bridge is ready for capture/apply.
+            // Per-setting warnings (e.g. controller profiles while IndexedDB
+            // or gamepads are still starting) must not disable autosave, or
+            // every later in-game adjustment is silently dropped and per-game
+            // profiles never capture web settings again.
+            webSettingsReady = true
+            webReadinessRetries = 0
+            onSettingsApplied?()
             if !warnings.isEmpty { return " · " + warnings.joined(separator: "; ") }
-            return webSettingsReady ? "" : " · Xbox input settings are waiting for confirmation"
+            return ""
         } catch {
             return Task.isCancelled ? "" : " · Better xCloud settings will apply when the page is ready"
         }
@@ -737,9 +793,36 @@ final class InputPresetStore: ObservableObject {
         webApplyTask = nil
         readinessRetryTask?.cancel()
         readinessRetryTask = nil
+        webReadinessRetryTask?.cancel()
+        webReadinessRetryTask = nil
+        webReadinessRetries = 0
         webApplyGeneration &+= 1
         suppressAutosave = false
         isBusy = false
+    }
+
+    /// Re-applies the active preset when the page could not confirm the first
+    /// apply. Without this, a stream started before the page finished loading
+    /// its input stack left webSettingsReady false for the whole session, so
+    /// per-game adjustments were never captured.
+    private func scheduleWebReadinessRetry(id: UUID) {
+        guard webReadinessRetryTask == nil,
+              webReadinessRetries < webReadinessDelays.count else { return }
+        let delay = webReadinessDelays[webReadinessRetries]
+        webReadinessRetries += 1
+        let expectedGeneration = webApplyGeneration
+        webReadinessRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.webReadinessRetryTask = nil
+            guard self.activePresetID == id,
+                  !self.webSettingsReady,
+                  self.webApplyGeneration == expectedGeneration else { return }
+            await self.retryActiveWebSettingsNow(id: id)
+            if !self.webSettingsReady, self.activePresetID == id {
+                self.scheduleWebReadinessRetry(id: id)
+            }
+        }
     }
 
     private func invalidateAsyncOperations() {

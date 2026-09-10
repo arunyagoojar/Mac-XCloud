@@ -13,6 +13,7 @@ struct SettingsRootView: View {
     @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var model: SettingsModel
     @State private var supportFailure: String?
+    @State private var showingResetConfirmation = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -42,6 +43,14 @@ struct SettingsRootView: View {
                 Button("OK", role: .cancel) { supportFailure = nil }
             } message: {
                 Text(supportFailure ?? "")
+            }
+            .alert("Reset All Settings?", isPresented: $showingResetConfirmation) {
+                Button("Reset Everything", role: .destructive) {
+                    model.resetAllSettings()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This deletes every saved profile and per-game setup, resets controller, streaming, video, and app settings, then reloads Xbox Cloud Gaming. Your Xbox sign-in is kept.")
             }
             .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -256,6 +265,14 @@ struct SettingsRootView: View {
                     Text("5 main areas").foregroundStyle(.secondary)
                 }
             }
+            SettingsGroup("Reset") {
+                SettingsRow("Reset all settings", note: "Deletes saved profiles and restores controller, streaming, video, and app settings to their defaults. Your Xbox sign-in stays intact.") {
+                    Button("Reset All…", role: .destructive) {
+                        showingResetConfirmation = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
             SettingsGroup("App shortcuts") {
                 SettingsRow("Back while browsing", note: "Backspace only works outside text fields and gameplay.") { Text("⌘[ or Backspace") }
                 SettingsRow("Forward") { Text("⌘]") }
@@ -465,15 +482,11 @@ struct SettingsRootView: View {
                 } else if let best = model.bestRegionResult {
                     Text("The best server for you is \(best.displayName)")
                         .font(.system(size: 12, weight: .semibold))
-                    Text("\(best.averageMs) ms · lowest latency")
+                    Text("\(best.averageMs) ms median · ±\(best.jitterMs) ms jitter")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack(spacing: 6) {
-                    if model.bestRegionResult != nil, !model.isPingingRegions {
-                        Button("Use Best") { model.useBestRegion() }
-                            .buttonStyle(.borderedProminent)
-                    }
-                    Button(model.isPingingRegions ? "Stop" : "Test") {
+                    Button(model.isPingingRegions ? "Stop" : (model.bestRegionResult == nil ? "Test" : "Test Again")) {
                         model.isPingingRegions ? model.stopRegionPing() : model.testRegions()
                     }
                     .buttonStyle(.bordered)

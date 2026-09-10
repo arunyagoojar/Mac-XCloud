@@ -65,10 +65,10 @@ struct SettingsCategory: Identifiable {
     static let all: [SettingsCategory] = [
         SettingsCategory(id: "server", title: "Server", icon: "server.rack", rows: [
             SettingDef(id: "app.pingTest", label: "Region latency test",
-                       note: "Pings every server three times and reports the round-trip time.",
+                       note: "Warms up and measures every available server three times, then automatically uses the lowest stable latency. Run again after changing networks.",
                        scope: .global, kind: .pingTest),
             SettingDef(id: "server.region", label: "Server region",
-                       note: "Server used for new streams. Only affects the next stream you start.",
+                       note: "Automatic measures every available server and selects the fastest stable result. A manually chosen region stays fixed. Changes affect your next stream.",
                        scope: .global, kind: .serverRegion),
             SettingDef(id: "server.bypassRestriction", label: "Bypass region restriction",
                        note: "⚠️ Streams via proxy servers in other regions. Use at your own risk.",
@@ -375,6 +375,63 @@ extension SettingsModel {
         .init(key: "controller.pollingRate", scope: .stream, value: 4.0),
     ]
 
+    /// Factory reset across every settings store: saved profiles and per-game
+    /// links, native mirrors, page-side Better xCloud preferences and app
+    /// preferences. The Xbox page reloads afterwards so the site re-reads its
+    /// cleared localStorage. Sign-in and website data are untouched.
+    func resetAllSettings() {
+        guard let browser else {
+            saveMessage = "The Xbox page is not ready."
+            return
+        }
+        saveMessage = "Resetting all settings…"
+        let clearJS = """
+        (function () {
+          try {
+            var doomed = [];
+            for (var i = 0; i < localStorage.length; i++) {
+              var k = localStorage.key(i);
+              if (k === "BetterXcloud" || k === "BetterXcloud.Stream" ||
+                  k.indexOf("BetterXcloud.Stream.") === 0 || k.indexOf("XCG.") === 0) doomed.push(k);
+            }
+            for (var j = 0; j < doomed.length; j++) { try { localStorage.removeItem(doomed[j]); } catch (e) {} }
+          } catch (e) {}
+        })();
+        """
+        browser.evaluateJS(clearJS) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let defaults = UserDefaults.standard
+                for key in ["nativeBetterXcloudGlobal", "nativeBetterXcloudStream",
+                            "nativeRendererRecoveryVersion", "cachedServerRegions",
+                            "ledColorIndex", "ledCustomR", "ledCustomG", "ledCustomB",
+                            "app.clarityPipeline", "inputPresets.defaultWebMigrated.v2",
+                            "nativeController.settings.v1", "nativeController.settingsVersion",
+                            "controller.globalRumbleGain", "controller.streamCalibration"] {
+                    defaults.removeObject(forKey: key)
+                }
+                self.ledColorIndex = 1
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await browser.inputPresets.resetAllToFactory()
+                    browser.controllerFeatures.resetSettings()
+                    browser.controllerFeatures.globalRumbleGain = 1
+                    browser.controllerFeatures.applyCalibrationToStream = false
+                    self.globalValues = [:]
+                    self.streamValues = [:]
+                    self.bestRegionResult = nil
+                    self.resolvedRegionName = nil
+                    self.regions = [("default", "Auto (closest server)")]
+                    self.regionIndex = 0
+                    self.needsReload = false
+                    self.saveMessage = "All settings were reset — reloading the Xbox page…"
+                    self.objectWillChange.send()
+                    browser.reload()
+                }
+            }
+        }
+    }
+
     func applySuggested() {
         saveMessage = "Applying optimized M1 settings…"
         Task { @MainActor [weak self] in
@@ -614,17 +671,24 @@ final class SettingsModel: ObservableObject {
         let name: String
         let displayName: String
         let baseURI: String
+        /// Median response time from three post-warm-up samples. Median avoids
+        /// choosing a server because of one unusually fast or slow request.
         let averageMs: Int
+        let jitterMs: Int
         let samples: Int
     }
 
     private var regionPingTask: Task<Void, Never>?
 
-    func testRegions() {
+    /// Tests the actual Xbox streaming endpoint exposed for every offered
+    /// region. Better xCloud itself does not perform this test: it merely uses
+    /// the region Xbox marks as `isDefault`, which may be an account fallback
+    /// and not the lowest-latency region from this network.
+    func testRegions(automaticallySelectBest: Bool = true) {
         guard !isPingingRegions else { return }
         isPingingRegions = true
-        pingStatusText = "Finding servers…"
-        saveMessage = "Starting latency test across all servers…"
+        pingStatusText = "Finding all servers…"
+        saveMessage = "Testing every available Xbox server…"
         bestRegionResult = nil
         browser?.evaluateJS("window.__xcgRegionPingCancelled = false")
         regionPingTask?.cancel()
@@ -648,58 +712,118 @@ final class SettingsModel: ObservableObject {
                     return
                 }
 
-                var pingResults: [RegionPingResult] = []
+                let probeTargets: [[String: String]] = regionItems.compactMap { region in
+                    guard let name = region["name"] as? String,
+                          let baseURI = region["baseUri"] as? String, !baseURI.isEmpty else { return nil }
+                    return [
+                        "name": name,
+                        "displayName": (region["displayName"] as? String) ?? (region["shortName"] as? String) ?? name,
+                        "baseURI": baseURI,
+                    ]
+                }
+                guard !probeTargets.isEmpty,
+                      let targetData = try? JSONSerialization.data(withJSONObject: probeTargets),
+                      let targetJSON = String(data: targetData, encoding: .utf8) else {
+                    self.isPingingRegions = false
+                    self.pingStatusText = nil
+                    self.saveMessage = "Could not prepare the region test"
+                    self.regionPingTask = nil
+                    return
+                }
 
-                for r in regionItems {
-                    if Task.isCancelled { break }
-                    guard let name = r["name"] as? String,
-                          let baseUri = r["baseUri"] as? String, !baseUri.isEmpty else { continue }
-                    let displayName = (r["displayName"] as? String) ?? (r["shortName"] as? String) ?? name
-                    self.pingStatusText = "Now pinging \(displayName)…"
-                    self.saveMessage = "Now pinging \(displayName)…"
-                    self.objectWillChange.send()
+                self.pingStatusText = "Testing \(probeTargets.count) servers…"
+                self.saveMessage = "Measuring \(probeTargets.count) Xbox servers (three samples each)…"
+                self.objectWillChange.send()
 
-                    let probeScript = """
-                    try {
-                      if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
-                      var times = [];
-                      for (var i = 0; i < 2; i++) {
-                        if (window.__xcgRegionPingCancelled) return JSON.stringify({cancelled:true});
-                        var t = performance.now();
-                        try {
-                          await fetch('\(baseUri)/v2/servers/home?mr=50', {method:'GET', cache:'no-store'});
-                          times.push(Math.round(performance.now() - t));
-                        } catch (_) {}
-                      }
-                      return JSON.stringify({ok:true, times:times});
-                    } catch (e) { return JSON.stringify({error:String(e)}); }
-                    """
-                    let probeResult = try await browser?.callAsyncJS(probeScript)
-                    if let pText = probeResult as? String, pText.contains("cancelled") {
-                        self.isPingingRegions = false
-                        self.pingStatusText = nil
-                        self.saveMessage = "Region test stopped"
-                        self.regionPingTask = nil
-                        return
+                // Run a small number of regions in parallel. This is much
+                // faster than serial requests without flooding the connection
+                // or making the measurements compete with each other.
+                let probeScript = """
+                return await (async function () {
+                  var targets = \(targetJSON);
+                  var cancelled = function () { return window.__xcgRegionPingCancelled === true; };
+                  var measure = async function (target) {
+                    var samples = [];
+                    // The first request establishes DNS/TLS/connection state;
+                    // it is intentionally excluded from the three scored runs.
+                    for (var sample = 0; sample < 4 && !cancelled(); sample++) {
+                      var controller = new AbortController();
+                      var timeout = setTimeout(function () { controller.abort(); }, 3500);
+                      var started = performance.now();
+                      try {
+                        var endpoint = new URL('/v2/servers/home?mr=50&_xcgLatency=' + Date.now() + '-' + sample, target.baseURI).toString();
+                        await fetch(endpoint, {
+                          method: 'GET', cache: 'no-store', signal: controller.signal
+                        });
+                        samples.push(Math.round(performance.now() - started));
+                      } catch (_) {
+                        // Timeouts and network failures are excluded. A region
+                        // with no successful requests can never be selected.
+                      } finally { clearTimeout(timeout); }
                     }
-                    if let pText = probeResult as? String,
-                       let pData = pText.data(using: .utf8),
-                       let pRoot = try? JSONSerialization.jsonObject(with: pData) as? [String: Any],
-                       let times = pRoot["times"] as? [NSNumber], !times.isEmpty {
-                        let avg = Int(times.map(\.intValue).reduce(0, +) / times.count)
-                        pingResults.append(RegionPingResult(name: name, displayName: displayName, baseURI: baseUri, averageMs: avg, samples: times.count))
+                    return {name:target.name, displayName:target.displayName, baseURI:target.baseURI,
+                            times:samples.length > 1 ? samples.slice(1) : samples};
+                  };
+                  var cursor = 0, results = [];
+                  var worker = async function () {
+                    while (!cancelled()) {
+                      var index = cursor++;
+                      if (index >= targets.length) return;
+                      results.push(await measure(targets[index]));
                     }
+                  };
+                  await Promise.all(Array.from({length: Math.min(6, targets.length)}, worker));
+                  return JSON.stringify({cancelled:cancelled(), results:results});
+                })();
+                """
+                let probeResult = try await browser?.callAsyncJS(probeScript)
+                guard let probeText = probeResult as? String,
+                      let probeData = probeText.data(using: .utf8),
+                      let probeRoot = try? JSONSerialization.jsonObject(with: probeData) as? [String: Any] else {
+                    self.isPingingRegions = false
+                    self.pingStatusText = nil
+                    self.regionPingTask = nil
+                    self.saveMessage = "Region test returned no data — reload the Xbox page, then test again"
+                    return
+                }
+                if probeRoot["cancelled"] as? Bool == true {
+                    self.isPingingRegions = false
+                    self.pingStatusText = nil
+                    self.saveMessage = "Region test stopped"
+                    self.regionPingTask = nil
+                    return
+                }
+
+                let rawResults = probeRoot["results"] as? [[String: Any]] ?? []
+                let pingResults: [RegionPingResult] = rawResults.compactMap { result in
+                    guard let name = result["name"] as? String,
+                          let displayName = result["displayName"] as? String,
+                          let baseURI = result["baseURI"] as? String,
+                          let samples = result["times"] as? [NSNumber], !samples.isEmpty else { return nil }
+                    let values = samples.map(\.intValue).sorted()
+                    let median = values[values.count / 2]
+                    let mean = Double(values.reduce(0, +)) / Double(values.count)
+                    let jitter = Int((values.map { abs(Double($0) - mean) }.reduce(0, +) / Double(values.count)).rounded())
+                    return RegionPingResult(name: name, displayName: displayName, baseURI: baseURI,
+                                            averageMs: median, jitterMs: jitter, samples: values.count)
                 }
 
                 self.isPingingRegions = false
                 self.pingStatusText = nil
                 self.regionPingTask = nil
 
-                // Sort strictly by minimum ping to objectively choose the fastest server
-                let sorted = pingResults.sorted { $0.averageMs < $1.averageMs }
+                // Lowest median response time wins. Jitter only breaks a tie,
+                // so this remains faithful to the user's fastest-ping choice.
+                let sorted = pingResults.sorted {
+                    $0.averageMs == $1.averageMs ? $0.jitterMs < $1.jitterMs : $0.averageMs < $1.averageMs
+                }
                 if let best = sorted.first {
                     self.bestRegionResult = best
-                    self.saveMessage = "The best server for you is \(best.displayName) (\(best.averageMs) ms)"
+                    if automaticallySelectBest {
+                        self.useBestRegion(best, automatic: true)
+                    } else {
+                        self.saveMessage = "The best server for you is \(best.displayName) (\(best.averageMs) ms, ±\(best.jitterMs) ms)"
+                    }
                 } else {
                     self.saveMessage = "No regions responded to latency test"
                 }
@@ -727,11 +851,20 @@ final class SettingsModel: ObservableObject {
             saveMessage = "Run the region test first"
             return
         }
-        write(id: "server.region", scope: .global, value: bestRegionResult.name)
-        if let idx = regions.firstIndex(where: { $0.value == bestRegionResult.name }) {
+        useBestRegion(bestRegionResult, automatic: false)
+    }
+
+    private func useBestRegion(_ result: RegionPingResult, automatic: Bool) {
+        write(id: "server.region", scope: .global, value: result.name) { [weak self] saved in
+            guard saved, let self else { return }
+            self.saveMessage = automatic
+                ? "Automatically selected \(result.displayName) (\(result.averageMs) ms, ±\(result.jitterMs) ms)"
+                : "Selected \(result.displayName) (\(result.averageMs) ms, ±\(result.jitterMs) ms)"
+            self.objectWillChange.send()
+        }
+        if let idx = regions.firstIndex(where: { $0.value == result.name }) {
             regionIndex = idx
         }
-        saveMessage = "Selected \(bestRegionResult.displayName) (\(bestRegionResult.averageMs) ms)"
     }
 
     static func clarityDescription(for pipeline: String) -> String {
@@ -906,7 +1039,9 @@ final class SettingsModel: ObservableObject {
                     self.resolvedRegionName = (selected["displayName"] as? String) ?? (selected["shortName"] as? String)
                 }
                 if let regionDict = root["regions"] as? [String: Any] {
-                    let autoLabel = self.resolvedRegionName.map { "Auto (closest: \($0))" } ?? "Auto (closest server)"
+                    // Xbox's `isDefault` field is a service-assigned default,
+                    // not a latency measurement. Do not label it “closest”.
+                    let autoLabel = self.resolvedRegionName.map { "Automatic (Xbox suggested: \($0))" } ?? "Automatic (tests fastest server)"
                     var options: [(value: String, label: String)] = [("default", autoLabel)]
                     for key in regionDict.keys.sorted() {
                         let info = regionDict[key] as? [String: Any]
@@ -918,6 +1053,12 @@ final class SettingsModel: ObservableObject {
                 self.regionIndex = self.regions.firstIndex { $0.value == current } ?? 0
                 self.saveMessage = nil
                 self.objectWillChange.send()
+                // Fresh installs and reset settings begin in Automatic mode.
+                // Replace Xbox's location heuristic with a real test as soon
+                // as its offered endpoints are available.
+                if current == "default", !self.isPingingRegions, self.bestRegionResult == nil {
+                    self.testRegions(automaticallySelectBest: true)
+                }
             }
         }
     }

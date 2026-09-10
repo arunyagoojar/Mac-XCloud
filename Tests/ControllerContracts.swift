@@ -14,33 +14,30 @@ struct ControllerContracts {
             catch { checks += 1; print("PASS: \(label)") }
         }
 
-        for mode in [AdaptiveTriggerPreset.acceleration, .braking, .deceleration] {
-            let zones = mode.pedalStrengths!
-            check(zones.count == 10, "\(mode) uses ten feedback zones")
-            check(zones.allSatisfy { $0 > 0 && $0 <= 1 }, "\(mode) retains resistance at full travel")
-            check(zip(zones, zones.dropFirst()).allSatisfy { $0 <= $1 }, "\(mode) has no terminal force drop")
+        for mode in [AdaptiveTriggerPreset.accelerator, .brake] {
+            var pedal = ControllerTriggerEnvelope()
+            _ = pedal.sample(preset: mode, pressure: 0, now: 0)
+            let held = pedal.sample(preset: mode, pressure: 1, now: 0.016)
+            check(held.intensity == 0 && held.forceBoost == 0, "\(mode.rawValue) pedal holds pressure without haptic spikes")
         }
-        check(zip(AdaptiveTriggerPreset.braking.pedalStrengths!, AdaptiveTriggerPreset.acceleration.pedalStrengths!).allSatisfy { $0 < $1 }, "Comfort brake is lighter than accelerator")
 
         var parameters = AdaptiveTriggerCustomParameters.default
         parameters.mode = .vibration
         parameters.amplitude = 0.72
         parameters.frequency = 0.19
-        let custom = CustomAdaptiveTriggerPreset(name: "Test Pulse", parameters: parameters)
+        check(parameters.clamped.amplitude == 0.72 && parameters.clamped.frequency == 0.19, "Vibration parameters apply in range")
+
         var triggers = AdaptiveTriggerSettings.default
-        triggers.select(.custom(custom.id), for: .left, library: [custom])
-        check(triggers.leftUsesCustom && triggers.leftCustom == parameters, "Saved vibration applies exact parameters")
-        check(triggers.selection(for: .left, library: [custom]) == .custom(custom.id), "Saved effect resolves in selector")
-        check(triggers.selection(for: .left, library: []) == .currentCustomSnapshot, "Deleted library item preserves applied snapshot")
-        triggers.select(.builtIn(.bowAndArrow), for: .right, library: [custom])
-        check(triggers.leftUsesCustom && !triggers.rightUsesCustom, "Left and right selection are independent")
+        triggers.select(.bow, for: .left)
+        triggers.select(.heartbeat, for: .right)
+        check(triggers.leftPreset == .bow && triggers.rightPreset == .heartbeat, "Left and right selection are independent")
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let legacy = try encoder.encode(AdaptiveTriggerSettings.default)
-        check(!String(decoding: legacy, as: UTF8.self).contains("CustomPresetID"), "Nil library references do not alter legacy encoding")
+        check(!String(decoding: legacy, as: UTF8.self).contains("CustomPresetID"), "Default encoding stays free of removed library keys")
         check(try JSONDecoder().decode(AdaptiveTriggerSettings.self, from: legacy) == .default, "Legacy trigger settings decode")
-        check(try JSONDecoder().decode(AdaptiveTriggerSettings.self, from: encoder.encode(triggers)) == triggers, "Custom selection round-trips")
+        check(try JSONDecoder().decode(AdaptiveTriggerSettings.self, from: encoder.encode(triggers)) == triggers, "Selection round-trips")
         parameters.amplitude = .nan
         parameters.frequency = .infinity
         parameters.startPosition = -1
@@ -80,9 +77,16 @@ struct ControllerContracts {
         check(ControllerMotionProjection.yaw(x: 0, y: 0, z: 1, gx: 0, gy: 0, gz: -1) == 1, "Flat-held controller uses Z rotation for yaw")
         check(ControllerMotionProjection.yaw(x: 0, y: 1, z: 0, gx: 0, gy: -1, gz: 0) == 1, "Upright controller uses Y rotation for yaw")
         check(ControllerMotionProjection.yaw(x: .nan, y: 0, z: 0, gx: 0, gy: -1, gz: 0) == 0, "Invalid motion stays neutral")
-        check(!AdaptiveTriggerPreset.recommendedCatalog.contains(.rain) && AdaptiveTriggerPreset.recommendedCatalog.contains(.resistanceTrigger), "New catalog replaces legacy defaults with the DualSenseX-style modes")
-        for mode in [AdaptiveTriggerPreset.clutchBite, .bowDraw, .hydraulicBrake, .ratchetDetents, .stagedWall] {
-            check(mode.designedResistance?.count == 10 && mode.designedResistance!.allSatisfy { $0 >= 0 && $0 <= 1 }, "Curated positional effect has ten bounded zones: \(mode.rawValue)")
+        check(AdaptiveTriggerPreset.recommendedCatalog.count == 14 && AdaptiveTriggerPreset.recommendedCatalog.first == .off,
+              "Catalog offers the fourteen DualSenseX-style modes starting at Off")
+        check(AdaptiveTriggerPreset.migrated("semiAutomaticGun") == .automatic && AdaptiveTriggerPreset.migrated("clutchBite") == .brake
+              && AdaptiveTriggerPreset.migrated("bowDraw") == .bow && AdaptiveTriggerPreset.migrated("ratchetDetents") == .twoStage,
+              "Legacy saved preset names migrate into the current catalog")
+        for mode in [AdaptiveTriggerPreset.pistol, .sniper, .automatic, .machineGun, .bow, .twoStage] {
+            var envelope = ControllerTriggerEnvelope()
+            _ = envelope.sample(preset: mode, pressure: 0, now: 0)
+            check(envelope.sample(preset: mode, pressure: 1, now: 1.0/60).intensity > 0,
+                  "\(mode.rawValue) fires feedback once pressure crosses its wall")
         }
         check(ControllerAimMath.axis(0.02, deadzone: 0.08) == 0, "Touch noise has a firm neutral zone")
         check(ControllerAimMath.smooth(0, previous: 0.9, dt: 1.0/60) == 0, "Gyro releases in one update without a residual tail")
@@ -270,6 +274,42 @@ struct ControllerContracts {
             _ = tiltedWheel.sample(wheelReading(-0.3, pitch: 0.6), rate: .zero, now: Double(frame)/60)
         }
         check(abs(tiltedWheel.angle + 0.3) < 0.001, "Wheel angle works with a face-toward-player pitched grip")
+        // Gravity leaves the wheel plane entirely (wheel axis near vertical):
+        // steering must continue on the wheel-axis gyro rate and re-anchor
+        // seamlessly once the plane becomes observable again.
+        var lockedWheel = ControllerWheelState()
+        _ = lockedWheel.sample(wheelReading(0, gravity: true, pitch: 0.6), rate: .zero, now: 0)
+        var lockedTime = 0.0
+        for frame in 1...60 {
+            lockedTime = Double(frame) / 60
+            _ = lockedWheel.sample(wheelReading(0.5 * lockedTime, gravity: true, pitch: 0.6),
+                rate: ControllerMotionVector(x: 0, y: 0, z: -0.5), now: lockedTime)
+        }
+        check(lockedWheel.available && abs(lockedWheel.angle - 0.5) < 0.001,
+              "Observable steering reaches a known angle before the axis locks")
+        var expectedLocked = 0.5 * lockedTime
+        var lostLockedFrames = 0
+        for _ in 1...120 {
+            lockedTime += 1.0/60
+            expectedLocked += 1.0/60
+            // pitch 1.45 rad leaves ~0.014 in-plane magnitude, under the 0.04 limit
+            if lockedWheel.sample(wheelReading(expectedLocked, gravity: true, pitch: 1.45),
+                rate: ControllerMotionVector(x: 0, y: 0, z: -1), now: lockedTime) == nil {
+                lostLockedFrames += 1
+            }
+        }
+        check(lostLockedFrames == 0 && lockedWheel.available,
+              "Steering continues while the wheel axis points at the ceiling")
+        check(abs(lockedWheel.angle - Float(atan2(sin(expectedLocked), cos(expectedLocked)))) < 0.05,
+              "Axis-locked steering tracks the wheel rate without drifting away")
+        for _ in 1...60 {
+            lockedTime += 1.0/60
+            expectedLocked += 1.0/60
+            _ = lockedWheel.sample(wheelReading(expectedLocked, gravity: true, pitch: 0.6),
+                rate: ControllerMotionVector(x: 0, y: 0, z: -1), now: lockedTime)
+        }
+        check(abs(lockedWheel.angle - Float(atan2(sin(expectedLocked), cos(expectedLocked)))) < 0.02,
+              "Wheel re-anchors to gravity on return from the axis-locked zone")
         var quietWheel = ControllerWheelState()
         _ = quietWheel.sample(wheelReading(0), rate: .zero, now: 0)
         var maximumNoise: Float = 0
@@ -439,41 +479,33 @@ struct ControllerContracts {
         check(restoredSteering.effectiveSteeringMaximum == 0.6, "Maximum steering survives profile serialization")
         limitedSteering.steeringMaximum = .nan
         check(limitedSteering.effectiveSteeringMaximum == 1, "Invalid maximum steering safely falls back to full output")
-        check(AdaptiveTriggerPreset.recommendedCatalog.count == 20, "DualSenseX-style default menu offers twenty built-in modes; Custom Trigger Value uses the editor")
-        check(AdaptiveTriggerPreset.recommendedCatalog.first == .off && AdaptiveTriggerPreset.recommendedCatalog.last == .vibrateTriggerCustomIntensity, "Catalog order mirrors the DualSenseX menu")
-        for mode in [AdaptiveTriggerPreset.gameCubeTrigger, .choppyTrigger, .verySoftTrigger, .softTrigger, .mediumTrigger,
-                     .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger, .calibrateTrigger] {
-            let zones = mode.designedResistance!
-            check(zones.count == 10 && zones.allSatisfy { $0 >= 0 && $0 <= 1 }, "\(mode) keeps ten bounded resistance zones")
-        }
-        let ladder = [AdaptiveTriggerPreset.verySoftTrigger, .softTrigger, .mediumTrigger, .hardTrigger, .veryHardTrigger, .hardestTrigger, .rigidTrigger]
-            .map { $0.designedResistance![0] }
-        check(zip(ladder, ladder.dropFirst()).allSatisfy { $0 < $1 }, "Resistance ladder rises from Very Soft to Rigid")
-        check(AdaptiveTriggerPreset.rigidTrigger.designedResistance![0] == 1 && AdaptiveTriggerPreset.hardestTrigger.designedResistance![0] < 1, "Rigid alone fully blocks travel")
+        check(AdaptiveTriggerPreset.recommendedCatalog.count == 14, "DualSenseX-style default menu offers fourteen built-in modes")
+        check(AdaptiveTriggerPreset.recommendedCatalog.first == .off && AdaptiveTriggerPreset.recommendedCatalog.last == .choppy, "Catalog order mirrors the DualSenseX menu")
         var click = ControllerTriggerEnvelope()
-        _ = click.sample(preset: .gameCubeTrigger, pressure: 0, now: 0)
-        check(click.sample(preset: .gameCubeTrigger, pressure: 0.9, now: 1.0/60).intensity == 0, "GameCube wall holds without repeating impulses")
-        check(click.sample(preset: .gameCubeTrigger, pressure: 0, now: 2.0/60).intensity == 0.70, "GameCube release produces the digital click kick")
+        _ = click.sample(preset: .twoStage, pressure: 0, now: 0)
+        check(click.sample(preset: .twoStage, pressure: 0.9, now: 1.0/60).intensity == 0.7, "Two-stage break fires once at the wall")
+        check(click.sample(preset: .twoStage, pressure: 0.9, now: 2.0/60).intensity == 0, "Two-stage wall holds without repeating impulses")
+        check(click.sample(preset: .twoStage, pressure: 0, now: 3.0/60).intensity == 0.60, "Two-stage release produces the digital click kick")
         var semi = ControllerTriggerEnvelope()
-        _ = semi.sample(preset: .semiAutomaticGun, pressure: 0, now: 0)
-        _ = semi.sample(preset: .semiAutomaticGun, pressure: 0.6, now: 1.0/60)
-        check(semi.sample(preset: .semiAutomaticGun, pressure: 0, now: 2.0/60).intensity == 0.65, "Semi-automatic release kicks after the break")
+        _ = semi.sample(preset: .pistol, pressure: 0, now: 0)
+        _ = semi.sample(preset: .pistol, pressure: 0.6, now: 1.0/60)
+        check(semi.sample(preset: .pistol, pressure: 0, now: 2.0/60).intensity == 0.60, "Semi-automatic release kicks after the break")
         var machine = ControllerTriggerEnvelope()
         _ = machine.sample(preset: .machineGun, pressure: 0, now: 0)
         let bursts = machine.sample(preset: .machineGun, pressure: 0.8, now: 1.0/60)
         check(bursts.intensity > 0 && bursts.forceBoost > 0, "Machine mode rhythm combines haptics and bounded recoil")
         var shot = ControllerTriggerEnvelope()
-        _ = shot.sample(preset: .handgun, pressure: 0, now: 0)
-        check(shot.sample(preset: .handgun, pressure: 0.5, now: 0.016).intensity > 0, "Pistol break produces one impulse")
-        check(shot.sample(preset: .handgun, pressure: 0.5, now: 0.032).intensity == 0, "Holding a pistol does not repeat break impulses")
-        check(shot.sample(preset: .handgun, pressure: 0, now: 0.048).intensity == 0.6, "Pistol release produces a separate kick")
-        check(shot.sample(preset: .handgun, pressure: 0, now: 0.064).intensity == 0, "Release kick cannot repeat at rest")
+        _ = shot.sample(preset: .pistol, pressure: 0, now: 0)
+        check(shot.sample(preset: .pistol, pressure: 0.5, now: 0.016).intensity > 0, "Pistol break produces one impulse")
+        check(shot.sample(preset: .pistol, pressure: 0.5, now: 0.032).intensity == 0, "Holding a pistol does not repeat break impulses")
+        check(shot.sample(preset: .pistol, pressure: 0, now: 0.048).intensity == 0.6, "Pistol release produces a separate kick")
+        check(shot.sample(preset: .pistol, pressure: 0, now: 0.064).intensity == 0, "Release kick cannot repeat at rest")
         var automatic = ControllerTriggerEnvelope()
-        _ = automatic.sample(preset: .automaticWeapon, pressure: 0, now: 0)
-        let firing = automatic.sample(preset: .automaticWeapon, pressure: 1, now: 0.016)
+        _ = automatic.sample(preset: .automatic, pressure: 0, now: 0)
+        let firing = automatic.sample(preset: .automatic, pressure: 1, now: 0.016)
         check(firing.intensity > 0 && firing.forceBoost > 0, "Automatic fire combines haptics and bounded resistance recoil")
-        check(automatic.sample(preset: .automaticWeapon, pressure: 1, now: 0.05).forceBoost == 0, "Recoil spike expires while trigger stays held")
-        check(automatic.sample(preset: .automaticWeapon, pressure: 0, now: 0.07).forceBoost == 0, "Release clears recoil immediately")
+        check(automatic.sample(preset: .automatic, pressure: 1, now: 0.05).forceBoost == 0, "Recoil spike expires while trigger stays held")
+        check(automatic.sample(preset: .automatic, pressure: 0, now: 0.07).forceBoost == 0, "Release clears recoil immediately")
         var disturbed = ControllerWheelState()
         _ = disturbed.sample(wheelReading(0), rate: .zero, now: 0)
         let disturbedAngle = disturbed.sample(wheelReading(0.25), rate: .zero, now: 1.0/60)!

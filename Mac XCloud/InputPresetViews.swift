@@ -14,8 +14,13 @@ struct InputPresetManagerView: View {
             storageCard
 
             SettingsGroup("Game Profiles & Sharing") {
-                SettingsRow("Remember settings per game", note: "Creates a profile for each new game and restores it next time. Uses the game ID, with its website title as a fallback. Hardware calibration stays local.") {
+                SettingsRow("Remember settings per game", note: "Saves adaptive triggers, gyro mode and stick, steering range and smoothing, touchpad, flick shift, mappings, macros and haptics for each game. Uses the game ID, with its website title as a fallback. Hardware calibration stays local.") {
                     Toggle("Remember settings per game", isOn: $store.autoGameProfiles).labelsHidden().toggleStyle(.switch)
+                }
+                Divider()
+                SettingsRow("Active game profile", note: store.currentGameID.isEmpty ? "A game profile will apply when a stream starts." : "\(store.currentGameTitle.isEmpty ? store.currentGameID : store.currentGameTitle) is using \(store.activePreset.name).") {
+                    Image(systemName: store.currentGameID.isEmpty ? "gamecontroller" : "checkmark.circle.fill")
+                        .foregroundStyle(store.currentGameID.isEmpty ? Color.secondary : Color.green)
                 }
                 Divider()
                 HStack {

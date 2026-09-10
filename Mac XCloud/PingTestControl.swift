@@ -14,7 +14,7 @@ struct PingTestControl: View {
                 VStack(alignment: .trailing, spacing: 1) {
                     Text("The best server for you is \(best.displayName)")
                         .font(.system(size: 12, weight: .semibold))
-                    Text("\(best.averageMs) ms · lowest latency")
+                    Text("\(best.averageMs) ms median · ±\(best.jitterMs) ms jitter")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -22,11 +22,7 @@ struct PingTestControl: View {
                 Text("Run test")
                     .font(.system(size: 13, weight: .medium))
             }
-            if model.bestRegionResult != nil, !model.isPingingRegions {
-                Button("Use Best") { model.useBestRegion() }
-                    .buttonStyle(.borderedProminent)
-            }
-            Button(model.isPingingRegions ? "Stop" : "Test") {
+            Button(model.isPingingRegions ? "Stop" : (model.bestRegionResult == nil ? "Test" : "Test Again")) {
                 model.isPingingRegions ? model.stopRegionPing() : model.testRegions()
             }
             .buttonStyle(.bordered)

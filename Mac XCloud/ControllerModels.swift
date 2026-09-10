@@ -1158,6 +1158,18 @@ struct ControllerWheelState {
             if confidence >= 0.75 { lastVector = reading.vector; lastAnchorAt = now }
             else { rejectedSamples += 1 }
             status = confidence >= 0.75 ? reading.source.rawValue : "Filtering acceleration disturbance"
+        } else if candidate == nil, input != nil, validRate, dt > 0, dt <= 0.25,
+                  let last = filtered, let anchor = lastAnchorAt, now - anchor <= 30 {
+            // The sensor vector is sane but has left the wheel plane (wheel axis
+            // near vertical — controller pointed at the ceiling or floor). The
+            // absolute angle is unobservable there, yet face-axis steering
+            // continues at the exact continuity rate of the in-plane formula
+            // (dθ/dt = −ωz for rotation about the controller's own axis), so
+            // integrate the wheel-axis rate until the plane returns, then the
+            // next observable sample re-anchors the absolute angle.
+            filtered = last - Double(rate.z) * dt
+            bridgedSamples += 1
+            status = "Steering on wheel-axis rate — gravity locked"
         } else {
             rejectedSamples += 1
             guard let prediction = predicted, let anchor = lastAnchorAt,

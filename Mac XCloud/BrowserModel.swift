@@ -373,6 +373,7 @@ final class BrowserModel: ObservableObject {
     // MARK: - Settings window
 
     private var settingsWindow: NSWindow?
+    private var settingsWindowDelegate: WindowCloseDelegate?
     private var profileWindows: [ProfileKind: NSWindow] = [:]
 
     /// Opens the settings as a real, separate NSWindow that we fully control
@@ -397,8 +398,19 @@ final class BrowserModel: ObservableObject {
                 SettingsRootView(model: settingsModel)
                     .environmentObject(self)
             )
+            let delegate = WindowCloseDelegate { [weak self, weak window] in
+                guard let self, let window, self.settingsWindow === window else { return }
+                self.isSettingsWindowOpen = false
+                self.settingsWindow = nil
+                self.settingsWindowDelegate = nil
+                self.recomputeControllerOwner()
+            }
+            settingsWindowDelegate = delegate
+            window.delegate = delegate
             settingsWindow = window
         }
+        isSettingsWindowOpen = true
+        settingsModel.load()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: false)
     }
@@ -891,7 +903,9 @@ final class BrowserModel: ObservableObject {
             controllerFeatures.recheckMotionSensors()
             setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
-            if isSettingsWindowOpen { settingsModel.load() }
+            // The automatic region selector must receive Xbox's offered
+            // endpoints even when the settings window is closed.
+            settingsModel.load()
             note("Better xCloud bridge ready")
         case "native-rumble":
             let raw = body["raw"] as? [String: Any] ?? [:]
