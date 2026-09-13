@@ -14,9 +14,12 @@ final class MenuBarStatusController {
         item.button?.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "Mac Xcloud")
         item.button?.toolTip = "Mac Xcloud"
         refreshMenu()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshMenu() }
         }
+        // .common mode keeps the status item fresh while a window is dragged.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in

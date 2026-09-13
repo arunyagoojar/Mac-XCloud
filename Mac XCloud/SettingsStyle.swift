@@ -18,6 +18,29 @@ struct SettingsPage<Content: View>: View {
     }
 }
 
+/// macOS 12-compatible stand-in for ContentUnavailableView, used by the
+/// settings search results when nothing matches.
+struct ContentUnavailableCompatView: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+    }
+}
+
 struct SettingsGroup<Content: View>: View {
     private let title: String?
     private let content: Content
@@ -26,7 +49,6 @@ struct SettingsGroup<Content: View>: View {
         self.title = title
         self.content = content()
     }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let title {

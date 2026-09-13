@@ -4,22 +4,29 @@
 //
 
 import AVFoundation
+import CryptoKit
 import SwiftUI
 
-/// Plays the Xbox boot animation stored in Assets.xcassets as a data asset.
-/// AVPlayer needs a file URL, so the data is written once to a cache file.
+/// Plays the Mac XCloud boot animation stored in Assets.xcassets as a data
+/// asset. AVPlayer needs a file URL, so the data is written once to a cache
+/// file whose name embeds a content hash — swapping the asset in the catalog
+/// can never be shadowed by a stale cache entry.
+///
+/// When the video ends the player fades to black and `onEnded` fires; the
+/// splash view itself stays mounted (the caller overlays a spinner) until the
+/// page behind it is ready, then everything fades away together.
 struct BootVideoView: NSViewRepresentable {
-    let onFinished: () -> Void
+    let onEnded: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onFinished: onFinished)
+        Coordinator(onEnded: onEnded)
     }
 
     func makeNSView(context: Context) -> PlayerContainerView {
         let view = PlayerContainerView()
-        guard let dataAsset = NSDataAsset(name: "Xbox Series X boot animation - Larry Hryb, formerly known as Xbox's Major Nelson (1080p)"),
+        guard let dataAsset = NSDataAsset(name: "macx animation"),
               let url = Self.cachedURL(for: dataAsset.data) else {
-            context.coordinator.finish()
+            context.coordinator.finish(fading: false, in: view)
             return view
         }
 
@@ -27,7 +34,7 @@ struct BootVideoView: NSViewRepresentable {
         let player = AVPlayer(playerItem: item)
         player.actionAtItemEnd = .pause
         view.playerLayer.player = player
-        context.coordinator.observe(item: item)
+        context.coordinator.observe(item: item, in: view)
         player.play()
         return view
     }
@@ -42,7 +49,18 @@ struct BootVideoView: NSViewRepresentable {
 
     private static func cachedURL(for data: Data) -> URL? {
         let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-        guard let url = directory?.appendingPathComponent("XboxCloudGamingBoot.mp4") else { return nil }
+        guard let directory else { return nil }
+        let hash = SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
+        let url = directory.appendingPathComponent("MacXBootAnimation-\(hash).mp4")
+        // Remove cache files from previous asset revisions.
+        let stale = ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0.hasPrefix("MacXBootAnimation-") && directory.appendingPathComponent($0).path != url.path }
+        for name in stale {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+        // Also clear the unhashed name used by pre-1.3.8 builds.
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("MacXBootAnimation.mp4"))
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent("XboxCloudGamingBoot.mp4"))
         if !FileManager.default.fileExists(atPath: url.path) {
             do {
                 try data.write(to: url, options: .atomic)
@@ -55,28 +73,48 @@ struct BootVideoView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject {
-        private let onFinished: () -> Void
+        private let onEnded: () -> Void
         private var observer: NSObjectProtocol?
         private var hasFinished = false
 
-        init(onFinished: @escaping () -> Void) {
-            self.onFinished = onFinished
+        init(onEnded: @escaping () -> Void) {
+            self.onEnded = onEnded
         }
 
-        func observe(item: AVPlayerItem) {
+        func observe(item: AVPlayerItem, in view: PlayerContainerView) {
             observer = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
                 object: item,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.finish() }
+                MainActor.assumeIsolated { self?.finish(fading: true, in: view) }
             }
         }
 
-        func finish() {
+        /// Fades the video out onto the container's black background, then
+        /// releases the player so the last frame can never reappear.
+        func finish(fading: Bool, in view: PlayerContainerView) {
             guard !hasFinished else { return }
             hasFinished = true
-            onFinished()
+            let layer = view.playerLayer
+            layer.player?.pause()
+            if fading {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 1
+                fade.toValue = 0
+                fade.duration = 0.45
+                fade.isRemovedOnCompletion = false
+                fade.fillMode = .forwards
+                CATransaction.begin()
+                CATransaction.setCompletionBlock { layer.player = nil }
+                layer.add(fade, forKey: "bootVideoFadeOut")
+                layer.opacity = 0
+                CATransaction.commit()
+            } else {
+                layer.player = nil
+                layer.opacity = 0
+            }
+            onEnded()
         }
 
         func stopObserving() {
@@ -94,7 +132,8 @@ final class PlayerContainerView: NSView {
         wantsLayer = true
         layer = CALayer()
         layer?.backgroundColor = NSColor.black.cgColor
-        playerLayer.videoGravity = .resizeAspectFill
+        // Letterbox: keep the whole video visible, centered, on a black field.
+        playerLayer.videoGravity = .resizeAspect
         layer?.addSublayer(playerLayer)
     }
 

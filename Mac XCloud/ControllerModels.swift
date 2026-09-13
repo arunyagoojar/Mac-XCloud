@@ -988,6 +988,63 @@ struct ControllerSettings: Codable, Equatable, Sendable {
         )
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case calibration, adaptiveTriggers, haptics, touchpad, categoryPreset, shortcuts, macros, led, enhancements
+    }
+
+    // Per-field fallback decoding: a payload written by an older or newer
+    // build (missing/renamed field) keeps every section it does understand
+    // instead of failing the whole decode and silently reverting the user to
+    // defaults. The custom init suppresses the implicit memberwise one, so
+    // declare it for the `default` factory.
+    init(
+        calibration: ControllerCalibration,
+        adaptiveTriggers: AdaptiveTriggerSettings,
+        haptics: HapticSettings,
+        touchpad: TouchpadSettings,
+        categoryPreset: ControllerCategoryPresetSettings,
+        shortcuts: ControllerShortcutSchema,
+        macros: [ControllerMacro],
+        led: ControllerLEDSettings,
+        enhancements: ControllerEnhancements? = nil
+    ) {
+        self.calibration = calibration
+        self.adaptiveTriggers = adaptiveTriggers
+        self.haptics = haptics
+        self.touchpad = touchpad
+        self.categoryPreset = categoryPreset
+        self.shortcuts = shortcuts
+        self.macros = macros
+        self.led = led
+        self.enhancements = enhancements
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        calibration = (try? c.decode(ControllerCalibration.self, forKey: .calibration)) ?? .default
+        adaptiveTriggers = (try? c.decode(AdaptiveTriggerSettings.self, forKey: .adaptiveTriggers)) ?? .default
+        haptics = (try? c.decode(HapticSettings.self, forKey: .haptics)) ?? .default
+        touchpad = (try? c.decode(TouchpadSettings.self, forKey: .touchpad)) ?? .default
+        categoryPreset = (try? c.decode(ControllerCategoryPresetSettings.self, forKey: .categoryPreset)) ?? .default
+        shortcuts = (try? c.decode(ControllerShortcutSchema.self, forKey: .shortcuts)) ?? .default
+        macros = (try? c.decode([ControllerMacro].self, forKey: .macros)) ?? []
+        led = (try? c.decode(ControllerLEDSettings.self, forKey: .led)) ?? .default
+        enhancements = try? c.decodeIfPresent(ControllerEnhancements.self, forKey: .enhancements)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(calibration, forKey: .calibration)
+        try c.encode(adaptiveTriggers, forKey: .adaptiveTriggers)
+        try c.encode(haptics, forKey: .haptics)
+        try c.encode(touchpad, forKey: .touchpad)
+        try c.encode(categoryPreset, forKey: .categoryPreset)
+        try c.encode(shortcuts, forKey: .shortcuts)
+        try c.encode(macros, forKey: .macros)
+        try c.encode(led, forKey: .led)
+        try c.encodeIfPresent(enhancements, forKey: .enhancements)
+    }
+
     mutating func apply(_ preset: PerPresetControllerSettings) {
         adaptiveTriggers = preset.adaptiveTriggers
         haptics = preset.haptics
@@ -1023,6 +1080,13 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
     var steeringExponent: Float? = nil
     var steeringInverted: Bool? = nil
     var steeringMaximum: Float? = nil
+    var steeringRumbleGuard: Bool? = nil
+    /// While game rumble or trigger vibration is shaking the controller, the
+    /// wheel trusts the gyroscope prediction and only slowly corrects against
+    /// the accelerometer, so engine drone cannot steer the car. On by default;
+    /// profiles saved before it keep working because nil defaults to true and
+    /// never changes the checksum.
+    var effectiveSteeringRumbleGuard: Bool { steeringRumbleGuard ?? true }
     var effectiveSteeringMaximum: Float { let value = steeringMaximum ?? 1; return value.isFinite ? min(max(value, 0.2), 1) : 1 }
     // Steering carries the stick above a game's inner dead zone at every held
     // angle; Forza-style defaults sit near 0.3, far above the aiming default.
@@ -1108,7 +1172,7 @@ struct ControllerWheelState {
     mutating func reset() { self = Self() }
     mutating func center() { centre = filtered; angle = 0; measuredAngle = 0 }
     mutating func sample(_ input: ControllerWheelMotion?, rate: ControllerMotionVector, now: Double,
-                         hasRate: Bool = true) -> Float? {
+                         hasRate: Bool = true, vibrating: Bool = false) -> Float? {
         guard now.isFinite else { available = false; return nil }
         let dt = previousTime.map { now - $0 } ?? 0
         // A duplicate/out-of-order timestamp must not overwrite the integration clock.
@@ -1139,7 +1203,16 @@ struct ControllerWheelState {
             if confidence >= 0.75 {
                 // Reliable absolute position owns the target; no rate-dependent
                 // gain or smoothing bypass. Smooth after all stick mapping below.
-                if reading.source == .acceleration, let prediction = predicted,
+                if vibrating, let prediction = predicted,
+                   filtered != nil, validRate, dt > 0, dt <= 0.10 {
+                    // Sustained rumble: the whole controller shakes, so even a
+                    // clean gravity vector oscillates around the true angle.
+                    // Ride the gyro prediction and let the average of the
+                    // shaken sensors correct drift slowly (tau 1.2 s).
+                    let correction = wrap(measured - prediction)
+                    let alpha = 1 - exp(-dt / 1.2)
+                    filtered = prediction + alpha * correction
+                } else if reading.source == .acceleration, let prediction = predicted,
                    filtered != nil, validRate, dt > 0, dt <= 0.10 {
                     // Complementary fusion: gyro carries quick turns; absolute
                     // acceleration slowly corrects drift without injecting every

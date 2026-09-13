@@ -11,8 +11,9 @@
   <p>
     <a href="#key-features">Key Features</a> · 
     <a href="#screenshots">Screenshots</a> · 
-    <a href="#dualsense-adaptive-triggers">Adaptive Triggers</a> · 
-    <a href="#motion-steering--gyro-aiming">Motion & Steering</a> · 
+    <a href="#dualsense-adaptive-trigger-modes">Adaptive Triggers</a> · 
+    <a href="#motion-steering-gyro-aiming--flick-shifting">Motion & Steering</a> · 
+    <a href="#deep-links">Deep Links</a> · 
     <a href="#app-shortcuts">Shortcuts</a> · 
     <a href="#installation--requirements">Download</a> · 
     <a href="#building-from-source">Build from Source</a>
@@ -23,7 +24,7 @@
 
 **Mac Xcloud** combines the Xbox web ecosystem and [Better xCloud](https://github.com/redphx/better-xcloud) with native macOS APIs, delivering an edge-to-edge desktop experience for **Xbox Cloud Gaming** and **Xbox Remote Play**.
 
-Running in Apple's native `WKWebView`, stream video benefits from custom WebKit compatibility shims, AMD FSR upscaling, and low latency, while controller input, DualSense adaptive triggers, motion steering, and live diagnostics are handled directly by native macOS frameworks (`GameController`, `CoreHaptics`).
+Running in Apple's native `WKWebView`, stream video benefits from custom WebKit compatibility shims and optional WebGL/WebGPU clarity pipelines, while controller input, DualSense adaptive triggers, motion steering, and live diagnostics are handled directly by native macOS frameworks (`GameController`, `CoreHaptics`).
 
 > [!NOTE]
 > You need an active Xbox Game Pass Ultimate subscription, account, and region access required by Xbox to stream cloud titles. Remote Play connects directly to your own configured Xbox console. This open-source project is independent of and not endorsed by Microsoft or Sony.
@@ -52,36 +53,43 @@ Running in Apple's native `WKWebView`, stream video benefits from custom WebKit 
 ## Key Features
 
 ### 🖥️ Native macOS Experience
-- **Edge-to-Edge Chromeless Window**: Custom drag strip under floating macOS traffic lights with zoom/fullscreen support.
-- **Xbox Series X Boot Video**: Authentic Xbox startup sequence playing seamlessly on initial launch while WebKit prepares the stream.
+- **Edge-to-Edge Chromeless Window**: Custom drag strip under floating macOS traffic lights with zoom/fullscreen support. The main window remembers its size and position on each display.
+- **Boot Animation**: The Mac Xcloud launch animation plays over the loading page while WebKit prepares the stream; the page loads in the background the whole time.
+- **Keep-Awake While Running**: The Mac's display and system sleep are suppressed while the app is open, so long sessions aren't interrupted.
+- **Quit Confirmation**: Quitting during an active stream asks for confirmation first.
 - **Persistent Microsoft Authentication**: Dedicated cookie and local storage isolation keeps you signed in between launches.
+- **Settings Search**: Filter every cloud, video, overlay, and appearance setting from the settings header.
 - **Background Menu Bar Companion**: Quick menu bar status item with instant access to settings, trigger presets, and stream actions.
 - **Automatic Updates**: Built-in [Sparkle](https://sparkle-project.org/) framework delivers seamless background checks with detailed, versioned release notes.
+- **Deep Links**: `macxcloud://play/<game-id>` launches a game directly, `macxcloud://resume` reopens your last game, and `macxcloud://home` returns to the start page. Works from the Terminal (`open "macxcloud://…"`), Raycast, Alfred, Shortcuts, or browser links. The current game's ID is shown in the Diagnostics panel with a copy button.
 
 ### 🎮 Controller Suite & DualSense Support
 - **Hardware Calibration**: Live stick center, range calibration, customizable dead zones, and response curves (Linear, Precise Center, Quick Response, S-Curve).
 - **DualSense Adaptive Triggers**: Full implementation using macOS 10-zone resistance arrays with presets matching the popular DualSenseX catalog (GameCube digital click, bow draw, machine gun recoil, staged resistance).
 - **CoreHaptics & Rumble Routing**: Real-time translation of stream rumble telemetry to native body and trigger haptics with customizable rumble exponent and gain curves.
 - **Trigger Lock & Stop Emulation**: Software-defined trigger stops with resistance thresholds.
-- **Lightbar & Battery**: Controller battery levels mirrored into the stream status bar and customizable lightbar RGB colors.
+- **Lightbar & Battery**: Controller battery levels mirrored into the stream status bar and the menu bar. Customizable lightbar colors, with a battery policy that dims, reddens, or switches off the light when the controller is low.
+- **Low Battery Alert**: A macOS notification fires once per discharge cycle when the controller drops to about 20%.
+- **"Game Ready" Alert**: When a queued game finally connects, you get a macOS notification plus three light-green lightbar pulses with a controller rumble each — so you can browse elsewhere and still know when to hop back in.
 
 ### 🏎️ Motion Steering, Gyro Aiming & Flick Shifting
-- **Virtual Steering Wheel**: Translates controller rotation/tilt into a smooth, proportional left-stick gamepad axis—ideal for racing games like *Forza Horizon 5*.
+- **Virtual Steering Wheel (left stick)**: You hold the controller facing you and rotate it left and right like a wheel. The app reads the controller's motion sensors to track its rotation angle and writes that angle to the **left analog stick**, so the game sees normal stick steering — no wheel driver or in-game wheel support needed. The full-turn angle, response curve, and smoothing are adjustable. While game rumble or adaptive-trigger vibration is active, steering rides on gyroscope motion instead of reading the shaking sensors, so holding the throttle doesn't pull your line.
+- **Flick Shifting (right stick)**: A quick upward or downward flick of the controller sends a right-stick up/down pulse for gear changes; the return movement is ignored so one flick is one shift. **This requires mapping upshift to Right Stick Up and downshift to Right Stick Down in the game's control settings** (most racing games support this, e.g. Forza Horizon 5).
+- **Touchpad Aiming (DualSense)**: The touchpad can act as a right-stick aim input. It works, but it is the least polished of the motion features — give it a try if it suits you.
+- **Touchpad Gestures**: Configurable swipe and tap gestures on the DualSense touchpad mapped to app actions (toggle stats, fullscreen, screenshot, and more).
+- **Gyro Aiming (right stick)**: Tilting the controller maps angular motion to the right stick for fine aiming. It is usable today, though there are known issues that will be worked on over time.
 - **Gyro-Assisted Tracking**: Reduces accelerometer jolts while preserving fine corrections and held turns.
-- **Gyro Aiming**: Angular velocity mapped to right-stick aiming with configurable sensitivity, smoothing, vertical inversion, and hold-to-aim modifiers.
-- **Flick Shifting**: Rapid upward/downward controller flicks trigger right-stick upshift/downshift pulses with automatic return-stroke suppression.
-- **DualSense Touchpad**: Touchpad aiming and customizable touchpad swipe/tap gestures.
 
 ### 📊 Native Performance HUD & Diagnostics
 - **Pill HUD Overlay**: Lightweight macOS material overlay rendering FPS, network ping, bitrate (Mbps), decode time, packet loss, and dropped frames.
 - **Customizable Appearance**: Selectable screen positions, font sizes, opacity, background blur, and conditional green/yellow/red latency coloring.
 - **Quick Glance**: Momentarily summon stream metrics via controller shortcut without keeping the HUD permanently on screen.
-- **Diagnostics Panel (`⇧⌘D`)**: Live inspection of WebRTC connections, Gamepad API status, bridge message latency, and hardware detection.
+- **Diagnostics Panel (`⇧⌘D`)**: Live inspection of WebRTC connections, Gamepad API status, bridge message latency, and hardware detection, plus the current game's ID with a copy button for deep links.
 
 ### ⚡ Stream Optimization & Video Clarity
 - **1080p HQ Unlocked**: WebKit SDP shims negotiate H.264 High Profile (`profile-level-id=64001f`), preventing automatic resolution drops.
-- **AMD FSR 1.0 Upscaler**: Injected EASU + RCAS sharpening passes running at native Retina `devicePixelRatio`.
-- **Renderer Selection**: Choose between WebGL2 and WebGPU processing backends with customizable sharpness and contrast.
+- **Clarity Pipelines**: Choose between WebGPU or WebGL2 AMD CAS and Unsharp Mask passes, applied live, with customizable sharpness and contrast.
+- **Renderer Selection**: Choose between WebGL2 and WebGPU processing backends.
 - **Audio & Video Customization**: Aspect ratio adjustment, video position, brightness, contrast, saturation, and volume boosting.
 
 ### 📂 Per-Game Profiles & Macros
@@ -89,6 +97,11 @@ Running in Apple's native `WKWebView`, stream video benefits from custom WebKit 
 - **Multi-Step Macro Engine**: Create up to 16-step timed macros with button presses, delays, native actions, and haptic pulses.
 - **Hold-to-Fire (Rapid Fire)**: Repeatable trigger firing with configurable rate (2–15 pulses/sec).
 - **Profile Export/Import**: Export profiles as portable JSON files to share between Macs.
+- **Full Settings Backup**: Export or import all app settings and every profile as a single JSON file (Settings ▸ Backup & Restore).
+
+### 🛡️ Connection Handling
+- **Offline Detection**: If the internet drops, the app says so and reloads the page automatically once the connection returns.
+- **Recovery Screens**: Load failures and stuck pages surface a Retry screen instead of hanging.
 
 ### 🏠 Xbox Remote Play
 - **Direct Console Streaming**: Stream directly from your home Xbox Series X/S or Xbox One console.
@@ -128,7 +141,7 @@ Mac Xcloud features a DualSenseX-inspired trigger preset catalog. Each mode maps
 Mac Xcloud is purpose-built for **gamepad play, motion steering, and haptics**. 
 
 * **Game Controllers**: Full support for PlayStation DualSense / DualSense Edge, Xbox Wireless Controllers, Nintendo Switch Pro Controllers, and MFi gamepads via Apple's `GameController` framework.
-* **Mouse & Keyboard**: Dedicated to native app controls, window management, web navigation, and Microsoft account sign-in. To ensure stability and eliminate pointer-lock conflicts in Apple's `WKWebView`, virtual mouse-to-stick emulation was deliberately removed in favor of a rock-solid gamepad and motion steering experience.
+* **Mouse & Keyboard**: For app controls, window management, web navigation, and Microsoft account sign-in. Virtual mouse-to-stick emulation was deliberately removed to avoid pointer-lock conflicts in Apple's `WKWebView`; game input is gamepad-focused.
 
 ---
 
@@ -166,6 +179,26 @@ When using **Motion Steering**, the app translates controller rotation into a na
 | **Toggle Fullscreen** | `⌃⌘F` |
 | **Toggle Diagnostics Overlay** | `⇧⌘D` |
 | **Settings Home** | `⇧⌘H` *(inside Settings)* |
+
+---
+
+## Deep Links
+
+Mac Xcloud registers the `macxcloud://` URL scheme, so external tools can open the app at a specific spot:
+
+| Link | Action |
+| :--- | :--- |
+| `macxcloud://play/<game-id>` | Starts streaming the game with that Xbox product ID (e.g. `9NPDN9R45JX4`) |
+| `macxcloud://resume` | Reopens the game you played last |
+| `macxcloud://home` | Opens the Xbox home page |
+
+From the Terminal:
+
+```bash
+open "macxcloud://resume"
+```
+
+The same links work in Raycast, Alfred, Shortcuts, or any web page. To find a game's ID, start the game once and open the Diagnostics panel (`⇧⌘D`) — the current game's ID is listed there with a copy button.
 
 ---
 
@@ -233,7 +266,7 @@ Automated regression and validation suites verify trigger math, profile encoding
 
 * Built upon the open-source userscript [Better xCloud](https://github.com/redphx/better-xcloud) created by [redphx](https://github.com/redphx).
 * Automatic updates powered by the [Sparkle Project](https://sparkle-project.org/).
-* AMD FidelityFX Super Resolution 1.0 (FSR 1 / EASU + RCAS) licensed under MIT by Advanced Micro Devices, Inc.
+* AMD FidelityFX CAS (Contrast-Adaptive Sharpening) licensed under MIT by Advanced Micro Devices, Inc.
 
 ### Support Development
 If you enjoy using Mac Xcloud, consider [supporting ongoing development on Ko-fi](https://ko-fi.com/arunyagoojar).

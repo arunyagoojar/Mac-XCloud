@@ -101,7 +101,13 @@ final class ControllerFeatureService: ObservableObject {
             acceleration: ControllerMotionVector(x: acceleration.x, y: acceleration.y, z: acceleration.z))
         let rotation = motion.hasRotationRate
             ? ControllerMotionVector(x: rate.x, y: rate.y, z: rate.z) : .zero
-        guard let angle = steeringWheel.sample(input, rate: rotation, now: timestamp, hasRate: motion.hasRotationRate) else {
+        // Sustained game rumble (engine drone, road noise) shakes the whole
+        // controller; without the guard, the wheel reads that shake as tiny
+        // steering inputs. While vibration is active, absolute re-anchors are
+        // held back and the gyro prediction carries the angle instead.
+        let vibrating = enhancements.effectiveSteeringRumbleGuard
+            && (timestamp < streamRumbleEndsAt || timestamp < triggerFeedbackEndsAt)
+        guard let angle = steeringWheel.sample(input, rate: rotation, now: timestamp, hasRate: motion.hasRotationRate, vibrating: vibrating) else {
             steeringResponse.reset(at: timestamp); lastSteeringTarget = 0; lastSteeringOutput = 0
             return
         }
@@ -223,6 +229,9 @@ final class ControllerFeatureService: ObservableObject {
     private var isApplyingSettings = false
     private var controllerToolsActive = false
     private var lastLEDColor: ControllerLEDColor?
+    /// Runs the "your game is ready" lightbar pulse sequence; non-nil means
+    /// the flash owns the LED until it finishes and restores the policy color.
+    private var readyAlertTask: Task<Void, Never>?
 
     private struct ShortcutRuntimeState {
         var wasChordPressed = false
@@ -289,6 +298,7 @@ final class ControllerFeatureService: ObservableObject {
 
     deinit {
         pollTimer?.invalidate()
+        readyAlertTask?.cancel()
         touchRuntime.pendingTapTask?.cancel()
         macroTasks.values.forEach { $0.cancel() }
         observers.forEach(NotificationCenter.default.removeObserver)
@@ -334,6 +344,8 @@ final class ControllerFeatureService: ObservableObject {
         stopStreamRumble()
         pollTimer?.invalidate()
         pollTimer = nil
+        readyAlertTask?.cancel()
+        readyAlertTask = nil
         touchRuntime.pendingTapTask?.cancel()
         touchRuntime.fallbackExpiryTasks.values.forEach { $0.cancel() }
         touchRuntime = TouchRuntimeState()
@@ -627,7 +639,17 @@ final class ControllerFeatureService: ObservableObject {
         )
         previousSnapshot = next
         if shouldPublishToUI { applyLEDPolicy() }
+        // The battery-driven LED policy (dim/red/off-when-low) must also keep
+        // working while streaming with the settings window closed, where UI
+        // publishing is throttled off. The policy de-duplicates internally, so
+        // a slow periodic re-check costs nothing when nothing changed.
+        if timestamp - lastLEDCheckAt >= 2 {
+            lastLEDCheckAt = timestamp
+            applyLEDPolicy()
+        }
     }
+
+    private var lastLEDCheckAt: TimeInterval = 0
 
     private func buttonsSnapshot(from gamepad: GCExtendedGamepad, dualSense: GCDualSenseGamepad?) -> ControllerButtonsSnapshot {
         ControllerButtonsSnapshot(
@@ -1273,6 +1295,9 @@ final class ControllerFeatureService: ObservableObject {
     // MARK: - LED
 
     func applyLEDPolicy() {
+        // A queued alert flash owns the lightbar until it restores the policy
+        // colour itself; re-applying mid-flash would cancel the pulses.
+        guard readyAlertTask == nil else { return }
         guard let light = controller?.light else { return }
         let config = settings.led
         let battery = controller.flatMap(batterySnapshot(from:))
@@ -1312,6 +1337,33 @@ final class ControllerFeatureService: ObservableObject {
         guard effective != lastLEDColor else { return }
         lastLEDColor = effective
         light.color = GCColor(red: effective.red, green: effective.green, blue: effective.blue)
+    }
+
+    /// The "your game is ready" attention alert: three light-green lightbar
+    /// pulses paired with a haptic blip each, then the user's LED policy
+    /// colour is restored. Safe when no controller or lightbar is present —
+    /// the notification half of the alert still fires in that case.
+    func readyAlertFlash() {
+        guard readyAlertTask == nil else { return }
+        readyAlertTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let green = GCColor(red: 0.2, green: 0.95, blue: 0.35)
+            for pulse in 0..<3 {
+                self.controller?.light?.color = green
+                self.playTestPulse(intensity: 0.8, sharpness: 0.4, duration: 0.12)
+                try? await Task.sleep(nanoseconds: 260_000_000)
+                if pulse < 2 {
+                    self.controller?.light?.color = GCColor(red: 1, green: 1, blue: 1)
+                    try? await Task.sleep(nanoseconds: 260_000_000)
+                }
+            }
+            // Release the LED guard first, then let the policy write through
+            // the de-dup memo: clearing it forces applyLEDPolicy to re-set
+            // whatever colour the user actually chose.
+            self.readyAlertTask = nil
+            self.lastLEDColor = nil
+            self.applyLEDPolicy()
+        }
     }
 
     // MARK: - Framework adapters

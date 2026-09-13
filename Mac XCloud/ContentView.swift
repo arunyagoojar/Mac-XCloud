@@ -5,26 +5,54 @@
 //  Created by Arunya on 02/09/26.
 //
 
+import AppKit
 import SwiftUI
+
+/// Captures the SwiftUI WindowGroup window that hosts this view so it can be
+/// closed by direct reference — never by guessing from title or size, which
+/// could close an unrelated window.
+private final class LauncherWindowBinderView: NSView {
+    var onBind: ((NSWindow) -> Void)?
+    private weak var lastWindow: NSWindow?
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window, window !== lastWindow else { return }
+        lastWindow = window
+        onBind?(window)
+    }
+}
+
+private struct LauncherWindowBinder: NSViewRepresentable {
+    var onBind: (NSWindow) -> Void
+    func makeNSView(context: Context) -> LauncherWindowBinderView {
+        let view = LauncherWindowBinderView()
+        view.onBind = onBind
+        return view
+    }
+    func updateNSView(_ view: LauncherWindowBinderView, context: Context) {
+        view.onBind = onBind
+    }
+}
 
 /// Invisible bootstrap view: SwiftUI's WindowGroup window keeps a titlebar
 /// strip no matter what, so it immediately hands off to our own AppKit main
 /// window (created chrome-less) and closes itself.
 struct MainWindowLauncher: View {
     @EnvironmentObject private var browser: BrowserModel
+    @State private var launcherWindow: NSWindow?
 
     var body: some View {
         Color.black
             .ignoresSafeArea()
+            .background(LauncherWindowBinder { window in
+                launcherWindow = window
+            })
             .onAppear {
                 browser.openMainWindow()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    for window in NSApp.windows where window.identifier?.rawValue != "xcg-main" && window.isVisible {
-                        // Only close SwiftUI's empty launcher window.
-                        if window.frame.width >= 800 && (window.title == "Mac Xcloud" || window.title.isEmpty) {
-                            window.close()
-                        }
-                    }
+                // Give the AppKit window a moment to take key status before
+                // closing the launcher.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [launcherWindow] in
+                    launcherWindow?.close()
                 }
             }
     }
@@ -69,10 +97,31 @@ struct ContentView: View {
 
             switch browser.loadPhase {
             case .initialLoading:
-                BootVideoView(onFinished: browser.bootVideoFinished)
-                    .background(Color.black)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
+                ZStack {
+                    BootVideoView(onEnded: browser.bootVideoFinished)
+                        .background(Color.black)
+                        .ignoresSafeArea()
+                    // Once the animation has played out, the splash holds on
+                    // black with a spinner until the page behind is actually
+                    // ready — no frozen video frame on a slow connection.
+                    if browser.hasFinishedBootVideo {
+                        VStack(spacing: 14) {
+                            ProgressView()
+                                .controlSize(.large)
+                                .tint(.white)
+                            Text("Loading…")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        .transition(.opacity.animation(.easeIn(duration: 0.3)))
+                    }
+                }
+                .animation(.easeIn(duration: 0.3), value: browser.hasFinishedBootVideo)
+                .background(Color.black)
+                .ignoresSafeArea()
+                // Fade out with a subtle push-through zoom as the live
+                // web page (already loaded underneath) is revealed.
+                .transition(.opacity.combined(with: .scale(scale: 1.04)))
             case .failed(let failure):
                 ConnectionIssueView(
                     failure: failure,
@@ -154,6 +203,23 @@ struct ContentView: View {
 
                     Label("Native controllers: \(browser.report.nativeControllerIDs.count)",
                           systemImage: "gamecontroller")
+
+                    // Show the running title's ID so it can be pasted into a
+                    // macxcloud://play/<id> deep link.
+                    if browser.isStreaming, !browser.currentGameID.isEmpty {
+                        HStack(spacing: 6) {
+                            Text("Game: \(browser.currentGameTitle.isEmpty ? browser.currentGameID : browser.currentGameTitle)")
+                                .font(.caption).lineLimit(1)
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(browser.currentGameID, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc").font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Copy game ID for a macxcloud://play/\(browser.currentGameID) link")
+                        }
+                    }
 
                     Label(browser.remotePlayActive ? "Remote Play: active" : "Remote Play: inactive",
                           systemImage: browser.remotePlayActive ? "checkmark.circle" : "minus.circle")

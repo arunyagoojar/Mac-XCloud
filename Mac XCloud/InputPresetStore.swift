@@ -959,6 +959,20 @@ final class InputPresetStore: ObservableObject {
         }
     }
 
+    /// Storage root once reloadFromDisk has succeeded; nil while unavailable.
+    var storageRootURL: URL? { rootURL }
+
+    /// Checksum + envelope validation for a candidate preset file, exposed
+    /// for the full-settings backup importer.
+    func backupValidate(_ data: Data) -> Bool {
+        do {
+            try validateEnvelope(data, kind: "input-preset")
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private func checksum<T: Encodable>(for value: T) throws -> String {
         SHA256.hash(data: try encoded(value)).map { String(format: "%02x", $0) }.joined()
     }

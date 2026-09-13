@@ -8,7 +8,10 @@
 import AppKit
 import Combine
 import GameController
+import IOKit.pwr_mgt
+import Network
 import SwiftUI
+import UserNotifications
 import WebKit
 
 struct SpikeReport: Equatable {
@@ -35,8 +38,20 @@ enum ControllerInputOwner: Equatable {
 @MainActor
 final class WindowCloseDelegate: NSObject, NSWindowDelegate {
     private let onClose: () -> Void
+    /// Called whenever the window finishes moving/resizing and before close,
+    /// used to persist the window frame per display.
+    var onFrameChange: ((NSWindow) -> Void)?
     init(onClose: @escaping () -> Void) { self.onClose = onClose }
-    func windowWillClose(_ notification: Notification) { onClose() }
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow { onFrameChange?(window) }
+        onClose()
+    }
+    func windowDidEndLiveResize(_ notification: Notification) {
+        if let window = notification.object as? NSWindow { onFrameChange?(window) }
+    }
+    func windowDidMove(_ notification: Notification) {
+        if let window = notification.object as? NSWindow { onFrameChange?(window) }
+    }
 }
 
 struct StreamTelemetry: Equatable {
@@ -69,6 +84,7 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var report = SpikeReport()
     @Published private(set) var isStreaming = false
     @Published private(set) var currentGameTitle = ""
+    @Published private(set) var currentGameID = ""
     @Published private(set) var currentRegion = ""
     @Published private(set) var telemetry = StreamTelemetry.empty
     @Published var nativeHUDVisible = false
@@ -84,6 +100,7 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var nativeHUDValues: [String: String] = [:]
     @Published private(set) var telemetryUpdatedAt = Date.distantPast
     @Published private(set) var bridgeReady = false
+    @Published private(set) var isOffline = false
 
     var remotePlayActive: Bool { report.remotePlayActive }
     var remoteServerStatus: String { report.remoteServerStatus }
@@ -106,6 +123,15 @@ final class BrowserModel: ObservableObject {
     private(set) var controllerInputOwner: ControllerInputOwner = .none
     private var focusObservers: [NSObjectProtocol] = []
     private var controllerObservers: [NSObjectProtocol] = []
+    private let pathMonitor = NWPathMonitor()
+    /// Set when the connection drops while a load is in flight or on the
+    /// connection-issue screen; cleared after the automatic retry fires.
+    private var autoRetryOnReconnect = false
+    /// IOKit assertion id while the display must stay awake; 0 = none held.
+    private var displaySleepAssertion: IOPMAssertionID = 0
+    /// Game key the "your turn" alert has already fired for; reset when the
+    /// session ends so the next launch alerts again.
+    private var gameReadyAlertedKey = ""
     private var browserGamepadSyncTask: Task<Void, Never>?
     lazy var settingsModel = SettingsModel(browser: self)
 
@@ -224,6 +250,9 @@ final class BrowserModel: ObservableObject {
         controllerInput.onPresenceChange = { [weak self] connected in
             self?.evaluateJS("window.postMessage({ type: 'xcg-cursor-hide', enabled: \(connected) }, '*')")
         }
+        controllerInput.onBatteryLow = { [weak self] percent in
+            self?.notifyBatteryLow(percent: percent)
+        }
         // Mirror controller battery into the in-stream stats bar.
         controllerInput.$batteryPercent.combineLatest(controllerInput.$batteryStateText)
             .receive(on: RunLoop.main)
@@ -313,6 +342,52 @@ final class BrowserModel: ObservableObject {
             MainActor.assumeIsolated { self?.refreshNativeControllers() }
         })
         refreshNativeControllers()
+
+        // Watch internet reachability: publish offline state for friendlier
+        // errors, and retry automatically once when connectivity returns to a
+        // load that the dropout interrupted.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isOffline = !satisfied
+                if !satisfied, self.isLoading || self.loadPhase.isLoading {
+                    self.autoRetryOnReconnect = true
+                } else if satisfied, self.autoRetryOnReconnect {
+                    self.autoRetryOnReconnect = false
+                    self.retryLoading()
+                }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "xcg.path-monitor", qos: .utility))
+
+        // Mac Xcloud exists to play games: keep the MacBook awake for as long
+        // as the app runs, so the screen never sleeps mid-session. Released
+        // again when the model tears down (app quit).
+        beginKeepingAwake()
+    }
+
+    // MARK: - Keep-awake
+
+    private func beginKeepingAwake() {
+        guard displaySleepAssertion == 0 else { return }
+        var assertionID: IOPMAssertionID = 0
+        let reason = "Mac Xcloud is running" as CFString
+        let result = IOPMAssertionCreateWithName(
+            kIOPMAssertionTypeNoDisplaySleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            reason,
+            &assertionID
+        )
+        if result == kIOReturnSuccess {
+            displaySleepAssertion = assertionID
+        }
+    }
+
+    private func endKeepingAwake() {
+        guard displaySleepAssertion != 0 else { return }
+        IOPMAssertionRelease(displaySleepAssertion)
+        displaySleepAssertion = 0
     }
 
     // MARK: - Main window
@@ -342,7 +417,7 @@ final class BrowserModel: ObservableObject {
         window.backgroundColor = .black
         window.isMovableByWindowBackground = true
         window.minSize = NSSize(width: 1024, height: 576)
-        window.center()
+        restoreMainWindowFrame(window)
         window.contentView = NSHostingView(rootView:
             ContentView()
                 .environmentObject(self)
@@ -352,6 +427,9 @@ final class BrowserModel: ObservableObject {
             guard let self, let window else { return }
             if self.mainWindow === window { self.mainWindow = nil }
             self.recomputeControllerOwner()
+        }
+        mainDelegate.onFrameChange = { [weak self] window in
+            self?.saveMainWindowFrame(window)
         }
         mainWindowDelegate = mainDelegate
         window.delegate = mainDelegate
@@ -368,6 +446,59 @@ final class BrowserModel: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.synchronizeBrowserGamepadIfNeeded()
         }
+    }
+
+    // MARK: - Per-display window frame memory
+
+    private static let windowFramesKey = "xcg.mainWindow.frames.v1"
+    private static let windowLastDisplayKey = "xcg.mainWindow.lastDisplay.v1"
+    static var windowFramesDefaultsKey: String { windowFramesKey }
+
+    private static func displayKey(for window: NSWindow) -> String? {
+        let screen = window.screen ?? NSScreen.main
+        guard let screen else { return nil }
+        let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        return id.map { "d\($0.uint32Value)" }
+    }
+
+    private func saveMainWindowFrame(_ window: NSWindow) {
+        // Full-screen frames are just display bounds — never persist those.
+        guard window.styleMask.contains(.fullScreen) == false,
+              window.isMiniaturized == false,
+              let key = Self.displayKey(for: window) else { return }
+        var frames = UserDefaults.standard.dictionary(forKey: Self.windowFramesKey) as? [String: String] ?? [:]
+        frames[key] = NSStringFromRect(window.frame)
+        UserDefaults.standard.set(frames, forKey: Self.windowFramesKey)
+        UserDefaults.standard.set(key, forKey: Self.windowLastDisplayKey)
+    }
+
+    private func restoreMainWindowFrame(_ window: NSWindow) {
+        window.center()
+        guard let frames = UserDefaults.standard.dictionary(forKey: Self.windowFramesKey) as? [String: String],
+              !frames.isEmpty else { return }
+        // Try the display the window was last on first (e.g. after its frame
+        // was moved), then any other display that still recognises a frame.
+        var candidates = frames.keys.sorted()
+        if let last = UserDefaults.standard.string(forKey: Self.windowLastDisplayKey),
+           candidates.contains(last) {
+            candidates.removeAll { $0 == last }
+            candidates.insert(last, at: 0)
+        }
+        for key in candidates {
+            guard let text = frames[key], let displayID = Self.displayID(fromKey: key) else { continue }
+            let frame = NSRectFromString(text)
+            guard let screen = NSScreen.screens.first(where: {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+            }), screen.frame.intersects(frame),
+               frame.width >= window.minSize.width, frame.height >= window.minSize.height else { continue }
+            window.setFrame(frame, display: false)
+            return
+        }
+    }
+
+    private static func displayID(fromKey key: String) -> UInt32? {
+        guard key.hasPrefix("d") else { return nil }
+        return UInt32(key.dropFirst())
     }
 
     // MARK: - Settings window
@@ -451,6 +582,11 @@ final class BrowserModel: ObservableObject {
         controllerObservers.forEach(center.removeObserver)
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         browserGamepadSyncTask?.cancel()
+        pathMonitor.cancel()
+        if displaySleepAssertion != 0 {
+            IOPMAssertionRelease(displaySleepAssertion)
+            displaySleepAssertion = 0
+        }
     }
 
     func setGamepadPollingPaused(_ paused: Bool, force: Bool = false) {
@@ -720,7 +856,23 @@ final class BrowserModel: ObservableObject {
                 isStreaming = info["playing"] as? Bool ?? false
                 currentGameTitle = info["title"] as? String ?? ""
                 let gameID = info["gameID"] as? String ?? ""
+                if currentGameID != gameID { currentGameID = gameID }
                 let playing = isStreaming, gameTitle = currentGameTitle
+                // Remember the last title so macxcloud://resume can reopen it,
+                // however the game was started.
+                if playing, !gameID.isEmpty { lastPlayedGameID = gameID }
+                // "Your turn": fire once per game start the moment a live
+                // session appears, so a player waiting in queue can leave the
+                // app and still hear/feel when the game is up.
+                if playing {
+                    let key = gameID.isEmpty ? gameTitle : gameID
+                    if gameReadyAlertedKey != key {
+                        gameReadyAlertedKey = key
+                        notifyGameReady()
+                    }
+                } else {
+                    gameReadyAlertedKey = ""
+                }
                 let gameKey = playing ? InputPresetStore.gameKey(id: gameID, title: gameTitle) : ""
                 if inputPresets.currentGameID != gameKey {
                     Task { await inputPresets.noteGame(id: gameID, title: gameTitle, playing: playing) }
@@ -778,12 +930,17 @@ final class BrowserModel: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.isLoading else { return }
             self.loadPhase = .failed(BrowserLoadFailure(
-                title: "Connection issue",
-                message: "Xbox Cloud Gaming took too long to become ready.",
-                recoverySuggestion: "Check your connection and try again.",
+                title: self.isOffline ? "You appear to be offline" : "Connection issue",
+                message: self.isOffline
+                    ? "This Mac has no internet connection, so Xbox Cloud Gaming can't load."
+                    : "Xbox Cloud Gaming took too long to become ready.",
+                recoverySuggestion: self.isOffline
+                    ? "Reconnect to Wi-Fi or Ethernet — the page reloads automatically when the connection returns."
+                    : "Check your connection and try again.",
                 failingURL: self.webView?.url
             ))
             self.isLoading = false
+            if self.isOffline { self.autoRetryOnReconnect = true }
         }
         loadingTimeout = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 40, execute: work)
@@ -794,6 +951,30 @@ final class BrowserModel: ObservableObject {
         if loading { navigationStarted() }
     }
 
+    func pageDidFinishLoading() {
+        // The document fully loaded. If a ready signal already arrived, this
+        // completes the load; otherwise a shorter timer still resolves the
+        // overlay instead of leaving it stuck on "Loading".
+        loadingTimeout?.cancel()
+        loadingTimeout = nil
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if self.isSiteSemanticallyReady {
+                self.completeInitialLoadIfPossible()
+            } else {
+                self.loadPhase = .failed(BrowserLoadFailure(
+                    title: "Connection issue",
+                    message: "Xbox Cloud Gaming finished loading but never became ready.",
+                    recoverySuggestion: "Retry to reload the page.",
+                    failingURL: self.webView?.url
+                ))
+                self.isLoading = false
+            }
+        }
+        loadingTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: work)
+    }
+
     func bootVideoFinished() {
         hasFinishedBootVideo = true
         completeInitialLoadIfPossible()
@@ -801,6 +982,10 @@ final class BrowserModel: ObservableObject {
 
     func pageBecameReady() {
         isSiteSemanticallyReady = true
+        // The page is genuinely interactive now; the pending finish-loading
+        // timer is no longer needed.
+        loadingTimeout?.cancel()
+        loadingTimeout = nil
         completeInitialLoadIfPossible()
     }
 
@@ -820,7 +1005,18 @@ final class BrowserModel: ObservableObject {
         loadingTimeout?.cancel()
         loadingTimeout = nil
         isLoading = false
-        loadPhase = .failed(BrowserLoadFailure(error: error, failingURL: url))
+        let offline = isOffline || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorNotConnectedToInternet)
+        autoRetryOnReconnect = offline
+        var failure = BrowserLoadFailure(error: error, failingURL: url)
+        if offline {
+            failure = BrowserLoadFailure(
+                title: "You appear to be offline",
+                message: "This Mac has no internet connection, so Xbox Cloud Gaming couldn't load.",
+                recoverySuggestion: "Reconnect to Wi-Fi or Ethernet — the page reloads automatically when the connection returns.",
+                failingURL: url
+            )
+        }
+        loadPhase = .failed(failure)
     }
 
     private var webContentTerminationDates: [Date] = []
@@ -948,5 +1144,114 @@ final class BrowserModel: ObservableObject {
         refreshNativeControllers()
         evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
         note("Requested a safe native/browser controller rescan")
+    }
+
+    // MARK: - Deep links
+
+    /// Handles a `macxcloud://` URL opened from Finder, a browser link,
+    /// the `open` command, Raycast, etc. Formats:
+    ///   macxcloud://home              → xbox.com/play
+    ///   macxcloud://play/<productId>  → launch that game's stream directly
+    ///   macxcloud://resume            → re-open the last played game
+    /// Returns false for anything it does not understand.
+    @discardableResult
+    func handleDeepLink(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "macxcloud" else { return false }
+        openMainWindow()
+        // Support both macxcloud://play/ID (host = "play") and
+        // macxcloud:/play/ID styles so hand-typed links keep working.
+        var parts: [String] = []
+        if let host = url.host, !host.isEmpty, host != "localhost" { parts.append(host) }
+        parts.append(contentsOf: url.path.split(separator: "/").map(String.init))
+        guard let command = parts.first?.lowercased() else { return false }
+        switch command {
+        case "home":
+            loadHome()
+            return true
+        case "play":
+            guard let productID = parts.dropFirst().first, isUsableGameIdentifier(productID) else { return false }
+            streamGame(productID: productID)
+            return true
+        case "resume":
+            if let last = lastPlayedGameID { streamGame(productID: last) } else { loadHome() }
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static let lastPlayedKey = "xcg.lastPlayedGameID.v1"
+    private var lastPlayedGameID: String? {
+        get { UserDefaults.standard.string(forKey: Self.lastPlayedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.lastPlayedKey) }
+    }
+
+    /// Xbox product ids are 8-20 chars of A-Z and 0-9 (e.g. 9NPDN9R45JX4).
+    /// Anything else is rejected so a stray link can't inject odd strings.
+    private func isUsableGameIdentifier(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        return value.count >= 8 && value.count <= 20
+            && value.uppercased().unicodeScalars.allSatisfy(allowed.contains)
+    }
+
+    private func streamGame(productID: String) {
+        let id = productID.uppercased()
+        lastPlayedGameID = id
+        // If the same title is already streaming, don't restart the session.
+        if isStreaming, !currentGameID.isEmpty, currentGameID == id {
+            note("Already streaming this game")
+            return
+        }
+        let launch = URL(string: "https://www.xbox.com/play/launch/\(id)")
+        if let launch { webView?.load(URLRequest(url: launch)) }
+        note("Launching game \(id) via deep link")
+    }
+
+    // MARK: - Notifications
+
+    /// Posts a macOS notification when the connected controller runs low.
+    /// Authorization is requested lazily on first use; if the build lacks the
+    /// notification entitlement the request fails silently and nothing else
+    /// changes.
+    func notifyBatteryLow(percent: Int) {
+        note("Controller battery low: \(percent)%")
+        Task { @MainActor in
+            let center = UNUserNotificationCenter.current()
+            let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Controller battery low"
+            content.body = "Your controller is at \(percent)%. Plug it in soon — rumble and lightbar effects may stop."
+            let request = UNNotificationRequest(
+                identifier: "xcg-battery-low-\(percent)",
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+            )
+            try? await center.add(request)
+        }
+    }
+
+    /// Fires the "your game is ready" alert — push notification, three green
+    /// LED pulses, and a short controller rumble. Triggered when a game
+    /// becomes playable (the queue admitted you, or Play connected the
+    /// stream), at most once per game start.
+    func notifyGameReady() {
+        let title = currentGameTitle.isEmpty ? "your game" : currentGameTitle
+        note("Game ready: \(title)")
+        Task { @MainActor in
+            let center = UNUserNotificationCenter.current()
+            let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Your game is ready"
+            content.body = "\(title) is live — hop back in!"
+            let request = UNNotificationRequest(
+                identifier: "xcg-game-ready-\(UUID().uuidString)",
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+            )
+            try? await center.add(request)
+        }
+        controllerFeatures.readyAlertFlash()
     }
 }

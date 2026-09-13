@@ -28,6 +28,9 @@ final class ControllerInputService: ObservableObject {
     var onSwitchCategory: ((Int) -> Void)?   // -1 left bumper / +1 right bumper
     /// Fires when a controller connects/disconnects (true = connected).
     var onPresenceChange: ((Bool) -> Void)?
+    /// Fires once when battery drops to/below 20% while discharging, and again
+    /// only after the controller has been charged back above 30% (no spam).
+    var onBatteryLow: ((Int) -> Void)?
     /// When nil or false, UI navigation/activation input is ignored (e.g. the
     /// settings window is closed) — only the Home double-press stays active.
     var isUIInputEnabled: (() -> Bool)?
@@ -47,6 +50,7 @@ final class ControllerInputService: ObservableObject {
     private var lastLEDColor: LEDColor?
     private weak var lastController: GCController?
     private var lastPresenceState = false
+    private var lowBatteryLatched = false
 
     private struct ButtonState {
         var home = false
@@ -67,9 +71,12 @@ final class ControllerInputService: ObservableObject {
     func start() {
         guard timer == nil else { return }
         refreshControllerInfo()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
         }
+        // .common mode keeps shortcuts alive while a window is being dragged.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func stop() {
@@ -114,6 +121,15 @@ final class ControllerInputService: ObservableObject {
                 }
                 if batteryPercent != nextPercent { batteryPercent = nextPercent }
                 if batteryStateText != nextState { batteryStateText = nextState }
+                // Hysteresis: latch low at <=20% (discharging), reset once the
+                // pack is back above 30% or charging, so a hovering reading
+                // can never spam the warning.
+                if battery.batteryState == .discharging, !lowBatteryLatched, nextPercent <= 20 {
+                    lowBatteryLatched = true
+                    onBatteryLow?(nextPercent)
+                } else if battery.batteryState != .discharging || nextPercent > 30 {
+                    lowBatteryLatched = false
+                }
             } else {
                 if batteryPercent != nil { batteryPercent = nil }
                 if batteryStateText != nil { batteryStateText = nil }

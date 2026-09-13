@@ -165,6 +165,10 @@ struct ControllerEnhancementsView: View {
                     Toggle("Enable steering", isOn: Binding(get: { service.enhancements.gyroMode == .steering }, set: { gyroModeBinding.wrappedValue = $0 ? .steering : .off })).labelsHidden().toggleStyle(.switch)
                 }
                 Divider()
+                SettingsRow("Ignore rumble shake", note: "While the game vibrates the controllers, the wheel rides on gyro motion instead of reading the shaking sensors — so holding the throttle can't pull your line. Turn off if steering drifts during very long rumble bursts.") {
+                    Toggle("Ignore rumble shake", isOn: Binding(get: { service.enhancements.steeringRumbleGuard ?? true }, set: { value(\.steeringRumbleGuard).wrappedValue = $0 })).labelsHidden().toggleStyle(.switch)
+                }
+                Divider()
                 slider("Full turn (degrees per side)", steeringValue(\.steeringRangeDegrees, default: 40), range: 10...120)
                     .help("Controller rotation needed to reach your maximum steering output. Smaller angles are more sensitive.")
                 slider("Response curve", steeringValue(\.steeringExponent, default: 1), range: 0.5...2)

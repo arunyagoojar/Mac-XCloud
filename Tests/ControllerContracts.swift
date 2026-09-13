@@ -510,6 +510,58 @@ struct ControllerContracts {
         _ = disturbed.sample(wheelReading(0), rate: .zero, now: 0)
         let disturbedAngle = disturbed.sample(wheelReading(0.25), rate: .zero, now: 1.0/60)!
         check(abs(disturbedAngle) < 0.03, "A one-frame accelerometer disturbance cannot abruptly steer by fourteen degrees")
+        do {
+            // Sustained rumble shakes the whole controller around the angle
+            // being held (centre wheel). A gravity-source reading re-anchors
+            // instantly without the guard, so engine drone walks the wheel;
+            // with the guard the gyro prediction carries the angle and only
+            // the slow average of the shaking sensors corrects.
+            func shake(_ sign: Double) -> ControllerWheelMotion { wheelReading(0.12 * sign, gravity: true) }
+            var guarded = ControllerWheelState()
+            for frame in 0..<60 { _ = guarded.sample(shake(0), rate: .zero, now: Double(frame)/60) }
+            var maxGuarded: Float = 0
+            for frame in 60..<180 {
+                let sign = frame % 2 == 0 ? 1.0 : -1.0
+                if let angle = guarded.sample(shake(sign), rate: .zero, now: Double(frame)/60, vibrating: true) {
+                    maxGuarded = max(maxGuarded, abs(angle))
+                }
+            }
+            check(maxGuarded < 0.03, "Rumble guard holds a centred wheel steady through two seconds of shaking sensors")
+            var maxUnguarded: Float = 0
+            var unguarded = ControllerWheelState()
+            for frame in 0..<60 { _ = unguarded.sample(shake(0), rate: .zero, now: Double(frame)/60) }
+            for frame in 60..<180 {
+                let sign = frame % 2 == 0 ? 1.0 : -1.0
+                if let angle = unguarded.sample(shake(sign), rate: .zero, now: Double(frame)/60) {
+                    maxUnguarded = max(maxUnguarded, abs(angle))
+                }
+            }
+            check(maxUnguarded > 0.08, "Without the guard the same shaking sensors do wander the wheel (test proves the fix matters)")
+            // When the rumble stops the wheel must re-anchor to the real angle.
+            var recovered: Float = 0
+            for frame in 180..<240 {
+                if let angle = guarded.sample(wheelReading(0.2), rate: .zero, now: Double(frame)/60) { recovered = angle }
+            }
+            check(abs(recovered - 0.2) < 0.02, "After rumble stops the wheel re-anchors to the held angle")
+            // While the guard holds the prediction, a genuine held turn after
+            // the rumble must still register fully within a few frames.
+            var turned: Float = 0
+            for frame in 240..<250 {
+                if let angle = guarded.sample(wheelReading(0.2), rate: .zero, now: Double(frame)/60) { turned = angle }
+            }
+            check(abs(turned - 0.2) < 0.02, "Steering input immediately after rumble is not suppressed")
+            // Accelerometer-only source with the guard keeps steady too.
+            var guardedAccel = ControllerWheelState()
+            for frame in 0..<60 { _ = guardedAccel.sample(wheelReading(0), rate: .zero, now: Double(frame)/60) }
+            var maxAccel: Float = 0
+            for frame in 60..<180 {
+                let sign = frame % 2 == 0 ? 1.0 : -1.0
+                if let angle = guardedAccel.sample(wheelReading(0.12 * sign), rate: .zero, now: Double(frame)/60, vibrating: true) {
+                    maxAccel = max(maxAccel, abs(angle))
+                }
+            }
+            check(maxAccel < 0.03, "Rumble guard steadies an accelerometer-only controller the same way")
+        }
         var slowRaw = ControllerWheelState()
         _ = slowRaw.sample(wheelReading(0), rate: .zero, now: 0)
         var rawError: Float = 0

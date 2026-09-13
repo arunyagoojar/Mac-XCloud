@@ -14,6 +14,7 @@ struct SettingsRootView: View {
     @ObservedObject var model: SettingsModel
     @State private var supportFailure: String?
     @State private var showingResetConfirmation = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -22,9 +23,15 @@ struct SettingsRootView: View {
             VStack(spacing: 0) {
                 settingsHeader
                 Divider()
-                routeContent
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+                Group {
+                    if model.isSearching {
+                        searchResults
+                    } else {
+                        routeContent
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -134,6 +141,25 @@ struct SettingsRootView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .lineLimit(1)
             Spacer(minLength: 0)
+            HStack(spacing: 5) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.system(size: 11))
+                TextField("Search settings", text: $model.searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .frame(width: model.isSearching ? 220 : 160)
+                    .focused($searchFocused)
+                    .accessibilityLabel("Search settings")
+                if !model.searchQuery.isEmpty {
+                    Button { model.searchQuery = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.quaternary))
             if model.needsReload {
                 Button {
                     browser.reload()
@@ -265,6 +291,17 @@ struct SettingsRootView: View {
                     Text("5 main areas").foregroundStyle(.secondary)
                 }
             }
+            SettingsGroup("Backup & Restore") {
+                SettingsRow("Export all settings", note: "Saves every preference and profile to one JSON file. Xbox sign-in is never included.") {
+                    Button("Export…") { SettingsBackupManager.presentExport(browser: browser) }
+                        .buttonStyle(.bordered)
+                }
+                Divider()
+                SettingsRow("Import settings", note: "Restores preferences and profiles from a backup file. Existing profiles with the same ID are replaced.") {
+                    Button("Import…") { SettingsBackupManager.presentImport(browser: browser) }
+                        .buttonStyle(.bordered)
+                }
+            }
             SettingsGroup("Reset") {
                 SettingsRow("Reset all settings", note: "Deletes saved profiles and restores controller, streaming, video, and app settings to their defaults. Your Xbox sign-in stays intact.") {
                     Button("Reset All…", role: .destructive) {
@@ -354,6 +391,32 @@ struct SettingsRootView: View {
             if let message = model.saveMessage {
                 Text(message).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Live search across every setting row (label, note, key, category).
+    /// Matched rows are editable in place, exactly like their category page.
+    private var searchResults: some View {
+        SettingsPage {
+            let groups = model.searchCategories
+            if groups.isEmpty {
+                ContentUnavailableCompatView(
+                    title: "No matches",
+                    message: "Nothing in settings matches \"\(model.searchQuery)\"."
+                )
+                .padding(.top, 60)
+            } else {
+                Text("\(groups.reduce(0) { $0 + $1.hits.count }) results in \(groups.count) page\(groups.count == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(groups, id: \.category.id) { group in
+                    SettingsGroup(group.category.title) {
+                        ForEach(Array(group.hits.enumerated()), id: \.element.def.id) { index, hit in
+                            settingRow(model, def: hit.def)
+                            if index < group.hits.count - 1 { Divider() }
+                        }
+                    }
+                }
             }
         }
     }

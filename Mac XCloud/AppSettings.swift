@@ -573,12 +573,14 @@ extension SettingsModel {
                 }
                 if id == "app.clarityPipeline" {
                     let pipeline = (value as? String) ?? "fsr1"
+                    let renderer = response["renderer"] ?? "default"
+                    let processing = response["processing"] ?? "usm"
                     self.globalValues[id] = pipeline
-                    self.streamValues["video.player.type"] = response["renderer"] ?? "default"
-                    self.streamValues["video.processing"] = response["processing"] ?? "usm"
+                    self.streamValues["video.player.type"] = renderer
+                    self.streamValues["video.processing"] = processing
                     NativeSettingsMirror.save(pipeline, for: id, scope: .global)
-                    NativeSettingsMirror.save(self.streamValues["video.player.type"]!, for: "video.player.type", scope: .stream)
-                    NativeSettingsMirror.save(self.streamValues["video.processing"]!, for: "video.processing", scope: .stream)
+                    NativeSettingsMirror.save(renderer, for: "video.player.type", scope: .stream)
+                    NativeSettingsMirror.save(processing, for: "video.processing", scope: .stream)
                     self.needsReload = pipeline != "fsr1"
                 } else {
                     let stored = response["raw"] ?? response["readback"] ?? value
@@ -666,6 +668,9 @@ final class SettingsModel: ObservableObject {
     @Published var isPingingRegions = false
     @Published var pingStatusText: String?
     @Published var bestRegionResult: RegionPingResult?
+    /// Live settings-search text; non-empty shows matches instead of the
+    /// normal route content.
+    @Published var searchQuery = ""
 
     struct RegionPingResult: Equatable {
         let name: String
@@ -958,6 +963,7 @@ final class SettingsModel: ObservableObject {
     private func applyRoute(_ destination: SettingsRoute) {
         route = destination
         rowFocus = 0
+        searchQuery = ""
         switch destination {
         case .home:
             pane = .sidebar
@@ -1360,5 +1366,45 @@ extension SettingsModel {
         guard case .category(let id) = route,
               let category = SettingsCategory.all.first(where: { $0.id == id }) else { return [] }
         return category.rows
+    }
+
+    // MARK: - Settings search
+
+    var isSearching: Bool {
+        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    struct SearchHit {
+        let category: SettingsCategory
+        let def: SettingDef
+    }
+
+    var searchHits: [SearchHit] {
+        let needle = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return [] }
+        var hits: [SearchHit] = []
+        for category in SettingsCategory.all {
+            for def in category.rows {
+                let haystack = "\(def.label) \(def.note ?? "") \(def.id) \(category.title)".lowercased()
+                if haystack.contains(needle) {
+                    hits.append(SearchHit(category: category, def: def))
+                }
+            }
+        }
+        return hits
+    }
+
+    /// Settings categories that expose at least one matching row, with their
+    /// row count, so results can be grouped by page.
+    var searchCategories: [(category: SettingsCategory, hits: [SearchHit])] {
+        var grouped: [(category: SettingsCategory, hits: [SearchHit])] = []
+        for hit in searchHits {
+            if let index = grouped.firstIndex(where: { $0.category.id == hit.category.id }) {
+                grouped[index].hits.append(hit)
+            } else {
+                grouped.append((hit.category, [hit]))
+            }
+        }
+        return grouped
     }
 }

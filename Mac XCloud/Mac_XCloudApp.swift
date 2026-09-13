@@ -35,8 +35,55 @@ struct CheckForUpdatesView: View {
     }
 }
 
+/// Intercepts app termination to confirm when a game is still streaming.
+/// Covers Cmd-Q, the app menu, the Dock, and the menu-bar Quit item.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var browser: BrowserModel? {
+        didSet {
+            // A macxcloud:// URL that opened the app can arrive before the
+            // SwiftUI scene hands us the model; flush those now.
+            guard browser != nil, !pendingLinks.isEmpty else { return }
+            let links = pendingLinks
+            pendingLinks.removeAll()
+            links.forEach { browser?.handleDeepLink($0) }
+        }
+    }
+    private var pendingLinks: [URL] = []
+    private var quitConfirmed = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !quitConfirmed else { return .terminateNow }
+        guard let browser, browser.isStreaming else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Quit while streaming?"
+        let title = browser.currentGameTitle.isEmpty ? "A game" : browser.currentGameTitle
+        alert.informativeText = "\(title) is still running in Xbox Cloud Gaming. Quitting now ends the session."
+        alert.addButton(withTitle: "Quit and End Session")
+        alert.addButton(withTitle: "Stay")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            quitConfirmed = true
+            return .terminateNow
+        }
+        return .terminateCancel
+    }
+
+    /// macOS delivers `macxcloud://…` links here when the app is already
+    /// running or launched by the link. Works regardless of window state
+    /// because our real window is AppKit-owned, not SwiftUI.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let browser else {
+            pendingLinks.append(contentsOf: urls)
+            return
+        }
+        for url in urls { browser.handleDeepLink(url) }
+    }
+}
+
 @main
 struct Mac_XCloudApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var browser = BrowserModel()
 
     var body: some Scene {
@@ -47,6 +94,7 @@ struct Mac_XCloudApp: App {
                     .frame(width: 1, height: 1)
             }
             .environmentObject(browser)
+            .onAppear { appDelegate.browser = browser }
         }
         .commands {
             CommandGroup(after: .appInfo) {

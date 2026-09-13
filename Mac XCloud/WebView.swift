@@ -31,6 +31,11 @@ struct WebView: NSViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        // Paint every backdrop black so the browser never flashes white while
+        // the splash video is fading out or a page hasn't painted yet.
+        webView.wantsLayer = true
+        webView.layer?.backgroundColor = NSColor.black.cgColor
+        webView.underPageBackgroundColor = .black
         browser.webView = webView
         webView.load(URLRequest(url: BrowserModel.homeURL))
         return webView
@@ -188,6 +193,7 @@ extension WebView.Coordinator: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         browser.setLoading(false)
+        browser.pageDidFinishLoading()
         browser.syncNavState()
         browser.resendGamepadPollingState()
         // Re-sync cursor auto-hide state with every fresh page load.
@@ -212,8 +218,28 @@ extension WebView.Coordinator: WKNavigationDelegate {
 }
 
 extension WebView.Coordinator: WKScriptMessageHandler {
+    /// Hosts allowed to talk to the native bridge. Anything outside this list
+    /// (an off-site redirect, a linked page) can post messages but is ignored,
+    /// so a foreign page can never drive navigation or fake readiness.
+    static let trustedHosts: Set<String> = [
+        "xbox.com", "xboxcloud.com", "xboxservices.com", "xboxlive.com",
+        "live.com", "microsoft.com", "microsoftonline.com", "microsoftonline-p.com",
+        "bing.com", "linkedin.com"
+    ]
+
+    static func isTrustedBridgeHost(_ host: String?) -> Bool {
+        guard let host else { return false }
+        let lowered = host.lowercased()
+        return trustedHosts.contains(lowered)
+            || trustedHosts.contains { lowered.hasSuffix(".\($0)") }
+    }
+
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame else { return }
+        guard Self.isTrustedBridgeHost(message.webView?.url?.host) else {
+            browser.note("Ignored bridge message from untrusted host")
+            return
+        }
         browser.handleSpikeMessage(message)
     }
 }
