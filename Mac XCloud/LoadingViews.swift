@@ -197,6 +197,7 @@ struct ConnectionIssueView: View {
     let failure: BrowserLoadFailure
     let onRetry: () -> Void
     let onQuit: (() -> Void)?
+    @State private var showDetails = false
 
     init(
         failure: BrowserLoadFailure,
@@ -247,7 +248,18 @@ struct ConnectionIssueView: View {
                     }
 
                     if hasDetails {
-                        detailsPanel
+                        VStack(spacing: 10) {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { showDetails.toggle() }
+                            } label: {
+                                Label(showDetails ? "Hide Details" : "Show Details",
+                                      systemImage: showDetails ? "chevron.up" : "chevron.down")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            if showDetails { detailsPanel.transition(.opacity) }
+                        }
                     }
 
                     HStack(spacing: 12) {
@@ -270,6 +282,8 @@ struct ConnectionIssueView: View {
             }
         }
         .ignoresSafeArea()
+        // The backdrop is always dark; keep the text legible in Light Mode.
+        .environment(\.colorScheme, .dark)
     }
 
     private var hasDetails: Bool {

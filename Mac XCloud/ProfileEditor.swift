@@ -350,7 +350,6 @@ struct ProfileEditorView: View {
                 editor
             }
         }
-        .navigationTitle(model.kind.title)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { model.load() }
@@ -359,11 +358,11 @@ struct ProfileEditorView: View {
     @ViewBuilder
     private var editor: some View {
         if model.selectedID == nil {
-            VStack(spacing: 8) {
-                Image(systemName: "gamecontroller").font(.largeTitle).foregroundStyle(.secondary)
-                Text("No Profile Selected").font(.headline)
-                Text("Choose a profile from the sidebar.").font(.caption).foregroundStyle(.secondary)
-            }
+            EmptyStateView(
+                icon: "gamecontroller",
+                title: "No Profile Selected",
+                message: "Choose a profile from the list, or create one with the + button."
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 0) {

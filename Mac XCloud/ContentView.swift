@@ -139,7 +139,14 @@ struct ContentView: View {
                 MinimalLoadingIndicator(label: "Loading")
             }
         }
-        .overlay(alignment: .top) { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
+        // The drag strip replaces the hidden title bar; in full screen there
+        // is nothing to drag and it would only swallow clicks on the game.
+        .overlay(alignment: .top) {
+            if !browser.isFullscreen { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
+        }
+        .overlay(alignment: .top) {
+            PlayHint(message: hintMessage)
+        }
         .overlay(alignment: hudAlignment) {
             if browser.isStreaming && (browser.nativeHUDVisible || (browser.nativeHUDQuickGlance && browser.nativeHUDGlancing)) {
                 NativeStreamHUD(browser: browser).padding(3)
@@ -152,6 +159,16 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 browser.pollStreamInfo()
             }
+        }
+    }
+
+    /// One short hint at a time about keyboard & mouse play.
+    private var hintMessage: String? {
+        guard browser.isStreaming || browser.pointerCaptured else { return nil }
+        switch browser.keyboardEmulationState {
+        case "active": return "Keyboard & mouse · Hold Esc to go back to your controller"
+        case "ready": return "Click the game or press a key to play with keyboard & mouse"
+        default: return browser.pointerCaptured ? "Hold Esc to release the mouse" : nil
         }
     }
 
@@ -168,7 +185,7 @@ struct ContentView: View {
 
     private var controllerBadge: some View {
         Group {
-            if !isControllerConnected {
+            if !isControllerConnected && !browser.isStreaming {
                 HStack(spacing: 6) {
                     Image(systemName: "gamecontroller")
                     Text("No controller")
@@ -256,4 +273,39 @@ struct ContentView: View {
 #Preview {
     ContentView()
         .environmentObject(BrowserModel())
+}
+
+/// A brief notice at the top of the game (like Chrome's "Press and hold Esc
+/// to exit"). Each new message shows for a few seconds, then fades.
+private struct PlayHint: View {
+    let message: String?
+    @State private var shown: String?
+    @State private var hideTask: Task<Void, Never>?
+
+    var body: some View {
+        Group {
+            if let shown {
+                Text(shown)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .environment(\.colorScheme, .dark)
+                    .padding(.top, 36)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .accessibilityAddTraits(.isStaticText)
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.25), value: shown)
+        .onChange(of: message) { next in
+            hideTask?.cancel()
+            shown = next
+            guard next != nil else { return }
+            hideTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                if !Task.isCancelled { shown = nil }
+            }
+        }
+    }
 }

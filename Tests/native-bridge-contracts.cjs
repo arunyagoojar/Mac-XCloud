@@ -74,14 +74,19 @@ assert.equal(b.mergeMacroButtons(sample()).LeftThumbXAxis,0.2);
 assert.equal(b.mergeMacroButtons(sample()).RightThumbXAxis,0.4);
 console.log('PASS: fallback channel respects selected stick');
 
-// Removed feature entry points must not return through legacy integration.
+// Keyboard & mouse runs inside the page; the retired app-level capture
+// routes must not return, and the page-side entry points must exist.
 assert.equal(b.mkbStatus, undefined);
 assert.equal(b.toggleMkb, undefined);
-assert.equal(b.mkbPresets, undefined);
-assert.equal(b.assignMkbPreset, undefined);
-assert(!events.some(e => e.type === 'mkb-capture'));
-assert(!events.some(e => e.type === 'mkb-state'));
-console.log('PASS: removed keyboard/mouse activation and capture routes stay absent');
+assert.equal(b.toggleEmulatedMkb, undefined);
+assert(!events.some(e => e.type === 'mkb-capture' || e.type === 'mkb-text-focus'));
+assert.equal(typeof b.activateEmulatedMkb, 'function');
+assert.equal(typeof b.releasePointer, 'function');
+assert.equal(b.forwardEscape(true), true);
+assert.deepEqual(dispatchedKeys.slice(-1), ['Escape:keydown']);
+assert.equal(b.forwardEscape(false), true);
+assert.deepEqual(dispatchedKeys.slice(-1), ['Escape:keyup']);
+console.log('PASS: keyboard & mouse entry points, Escape forwarding, retired capture routes stay absent');
 
 (async () => {
   const globalWrites = {}, streamWrites = {};
@@ -94,11 +99,11 @@ console.log('PASS: removed keyboard/mouse activation and capture routes stay abs
   const result=await b.applyInputPresetSettings({mkbEnabled:true,nativeMkbMode:'on',mkbP1:{},keyboard:{},
     streamPreferences:{'audio.volume':37,'video.brightness':105,'mkb.enabled':true}}, 'Legacy', 'test');
   assert.equal(result.ok,true);
-  assert.equal(globalWrites['mkb.enabled'],false);
-  assert.equal(globalWrites['nativeMkb.mode'],'off');
+  assert.equal(globalWrites['mkb.enabled'],undefined);
+  assert.equal(globalWrites['nativeMkb.mode'],undefined);
   assert.equal(streamWrites['audio.volume'],37);
   assert.equal(streamWrites['video.brightness'],105);
   assert.equal(streamWrites['mkb.enabled'],undefined);
   await assert.rejects(()=>b.selectProfile('mkb',1), /Unsupported/);
-  console.log('PASS: legacy imports cannot enable removed input; only allowed picture/audio values restore');
+  console.log('PASS: profiles never change the app-wide keyboard & mouse switches; only allowed picture/audio values restore');
 })().catch(error=>{console.error(error);process.exitCode=1;});

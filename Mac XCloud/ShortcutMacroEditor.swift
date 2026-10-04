@@ -12,11 +12,7 @@ struct ShortcutMacroEditor: View {
     private var isEditing: Bool { macroDraft != nil || shortcutDraft != nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Create and save a macro, then assign it to one controller button or a chord in a shortcut. Save the shortcut and return focus to the gameplay window to use it. Native actions and game-button output are blocked while Settings owns input; there is no Settings Run preview.")
-                .foregroundStyle(.secondary)
-            Text("Changes save automatically to controller settings and the active input preset. Physical buttons may still reach the game, so choose a chord that will not interfere with gameplay. Macros have no loops or turbo: at most 16 steps and 2,000 ms including delays and haptics. Haptics require a supported controller.")
-                .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 22) {
             shortcutList
             if let draft = shortcutDraft {
                 ShortcutDraftForm(service: service, initial: draft) { shortcutDraft = nil }
@@ -53,10 +49,11 @@ struct ShortcutMacroEditor: View {
     }
 
     private var shortcutList: some View {
-        SettingsGroup("Saved Shortcuts") {
+        SettingsGroup("Shortcuts", footer: "Shortcuts work while the game window is in front. The buttons you press still reach the game, so pick a combination the game doesn't use. Holding L3 + R3 always opens Settings.") {
             if service.settings.shortcuts.shortcuts.isEmpty {
-                Text("No shortcuts yet. Create one to assign a macro or native action.")
+                Text("No shortcuts yet.")
                     .foregroundStyle(.secondary).settingsRow()
+                Divider()
             }
             ForEach(service.settings.shortcuts.shortcuts) { shortcut in
                 SettingsRow(shortcut.name, note: shortcutSummary(shortcut)) {
@@ -73,22 +70,21 @@ struct ShortcutMacroEditor: View {
                 }
                 Divider()
             }
-            SettingsRow("Hold L3 + R3 to open Settings", note: "Adds a default only if that chord and activation are not already assigned. Existing shortcuts are kept.") {
-                Button("Add Default", action: installDefaults).disabled(isEditing)
-            }
-            Divider()
             HStack {
                 Spacer()
-                Button("New Shortcut") { shortcutDraft = ShortcutEditorDraft() }.disabled(isEditing)
-            }.settingsRow()
+                Button("New Shortcut…") { shortcutDraft = ShortcutEditorDraft() }.disabled(isEditing)
+            }
+            .controlSize(.small)
+            .settingsRow()
         }
     }
 
     private var macroList: some View {
-        SettingsGroup("Saved Macros") {
+        SettingsGroup("Macros", footer: "A macro plays a short sequence of button presses, pauses and vibrations — up to 16 steps and 2 seconds. Assign one to a shortcut or a touchpad gesture.") {
             if service.settings.macros.isEmpty {
-                Text("No macros yet. Add button presses and releases, waits, haptics or native actions.")
+                Text("No macros yet.")
                     .foregroundStyle(.secondary).settingsRow()
+                Divider()
             }
             ForEach(service.settings.macros) { macro in
                 SettingsRow(macro.name, note: "\(macro.steps.count) steps · \(macro.totalDurationMilliseconds) ms") {
@@ -108,10 +104,11 @@ struct ShortcutMacroEditor: View {
                 Divider()
             }
             HStack {
-                Button("Double A Sample") { macroDraft = .doubleA }.disabled(isEditing)
                 Spacer()
-                Button("New Macro") { macroDraft = MacroEditorDraft() }.disabled(isEditing)
-            }.settingsRow()
+                Button("New Macro…") { macroDraft = MacroEditorDraft() }.disabled(isEditing)
+            }
+            .controlSize(.small)
+            .settingsRow()
         }
     }
 

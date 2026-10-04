@@ -32,7 +32,7 @@ enum SettingsBackupManager {
         "app.clarityPipeline", "cachedServerRegions",
         "nativeController.settings.v1",
         "controller.globalRumbleGain", "controller.streamCalibration",
-        "ledColorIndex", "ledCustomR", "ledCustomG", "ledCustomB",
+        "ledColorIndex", "ledCustomR", "ledCustomG", "ledCustomB", "ledUsesCustom",
         "inputPresets.activeID", "inputPresets.autoGameProfiles", "inputPresets.gameBaseID",
         "inputPresets.games.v1",
         BrowserModel.windowFramesDefaultsKey,

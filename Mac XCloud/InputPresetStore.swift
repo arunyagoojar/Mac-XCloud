@@ -265,12 +265,14 @@ final class InputPresetStore: ObservableObject {
         return preset.id
     }
 
-    func exportPresetFile() {
+    func exportPresetFile(id: UUID? = nil) {
+        let target = id ?? activePresetID
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "Mac-XCloud-profile.json"
+        let name = presets.first(where: { $0.id == target })?.name ?? "Profile"
+        panel.nameFieldStringValue = "\(name).json"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try exportPresetData(id: activePresetID).write(to: url, options: .atomic); operationMessage = "Exported saved profile" }
+        do { try exportPresetData(id: target).write(to: url, options: .atomic); operationMessage = "Exported \(name)" }
         catch { operationMessage = "Export failed: \(error.localizedDescription)" }
     }
 
@@ -951,12 +953,51 @@ final class InputPresetStore: ObservableObject {
     private func validateEnvelope(_ data: Data, kind: String) throws {
         if kind == "input-preset" {
             let envelope = try decoder().decode(PresetEnvelope<InputPreset>.self, from: data)
-            guard (1...Self.schemaVersion).contains(envelope.schemaVersion),
-                  envelope.kind == kind,
-                  try checksum(for: envelope.value) == envelope.checksum else {
+            guard (1...Self.schemaVersion).contains(envelope.schemaVersion), envelope.kind == kind else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            if try checksum(for: envelope.value) == envelope.checksum { return }
+            // The checksum covers this build's re-encoding of the profile. A
+            // profile written by an earlier build re-encodes differently once
+            // retired fields drop out or legacy names migrate, without being
+            // damaged. Accept that, but still reject a file whose content
+            // re-encodes identically yet carries a wrong checksum (the
+            // checksum itself is damaged) or whose values disagree.
+            let raw = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["value"]
+            let current = try JSONSerialization.jsonObject(with: encoded(envelope.value))
+            guard let raw, Self.isSchemaEvolution(raw: raw, current: current, path: "") else {
                 throw CocoaError(.fileReadCorruptFile)
             }
         }
+    }
+
+    /// True when `current` differs from `raw` only by keys present on one side
+    /// and by migrated legacy values — never by a disagreeing value.
+    nonisolated static func isSchemaEvolution(raw: Any, current: Any, path: String) -> Bool {
+        var differs = false
+        func agree(_ a: Any, _ b: Any, _ path: String) -> Bool {
+            switch (a, b) {
+            case let (x as [String: Any], y as [String: Any]):
+                if Set(x.keys) != Set(y.keys) { differs = true }
+                return Set(x.keys).intersection(y.keys).allSatisfy { agree(x[$0]!, y[$0]!, path + "." + $0) }
+            case let (x as [Any], y as [Any]):
+                guard x.count == y.count else { return false }
+                return zip(x, y).allSatisfy { agree($0, $1, path) }
+            case let (x as NSNumber, y as NSNumber):
+                let dx = x.doubleValue, dy = y.doubleValue
+                return abs(dx - dy) <= max(abs(dx), abs(dy), 1) * 1e-5
+            case let (x as String, y as String):
+                if x == y { return true }
+                // Adaptive-trigger effects renamed by the curated catalog.
+                if path.hasSuffix("Preset"), AdaptiveTriggerPreset.migrated(x).rawValue == y { differs = true; return true }
+                return false
+            case (is NSNull, is NSNull):
+                return true
+            default:
+                return false
+            }
+        }
+        return agree(raw, current, path) && differs
     }
 
     /// Storage root once reloadFromDisk has succeeded; nil while unavailable.

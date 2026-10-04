@@ -2,15 +2,19 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class MenuBarStatusController {
+final class MenuBarStatusController: NSObject, NSMenuDelegate {
     private let item: NSStatusItem
     private weak var browser: BrowserModel?
     private var timer: Timer?
     private var terminateObserver: NSObjectProtocol?
+    /// Rebuilding a menu while it is open closes its submenus under the
+    /// pointer; refreshes wait until it closes, and it refreshes on opening.
+    private var isMenuOpen = false
 
     init(browser: BrowserModel) {
         self.browser = browser
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         item.button?.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "Mac Xcloud")
         item.button?.toolTip = "Mac Xcloud"
         refreshMenu()
@@ -40,75 +44,76 @@ final class MenuBarStatusController {
         }
     }
 
-    func refreshMenu() {
-        guard let browser else { return }
-        let menu = NSMenu()
-        let title = browser.isStreaming && !browser.currentGameTitle.isEmpty ? browser.currentGameTitle : "Not currently streaming"
-        let current = NSMenuItem(title: "Current Streaming: \(title)", action: nil, keyEquivalent: "")
-        current.isEnabled = false
-        menu.addItem(current)
-        if browser.isStreaming {
-            addInfo("Region", browser.currentRegion.isEmpty ? "—" : browser.currentRegion, to: menu)
-            addInfo("Resolution", browser.telemetry.resolution.isEmpty ? "—" : browser.telemetry.resolution, to: menu)
-            addInfo("Ping", browser.telemetry.pingMs >= 0 ? String(format: "%.0f ms", browser.telemetry.pingMs) : "—", to: menu)
-            addInfo("FPS", String(format: "%.0f", browser.telemetry.fps), to: menu)
-            addInfo("Bitrate", String(format: "%.1f Mbps", browser.telemetry.bitrateMbps), to: menu)
-            addInfo("Packet Loss", String(format: "%.2f%% (%d)", browser.telemetry.packetLossPercent, browser.telemetry.packetLossCount), to: menu)
-            addInfo("Frames Dropped", "\(browser.telemetry.framesDropped)", to: menu)
-            addInfo("Decode Time", String(format: "%.2f ms", browser.telemetry.decodeTimeMs), to: menu)
-            addInfo("Jitter", String(format: "%.2f ms", browser.telemetry.jitterMs), to: menu)
-        }
-        menu.addItem(.separator())
+    func menuWillOpen(_ menu: NSMenu) { isMenuOpen = true }
+    func menuDidClose(_ menu: NSMenu) { isMenuOpen = false }
 
-        let controller = browser.controllerInput
-        let controllerText = controller.controllerName.map { "Controller: \($0)" } ?? "Controller: Not connected"
-        let c = NSMenuItem(title: controllerText, action: nil, keyEquivalent: "")
-        c.isEnabled = false
-        menu.addItem(c)
-        if let percent = controller.batteryPercent {
-            let b = NSMenuItem(title: "Battery: \(percent)%\(controller.batteryStateText == "Charging" ? " · Charging" : "")", action: nil, keyEquivalent: "")
-            b.isEnabled = false
-            menu.addItem(b)
+    func refreshMenu() {
+        guard let browser, !isMenuOpen else { return }
+        let menu = NSMenu()
+        menu.delegate = self
+
+        // What's playing, and how the stream is doing, at a glance.
+        let playing = browser.isStreaming
+        menu.addItem(label(playing && !browser.currentGameTitle.isEmpty ? browser.currentGameTitle : (playing ? "Playing" : "Not playing"), bold: true))
+        if playing {
+            let t = browser.telemetry
+            var parts: [String] = []
+            if t.pingMs >= 0 { parts.append(String(format: "%.0f ms", t.pingMs)) }
+            if t.fps > 0 { parts.append(String(format: "%.0f fps", t.fps)) }
+            if t.bitrateMbps > 0 { parts.append(String(format: "%.1f Mbps", t.bitrateMbps)) }
+            if !t.resolution.isEmpty { parts.append(t.resolution) }
+            if !browser.currentRegion.isEmpty { parts.append(browser.currentRegion) }
+            if !parts.isEmpty { menu.addItem(label(parts.joined(separator: " · "))) }
         }
+
         menu.addItem(.separator())
-        let presets = NSMenuItem(title: "Input Preset", action: nil, keyEquivalent: "")
-        let presetMenu = NSMenu()
+        let controller = browser.controllerInput
+        if let name = controller.controllerName {
+            var text = name
+            if let percent = controller.batteryPercent {
+                text += " · \(percent)%" + (controller.batteryStateText == "Charging" ? " (charging)" : "")
+            }
+            menu.addItem(label(text))
+        } else {
+            menu.addItem(label("No controller connected"))
+        }
+        let profiles = NSMenuItem(title: "Game Profile", action: nil, keyEquivalent: "")
+        let profileMenu = NSMenu()
         for preset in browser.inputPresets.presets {
             let presetItem = NSMenuItem(title: preset.name, action: #selector(selectPreset(_:)), keyEquivalent: "")
             presetItem.target = self
             presetItem.representedObject = preset.id.uuidString
             presetItem.state = browser.inputPresets.activePresetID == preset.id ? .on : .off
-            presetMenu.addItem(presetItem)
+            profileMenu.addItem(presetItem)
         }
-        presets.submenu = presetMenu
-        menu.addItem(presets)
-        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "u")
-        updates.target = self
-        menu.addItem(updates)
+        profiles.submenu = profileMenu
+        menu.addItem(profiles)
+
         menu.addItem(.separator())
-        let main = NSMenuItem(title: "Open Main Window", action: #selector(openMainWindow), keyEquivalent: "")
-        main.target = self
-        menu.addItem(main)
-        let settings = NSMenuItem(title: "Open Settings…", action: #selector(openSettings), keyEquivalent: ",")
-        settings.target = self
-        menu.addItem(settings)
-        let fullscreen = NSMenuItem(title: "Toggle Full Screen", action: #selector(toggleFullscreen), keyEquivalent: "f")
-        fullscreen.target = self
-        menu.addItem(fullscreen)
-        let reload = NSMenuItem(title: "Reload Xbox Cloud", action: #selector(reload), keyEquivalent: "r")
-        reload.target = self
-        menu.addItem(reload)
+        menu.addItem(action("Open Mac Xcloud", #selector(openMainWindow)))
+        menu.addItem(action("Settings…", #selector(openSettings), key: ","))
+        let isFullscreen = browser.isFullscreen
+        menu.addItem(action(isFullscreen ? "Exit Full Screen" : "Enter Full Screen", #selector(toggleFullscreen)))
+        menu.addItem(action("Reload Xbox Page", #selector(reload)))
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Mac Xcloud", action: #selector(quitApp), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
+        menu.addItem(action("Check for Updates…", #selector(checkForUpdates)))
+        menu.addItem(action("Quit Mac Xcloud", #selector(quitApp), key: "q"))
         item.menu = menu
     }
 
-    private func addInfo(_ label: String, _ value: String, to menu: NSMenu) {
-        let item = NSMenuItem(title: "\(label): \(value)", action: nil, keyEquivalent: "")
+    private func label(_ text: String, bold: Bool = false) -> NSMenuItem {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        if bold {
+            item.attributedTitle = NSAttributedString(string: text, attributes: [.font: NSFont.menuFont(ofSize: 0).bold])
+        }
         item.isEnabled = false
-        menu.addItem(item)
+        return item
+    }
+
+    private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+        item.target = self
+        return item
     }
 
     @objc private func selectPreset(_ sender: NSMenuItem) {
@@ -132,4 +137,8 @@ struct StatusItemBootstrap: NSViewRepresentable {
         return NSView(frame: .zero)
     }
     func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private extension NSFont {
+    var bold: NSFont { NSFontManager.shared.convert(self, toHaveTrait: .boldFontMask) }
 }

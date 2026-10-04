@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 @main
 struct ControllerContracts {
@@ -13,6 +14,9 @@ struct ControllerContracts {
             do { try action(); preconditionFailure(label) }
             catch { checks += 1; print("PASS: \(label)") }
         }
+        let dt: Double = 1.0 / 60.0
+
+        // MARK: - Adaptive triggers, macros, shortcuts (unchanged contract)
 
         for mode in [AdaptiveTriggerPreset.accelerator, .brake] {
             var pedal = ControllerTriggerEnvelope()
@@ -74,503 +78,291 @@ struct ControllerContracts {
         check(stages.level(at: 0) == 0 && stages.level(at: 1) == stages.endStrength, "Two-stage effect keeps final resistance")
         stages.mode = .detent; stages.endStrength = 0
         check(stages.level(at: 1) == 0, "Detent releases after breakpoint")
-        check(ControllerMotionProjection.yaw(x: 0, y: 0, z: 1, gx: 0, gy: 0, gz: -1) == 1, "Flat-held controller uses Z rotation for yaw")
-        check(ControllerMotionProjection.yaw(x: 0, y: 1, z: 0, gx: 0, gy: -1, gz: 0) == 1, "Upright controller uses Y rotation for yaw")
-        check(ControllerMotionProjection.yaw(x: .nan, y: 0, z: 0, gx: 0, gy: -1, gz: 0) == 0, "Invalid motion stays neutral")
+
+
+        // MARK: - Simulated controller (GameController axes; flat face-up = identity)
+
+        func rx(_ a: Double) -> simd_double3x3 { simd_double3x3(rows: [SIMD3(1,0,0), SIMD3(0,cos(a),-sin(a)), SIMD3(0,sin(a),cos(a))]) }
+        func ry(_ a: Double) -> simd_double3x3 { simd_double3x3(rows: [SIMD3(cos(a),0,sin(a)), SIMD3(0,1,0), SIMD3(-sin(a),0,cos(a))]) }
+        func rz(_ a: Double) -> simd_double3x3 { simd_double3x3(rows: [SIMD3(cos(a),-sin(a),0), SIMD3(sin(a),cos(a),0), SIMD3(0,0,1)]) }
+        let deg = Double.pi / 180
+        /// Steering = roll about the world's forward axis; pitch tilts the
+        /// controller toward the player; yaw turns it on the spot.
+        func orientation(bank: Double, pitch: Double, yaw: Double) -> simd_double3x3 { rz(yaw) * ry(-bank) * rx(pitch) }
+        struct Reading { var t: Double; var gyro: MotionVector; var acc: MotionVector; var gravity: MotionVector }
+        var noise: UInt64 = 0x9E3779B97F4A7C15
+        func gaussian() -> Double {
+            func uniform() -> Double { noise = noise &* 6364136223846793005 &+ 1442695040888963407; return Double(noise >> 11) / Double(1 << 53) }
+            return (-2 * log(max(uniform(), 1e-12))).squareRoot() * cos(2 * .pi * uniform())
+        }
+        func simulate(_ duration: Double, rate: Double = 250, bias: MotionVector = MotionVector(0.4, -0.3, 0.5) * (Double.pi / 180),
+                      gyroNoise: Double = 0.15 * (Double.pi / 180), accNoise: Double = 0.004, rumble: Bool = false,
+                      translation: ((Double) -> MotionVector)? = nil,
+                      pose: (Double) -> (bank: Double, pitch: Double, yaw: Double)) -> [Reading] {
+            var out: [Reading] = []; var t = 0.0; let h = 1 / rate
+            while t < duration {
+                let p = pose(t), q = pose(t + 1e-4)
+                let r = orientation(bank: p.bank, pitch: p.pitch, yaw: p.yaw)
+                let w = r.transpose * ((orientation(bank: q.bank, pitch: q.pitch, yaw: q.yaw) - r) * 1e4)
+                let truth = r.transpose * MotionVector(0, 0, -1)
+                var acc = truth + MotionVector(gaussian(), gaussian(), gaussian()) * accNoise
+                if let translation { acc += r.transpose * (-translation(t)) }
+                var gyro = MotionVector(w[1][2], w[2][0], w[0][1]) + bias + MotionVector(gaussian(), gaussian(), gaussian()) * gyroNoise
+                if rumble {
+                    let a = sin(2 * .pi * 155 * t), b = sin(2 * .pi * 62 * t)
+                    acc += MotionVector(0.22 * a, 0.18 * b, 0.25 * a * b + 0.1 * b)
+                    gyro += MotionVector(2.5 * b, 1.8 * a, 2.2 * a) * (Double.pi / 180)
+                }
+                out.append(Reading(t: t, gyro: gyro, acc: acc, gravity: truth)); t += h
+            }
+            return out
+        }
+        /// Feeds readings through fusion + steering at a 120 Hz tick.
+        func steer(_ readings: [Reading], bias: MotionVector = .zero, vibrating: Bool = false,
+                   configuration: SteeringWheelEngine.Configuration = .init()) -> [(t: Double, angle: Double, truth: Double, output: Double)] {
+            var fusion = MotionFusion(bias: bias), clock = MotionSampleClock(), wheel = SteeringWheelEngine(configuration: configuration)
+            var result: [(Double, Double, Double, Double)] = []; var i = 0; var tick = 0.0; var truth = 0.0
+            while tick < readings.last!.t {
+                while i < readings.count && readings[i].t <= tick {
+                    fusion.ingest(rotationRate: readings[i].gyro, acceleration: readings[i].acc, dt: clock.step(arrival: readings[i].t), vibrating: vibrating)
+                    truth = SteeringGeometry.bank(gravity: readings[i].gravity); i += 1
+                }
+                let output = wheel.update(gravity: fusion.gravity, dt: 1.0 / 120)
+                result.append((tick, wheel.angle + wheel.centerBank, truth, output)); tick += 1.0 / 120
+            }
+            return result
+        }
+        func rms(_ values: [Double]) -> Double { (values.map { $0 * $0 }.reduce(0, +) / Double(max(values.count, 1))).squareRoot() }
+
+        // MARK: - Sensor fusion and sample timing
+
+        var clock = MotionSampleClock()
+        var stamps: [Double] = []
+        for frame in 0..<400 { stamps.append(floor(Double(frame) * 0.004 / 0.0167) * 0.0167) }   // 4 reports per 60 Hz burst
+        let clockSteps = stamps.map { clock.step(arrival: $0) }
+        check(abs(clockSteps.reduce(0, +) - stamps.last!) < 0.03, "Bursty report delivery integrates the real elapsed time")
+        check(abs(clock.nominalInterval - 0.004) < 0.0008, "The report interval is learned from bursty delivery")
+
+        var restingFusion = MotionFusion()
+        for reading in simulate(10, pose: { _ in (0, 35 * deg, 0) }) {
+            restingFusion.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
+        }
+        check(simd_length(restingFusion.bias - MotionVector(0.4, -0.3, 0.5) * deg) < 0.15 * deg, "A resting controller's gyro bias is learned continuously")
+        var calibrating = MotionFusion()
+        calibrating.beginCalibration(duration: 1)
+        for reading in simulate(1.5, pose: { _ in (0, 0, 0) }) { calibrating.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false) }
+        check(calibrating.calibration == .succeeded && simd_length(calibrating.bias - MotionVector(0.4, -0.3, 0.5) * deg) < 0.05 * deg, "Explicit calibration measures the bias")
+        var moved = MotionFusion()
+        moved.beginCalibration(duration: 1)
+        for reading in simulate(1.5, pose: { t in (0, 20 * deg * t, 0) }) { moved.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false) }
+        check(moved.calibration == .failedMoved, "Calibration refuses a moving controller")
+        var nonfinite = MotionFusion()
+        nonfinite.ingest(rotationRate: MotionVector(.nan, 0, 0), acceleration: MotionVector(0, 0, -1), dt: 0.004, vibrating: false)
+        check(nonfinite.gravity == nil && nonfinite.samples == 0, "Non-finite sensor data is ignored")
+
+        // MARK: - Steering
+
+        func driving(_ t: Double) -> (bank: Double, pitch: Double, yaw: Double) {
+            ((18 * sin(2 * .pi * 0.23 * t) + 9 * sin(2 * .pi * 0.71 * t + 1) + 3 * sin(2 * .pi * 1.9 * t)) * deg,
+             (35 + 8 * sin(2 * .pi * 0.17 * t + 0.4)) * deg, 6 * sin(2 * .pi * 0.11 * t) * deg)
+        }
+        let learned = MotionVector(0.4, -0.3, 0.5) * deg
+        let normal = steer(simulate(12, pose: driving)).filter { $0.t > 1.5 }
+        check(rms(normal.map { $0.angle - $0.truth }) < 0.8 * deg, "Steering tracks the wheel angle within a degree while driving")
+        let rumbleRun = steer(simulate(12, rumble: true, pose: driving), bias: learned, vibrating: true).filter { $0.t > 1.5 }
+        check(rms(rumbleRun.map { $0.angle - $0.truth }) < 1.2 * deg, "Game rumble does not disturb the wheel")
+        let arms = steer(simulate(12, translation: { t in t.truncatingRemainder(dividingBy: 1) < 0.2 ? MotionVector(0.35, 0, 0.1) : .zero }, pose: driving)).filter { $0.t > 1.5 }
+        check(rms(arms.map { $0.angle - $0.truth }) < 1.2 * deg, "Arm movement does not steer the car")
+        let crossTalk = steer(simulate(8, pose: { t in (15 * deg, (42 + 32 * sin(2 * .pi * 0.5 * t)) * deg, 0) })).filter { $0.t > 1.5 }.map(\.angle)
+        check((crossTalk.max()! - crossTalk.min()!) < 0.5 * deg, "Tilting the controller toward or away never steers (pitch cross-talk)")
+        let yawTalk = steer(simulate(8, pose: { t in (15 * deg, 35 * deg, 40 * deg * sin(2 * .pi * 0.4 * t)) })).filter { $0.t > 1.5 }.map(\.angle)
+        check((yawTalk.max()! - yawTalk.min()!) < 0.5 * deg, "Turning the controller on the spot never steers (yaw cross-talk)")
+        for hold in [5.0, 85.0] {
+            let run = steer(simulate(8, pose: { t in var p = driving(t); p.pitch = hold * deg; return p })).filter { $0.t > 1.5 }
+            check(rms(run.map { $0.angle - $0.truth }) < 0.8 * deg, "Steering works held flat and upright (\(Int(hold))°)")
+        }
+        let still = steer(simulate(8, rumble: true, pose: { _ in (0, 35 * deg, 0) }), bias: learned, vibrating: true).filter { $0.t > 2 }.map(\.output)
+        check(still.map(abs).max()! < 0.06, "A level controller stays centered under rumble")
+        let sweep = steer(simulate(6, pose: { t in ((-10 + 20 * min(max((t - 1.5) / 4, 0), 1)) * deg, 35 * deg, 0) })).filter { $0.t > 1.6 }.map(\.output)
+        check(zip(sweep, sweep.dropFirst()).allSatisfy { $1 >= $0 - 0.003 }, "Steering crosses center smoothly with no snapping or reversal")
+        let step = steer(simulate(4, pose: { t in let x = min(max((t - 2) / 0.12, 0), 1); return (25 * deg * x * x * (3 - 2 * x), 35 * deg, 0) }))
+        let handAt = step.first { abs($0.truth) > 0.9 * 25 * deg }!.t, wheelAt = step.first { abs($0.angle) > 0.9 * 25 * deg }!.t
+        check(wheelAt - handAt < 0.02 && step.map { abs($0.angle) }.max()! < 25.6 * deg, "A quick turn arrives within 20 ms without overshoot")
+
+        var recentered = SteeringWheelEngine()
+        let tilted = orientation(bank: 6 * deg, pitch: 30 * deg, yaw: 0).transpose * MotionVector(0, 0, -1)
+        recentered.update(gravity: tilted, dt: 1.0 / 120)
+        recentered.recenter()
+        check(abs(recentered.update(gravity: tilted, dt: 1.0 / 120)) < 0.001, "Recenter makes the current hold straight ahead")
+        check(recentered.update(gravity: nil, dt: 1.0 / 120) == 0 && !recentered.available, "Lost sensors release the wheel")
+
+        let lock = SteeringResponse.Parameters(fullLock: 40 * deg)
+        check(SteeringResponse.output(angle: 0, parameters: lock) == 0, "Center is exactly zero")
+        check(abs(SteeringResponse.output(angle: 10 * deg, parameters: lock) - 0.25) < 0.001, "Linear response: a quarter of the range is a quarter of the stick")
+        check(SteeringResponse.output(angle: 60 * deg, parameters: lock) == 1 && SteeringResponse.output(angle: -60 * deg, parameters: lock) == -1, "Full lock saturates both ways")
+        var quick = lock; quick.exponent = 0.6
+        let nearCenter = SteeringResponse.output(angle: 0.05 * deg, parameters: quick)
+        check(nearCenter > 0 && nearCenter < 0.01, "A quick curve still has a finite slope at center (noise is not amplified)")
+        var compensated = lock; compensated.antiDeadzone = 0.15
+        let boostCurve = stride(from: 0.0, through: 10.0, by: 0.01).map { SteeringResponse.output(angle: $0 * deg, parameters: compensated) }
+        check(zip(boostCurve, boostCurve.dropFirst()).allSatisfy { $1 >= $0 && $1 - $0 < 0.002 },
+              "Center boost is continuous: no jump or snap anywhere near center")
+        check(SteeringResponse.output(angle: 4 * deg, parameters: compensated) > SteeringResponse.output(angle: 4 * deg, parameters: lock) + 0.1,
+              "Center boost makes small turns count more")
+
+        // MARK: - Steering settings migration
+
+        var legacySettings = ControllerEnhancements()
+        legacySettings.steeringRangeDegrees = 55
+        legacySettings.steeringDeadzoneDegrees = 0.5; legacySettings.steeringExponent = 1.4; legacySettings.steeringInverted = true
+        let decodedLegacy = try JSONDecoder().decode(ControllerEnhancements.self, from: JSONEncoder().encode(legacySettings))
+        check(abs(decodedLegacy.effectiveSteeringAngleDegrees - 55) < 0.001, "Legacy steering range migrates to the wheel range")
+        check(abs(decodedLegacy.effectiveSteeringPhysicalDeadzoneDegrees - 0.5) < 0.001, "Legacy center dead zone migrates")
+        check(decodedLegacy == legacySettings, "Migrated settings round-trip unchanged")
+        var legacyPayload = try JSONSerialization.jsonObject(with: try encoder.encode(ControllerEnhancements())) as! [String: Any]
+        legacyPayload["gyroEnabled"] = true
+        legacyPayload["gyroStick"] = "left"
+        legacyPayload["steeringFloor"] = 0.3
+        legacyPayload["steeringCurve"] = ["linear": [String: Any]()]
+        let withOldFloor = try JSONDecoder().decode(ControllerEnhancements.self, from: JSONSerialization.data(withJSONObject: legacyPayload))
+        check(withOldFloor.gyroMode == .steering, "A profile with retired steering fields still decodes")
+        check(!String(decoding: try encoder.encode(withOldFloor), as: UTF8.self).contains("steeringFloor"), "Retired fields are never written back")
+        let fresh = ControllerEnhancements()
+        check(abs(fresh.effectiveSteeringAngleDegrees - 40) < 0.001, "New profiles default to a 40-degree wheel")
+        check(fresh.effectiveGyroActivation == .always, "Gyro aiming is active all the time unless limited to aiming")
+        var olderProfile = try JSONSerialization.jsonObject(with: encoder.encode(ControllerEnhancements())) as! [String: Any]
+        olderProfile["gyroAimOnly"] = true
+        let upgraded = try JSONDecoder().decode(ControllerEnhancements.self, from: JSONSerialization.data(withJSONObject: olderProfile))
+        check(upgraded.effectiveGyroActivation == .whileAiming, "Profiles from earlier builds keep aiming only while L2 is held")
+        check(abs(fresh.effectiveAimDeadzoneCompensation - 0.12) < 0.001, "Aiming compensates a typical right-stick dead zone by default")
+        var saved = ControllerEnhancements()
+        saved.steeringAngleDegrees = 33; saved.steeringAntiDeadzone = 0.1; saved.steeringSmoothing = 0.4
+        saved.gyroActivation = .whileAiming; saved.gyroAcceleration = 0.5; saved.touchpadAcceleration = 0.7
+        check(try JSONDecoder().decode(ControllerEnhancements.self, from: JSONEncoder().encode(saved)) == saved, "New motion and touch settings survive save and reload")
+
+        // MARK: - Gyro aiming
+
+        func aim(_ readings: [Reading], configuration: GyroAimEngine.Configuration = .init()) -> [(t: Double, x: Double, y: Double)] {
+            var fusion = MotionFusion(), clock = MotionSampleClock(), engine = GyroAimEngine()
+            engine.configure(configuration)
+            var result: [(Double, Double, Double)] = []; var i = 0; var tick = 0.0
+            while tick < readings.last!.t {
+                while i < readings.count && readings[i].t <= tick {
+                    fusion.ingest(rotationRate: readings[i].gyro, acceleration: readings[i].acc, dt: clock.step(arrival: readings[i].t), vibrating: false); i += 1
+                }
+                let drained = fusion.drainRotation()
+                let out = engine.sample(rate: drained.rate, gravity: fusion.gravity, dt: 1.0 / 120).coarse
+                result.append((tick, Double(out.x), Double(out.y))); tick += 1.0 / 120
+            }
+            return result
+        }
+        let tremor = aim(simulate(10, pose: { t in (0.04 * deg * sin(2 * .pi * 9 * t), 35 * deg + 0.03 * deg * sin(2 * .pi * 8 * t), 0.05 * deg * sin(2 * .pi * 10 * t)) }))
+        check(tremor.filter { $0.t > 6 }.allSatisfy { $0.x == 0 && $0.y == 0 }, "Hand tremor at rest never moves the camera")
+        let slowTurn = aim(simulate(12, pose: { t in (0, 35 * deg, t < 8 ? 0 : (t < 10 ? -3 * deg * (t - 8) : -6 * deg)) }))
+        check(slowTurn.filter { $0.t > 8.2 && $0.t < 9.9 }.allSatisfy { $0.x > 0.1 }, "A slow 3°/s turn moves the camera on every tick")
+        check(slowTurn.filter { $0.t > 10.12 }.allSatisfy { $0.x == 0 && $0.y == 0 }, "The camera stops when the hand stops — no phantom input")
+        var turnOutputs: [Double] = []
+        for hold in [5.0, 40.0, 80.0] {
+            let run = aim(simulate(6, pose: { t in (0, hold * deg, t < 3 ? 0 : -30 * deg * (t - 3)) })).filter { $0.t > 3.5 && $0.t < 5.5 }
+            turnOutputs.append(run.map(\.x).reduce(0, +) / Double(run.count))
+            check(run.allSatisfy { abs($0.y) < 0.05 }, "A horizontal turn stays horizontal at a \(Int(hold))° hold")
+        }
+        check(turnOutputs.min()! > 0.4 && turnOutputs.max()! - turnOutputs.min()! < 0.05, "Turning gives the same aim whether held flat, tilted or upright")
+        let lookUp = aim(simulate(5, pose: { t in (0, (35 + (t < 2.5 ? 0 : 20 * (t - 2.5))) * deg, 0) })).filter { $0.t > 3 && $0.t < 4.8 }
+        check(lookUp.allSatisfy { $0.y > 0.2 && abs($0.x) < 0.05 }, "Pitching up aims up")
+        var inverted = GyroAimEngine.Configuration(); inverted.invertY = true
+        let lookDown = aim(simulate(5, pose: { t in (0, (35 + (t < 2.5 ? 0 : 20 * (t - 2.5))) * deg, 0) }), configuration: inverted).filter { $0.t > 3 && $0.t < 4.8 }
+        check(lookDown.allSatisfy { $0.y < -0.2 }, "Vertical inversion flips vertical aim")
+        var faster = GyroAimEngine.Configuration(); faster.sensitivity = 2
+        let quickTurn = aim(simulate(6, pose: { t in (0, 35 * deg, t < 3 ? 0 : -20 * deg * (t - 3)) }), configuration: faster).filter { $0.t > 3.5 && $0.t < 5.5 }
+        let baseTurn = aim(simulate(6, pose: { t in (0, 35 * deg, t < 3 ? 0 : -20 * deg * (t - 3)) })).filter { $0.t > 3.5 && $0.t < 5.5 }
+        check(quickTurn.map(\.x).reduce(0, +) > baseTurn.map(\.x).reduce(0, +) * 1.4, "Sensitivity scales aim speed")
+        check(StickShaper.magnitude(demand: 0, exponent: 1, antiDeadzone: 0.2) == 0, "Zero demand is exactly zero even with compensation")
+
+        // MARK: - Touchpad camera
+
+        func touch(_ positions: (Double) -> (Double, Double)?, duration: Double, rate: Double = 250, configuration: TouchpadCameraEngine.Configuration = .init()) -> [(t: Double, x: Double, y: Double)] {
+            var engine = TouchpadCameraEngine(); engine.configure(configuration)
+            var result: [(Double, Double, Double)] = []; var t = 0.0, tick = 0.0; var jitter = 0
+            while t < duration {
+                while tick <= t { let out = engine.tick(now: tick, dt: 1.0 / 120).coarse; result.append((tick, Double(out.x), Double(out.y))); tick += 1.0 / 120 }
+                if let p = positions(t) { jitter += 1; engine.report(position: (p.0.rounded() + Double(jitter % 3 == 0 ? 1 : 0), p.1.rounded()), at: t) } else { engine.lift() }
+                t += 1 / rate
+            }
+            return result
+        }
+        check(touch({ _ in (100, 50) }, duration: 2).allSatisfy { $0.x == 0 && $0.y == 0 }, "A resting finger with sensor jitter never moves the camera")
+        let swipeSpeeds = [80.0, 300.0, 1000.0].map { speed -> Double in
+            let run = touch({ t in (-800 + speed * t, 0) }, duration: 1.2).filter { $0.t > 0.2 && $0.t < 1.1 }
+            return run.map(\.x).reduce(0, +) / Double(run.count)
+        }
+        check(swipeSpeeds[0] > 0 && swipeSpeeds[0] < swipeSpeeds[1] && swipeSpeeds[1] < swipeSpeeds[2], "Faster swipes turn faster; slow strokes still move")
+        let slowStroke = touch({ t in (-800 + 80 * t, 0) }, duration: 1.2).filter { $0.t > 0.25 && $0.t < 1.1 }.map(\.x)
+        let slowMean = slowStroke.reduce(0, +) / Double(slowStroke.count)
+        check(slowStroke.allSatisfy { abs($0 - slowMean) < slowMean * 0.25 }, "Slow strokes move smoothly, without pixel stutter")
+        let stopping = touch({ t in t < 1 ? (-400 + 500 * t, 0) : (100, 0) }, duration: 2)
+        check(stopping.filter { $0.t > 1.12 }.allSatisfy { $0.x == 0 }, "The camera stops within about 100 ms of the finger stopping")
+        let lifting = touch({ t in t < 1 ? (-400 + 500 * t, 0) : nil }, duration: 2)
+        check(lifting.filter { $0.t > 1.01 }.allSatisfy { $0.x == 0 }, "Lifting the finger stops the camera at once")
+        let sparse = touch({ t in (-400 + 500 * t, 0) }, duration: 1.2, rate: 60).filter { $0.t > 0.2 && $0.t < 1.1 }
+        check(sparse.allSatisfy { $0.x > 0.1 }, "Sparse touch reports never drop the camera to zero mid-swipe")
+        var upward = TouchpadCameraEngine.Configuration(); upward.invertY = true
+        let vertical = touch({ t in (0, -300 + 400 * t) }, duration: 1, configuration: upward).filter { $0.t > 0.2 && $0.t < 0.9 }
+        check(vertical.allSatisfy { $0.y < 0 }, "Vertical inversion flips touch aim")
+
+        // MARK: - Input ownership mapping
+
+        check(ControllerGyroMode.off.owner == .physical && ControllerGyroMode.steering.owner == .steering
+              && ControllerGyroMode.aiming.owner == .gyroAim,
+              "Each motion mode maps to exactly one input owner")
+        var modeProbe = ControllerEnhancements()
+        check(modeProbe.gyroMode == .off, "Disabled gyro maps to the Off mode")
+        modeProbe.setGyroMode(.steering)
+        check(modeProbe.gyroEnabled && modeProbe.gyroStick == .left && modeProbe.gyroMode == .steering, "Steering mode selects the left stick")
+        modeProbe.setGyroMode(.aiming)
+        check(modeProbe.gyroStick == .right && modeProbe.gyroMode == .aiming, "Aiming mode returns to the right stick")
+        var retiredFlick = ControllerEnhancements(); retiredFlick.gyroEnabled = true; retiredFlick.gyroFlickMode = true
+        check(retiredFlick.gyroMode == .off, "Profiles that used the retired flick shifting start with motion off")
+        var limitedSteering = ControllerEnhancements()
+        check(limitedSteering.effectiveSteeringMaximum == 1, "Existing profiles retain full steering output")
+        limitedSteering.steeringMaximum = .nan
+        check(limitedSteering.effectiveSteeringMaximum == 1, "Invalid maximum steering safely falls back to full output")
+
+        // MARK: - Adaptive triggers
+
         check(AdaptiveTriggerPreset.recommendedCatalog.count == 14 && AdaptiveTriggerPreset.recommendedCatalog.first == .off,
               "Catalog offers the fourteen DualSenseX-style modes starting at Off")
         check(AdaptiveTriggerPreset.migrated("semiAutomaticGun") == .automatic && AdaptiveTriggerPreset.migrated("clutchBite") == .brake
               && AdaptiveTriggerPreset.migrated("bowDraw") == .bow && AdaptiveTriggerPreset.migrated("ratchetDetents") == .twoStage,
               "Legacy saved preset names migrate into the current catalog")
-        for mode in [AdaptiveTriggerPreset.pistol, .sniper, .automatic, .machineGun, .bow, .twoStage] {
-            var envelope = ControllerTriggerEnvelope()
-            _ = envelope.sample(preset: mode, pressure: 0, now: 0)
-            check(envelope.sample(preset: mode, pressure: 1, now: 1.0/60).intensity > 0,
-                  "\(mode.rawValue) fires feedback once pressure crosses its wall")
+        check(AdaptiveTriggerPreset.migrated("verySoftTrigger") == .softSpring && AdaptiveTriggerPreset.migrated("hardTrigger") == .stiffSpring
+              && AdaptiveTriggerPreset.migrated("deceleration") == .brake && AdaptiveTriggerPreset.migrated("resistanceTrigger") == .stiffSpring,
+              "Effect names from early builds map to their closest effect instead of Off")
+        var click = ControllerTriggerEnvelope()
+        _ = click.sample(preset: .pistol, pressure: 0, now: 0)
+        check(click.sample(preset: .pistol, pressure: 0.6, now: dt).intensity > 0, "A break-style trigger clicks as it passes its wall")
+        check(click.sample(preset: .pistol, pressure: 1, now: 2 * dt).intensity == 0, "Holding past the wall never repeats the click")
+        _ = click.sample(preset: .pistol, pressure: 0, now: 3 * dt)
+        check(click.sample(preset: .pistol, pressure: 0.6, now: 4 * dt).intensity > 0, "Releasing re-arms the click")
+        for mode in [AdaptiveTriggerPreset.automatic, .machineGun, .accelerator, .brake, .heartbeat] {
+            var quiet = ControllerTriggerEnvelope()
+            var total: Float = 0
+            for frame in 0..<120 { total += quiet.sample(preset: mode, pressure: Float(frame % 60) / 59, now: Double(frame) * dt).intensity }
+            check(total == 0, "\(mode.rawValue) never plays grip haptics on its own")
         }
-        check(ControllerAimMath.axis(0.02, deadzone: 0.08) == 0, "Touch noise has a firm neutral zone")
-        check(ControllerAimMath.smooth(0, previous: 0.9, dt: 1.0/60) == 0, "Gyro releases in one update without a residual tail")
-        check(ControllerAimMath.smooth(1, previous: 0, dt: 1.0/60) > 0.85, "Motion filter responds within one 60 Hz update")
-        check(ControllerAimMath.tiltDelta(0.04, centre: 0) == 0, "Tilt inside three degrees is neutral")
-        check(abs(ControllerAimMath.tiltDelta(.pi/9, centre: 0) - 1) < 0.0001, "Held twenty-degree tilt holds full stick")
-        check(ControllerAimMath.tiltDelta(0, centre: 0) == 0, "Returning to tilt centre releases stick")
-        check(ControllerAimMath.axis(.nan, deadzone: 0.08) == 0, "Invalid sensor sample remains neutral")
-        var flick = ControllerFlickState()
-        _ = flick.sample(rate: 0, angle: 0, now: 0)
-        check(flick.sample(rate: 2, angle: 0.2, now: 0.1) == 1, "Up flick emits up pulse")
-        check(flick.sample(rate: -2, angle: 0.1, now: 0.2) == 0, "Return stroke cannot downshift")
-        check(flick.sample(rate: 0, angle: 0.3, now: 0.5) == 0, "Pause away from neutral does not rearm")
-        check(flick.sample(rate: -2, angle: 0.1, now: 0.7) == 0, "Delayed return is also suppressed")
-        _ = flick.sample(rate: 0, angle: 0, now: 1)
-        _ = flick.sample(rate: 0, angle: 0, now: 1.2)
-        check(flick.sample(rate: -2, angle: -0.2, now: 1.3) == -1, "Deliberate down flick works after settling at neutral")
-        check(flick.sample(rate: 2, angle: -0.1, now: 1.5) == 0, "Return from a down flick cannot upshift")
-        _ = flick.sample(rate: 0, angle: -0.05, now: 1.6)
-        _ = flick.sample(rate: 0, angle: 0, now: 1.66)
-        check(flick.sample(rate: -2, angle: 0.02, now: 1.7) == -1, "Rapid repeated downshift fires without a full return to neutral")
-        var returnFlick = ControllerFlickState()
-        _ = returnFlick.sample(rate: 0, angle: 0, now: 0)
-        check(returnFlick.sample(rate: 2, angle: 0.1, now: 0.1) == 1, "Up flick fires before any tilt")
-        _ = returnFlick.sample(rate: 0, angle: 0.15, now: 0.3)
-        _ = returnFlick.sample(rate: 0, angle: 0.15, now: 0.36)
-        check(returnFlick.sample(rate: -2, angle: 0.15, now: 0.45) == 0, "Return stroke toward neutral is suppressed even after rearming")
-        check(returnFlick.sample(rate: -2, angle: 0.01, now: 0.55) == -1, "Deliberate opposite flick crossing neutral fires")
-        var adaptive = ControllerAdaptiveFilter()
-        var noise: Float = 0
-        for i in 0..<120 { let v = adaptive.sample(0.2 + (i % 2 == 0 ? 0.01 : -0.01), dt: 1.0/60); if i > 60 { noise = max(noise, abs(v - 0.2)) } }
-        check(noise < 0.006, "Adaptive filter reduces steady-input jitter")
-        adaptive.reset()
-        check(adaptive.sample(1, dt: 1.0/60) > 0.7, "Fast movement passes over 70 percent within one sample")
-        check(adaptive.sample(0, dt: 1.0/60) == 0, "Adaptive filter preserves immediate release")
-        let at = ControllerVector2(x: 0.5, y: 0.4)
-        check(ControllerAimMath.trackpad(current: at, previous: at, dt: 1.0/60, sensitivity: 0.35) == .zero, "Stationary finger never keeps turning camera")
-        let slide = ControllerAimMath.trackpad(current: at, previous: .zero, dt: 1.0/60, sensitivity: 0.35)
-        check(slide.x > 0 && slide.y > 0, "Trackpad motion follows finger direction")
+
+        // MARK: - DualSense touch decoding (unchanged contract)
+
         var usb = [UInt8](repeating: 0, count: 64); usb[0] = 1; usb[33] = 0x80; usb[37] = 0x80
         check(DualSenseTouchPacket.decode(usb)?.first?.isActive == false, "USB contact flag detects actual release")
         usb[33] = 0; usb[34] = 0xc0; usb[35] = 0xc3; usb[36] = 0x21
-        let touch = DualSenseTouchPacket.decode(usb)?.first
-        check(touch?.isActive == true && abs(touch!.position.x) < 0.002 && abs(touch!.position.y) < 0.002, "USB packed touch coordinates decode centre")
+        let touch0 = DualSenseTouchPacket.decode(usb)?.first
+        check(touch0?.isActive == true && abs(touch0!.position.x) < 0.002 && abs(touch0!.position.y) < 0.002, "USB packed touch coordinates decode centre")
         var bt = [UInt8](repeating: 0, count: 78); bt[0] = 0x31
         for i in 0..<8 { bt[34+i] = usb[33+i] }
-        check(DualSenseTouchPacket.decode(bt)?.first == touch, "Bluetooth touch layout matches USB")
+        check(DualSenseTouchPacket.decode(bt)?.first == touch0, "Bluetooth touch layout matches USB")
         check(DualSenseTouchPacket.decode([1,0,0]) == nil, "Truncated reports cannot create touches")
-        var precision = ControllerPrecisionGyro()
-        var stableNeutral = true
-        for i in 0..<120 {
-            let v = precision.sample(ControllerVector2(x: i % 2 == 0 ? 0.001 : -0.001, y: 0.0007), dt: 1.0/60, noise: 0.003, sensitivity: 0.45, floor: 0.12)
-            stableNeutral = stableNeutral && v == .zero
-        }
-        check(stableNeutral, "Stationary gyro noise never becomes stick movement")
-        var slow = ControllerVector2.zero
-        for _ in 0..<30 { slow = precision.sample(ControllerVector2(x: 0.008, y: 0), dt: 1.0/60, noise: 0.003, sensitivity: 0.45, floor: 0.12) }
-        check(slow.x > 0.12 && slow.y == 0, "Slow gyro below old dead zone now crosses game dead zone")
-        check(precision.fine.x > 0 && precision.fine.x < 0.01, "Physical-stick blending uses fine gyro correction without a resistance floor")
-        check(precision.sample(.zero, dt: 1.0/60, noise: 0.003, sensitivity: 0.45, floor: 0.12) == .zero, "Gyro stops without a filter tail at sensor rest")
-        let slowGain = ControllerAimMath.trackpad(current: ControllerVector2(x: 0.5, y: 0), previous: .zero, dt: 0.015, sensitivity: 0.05).x
-        let fastGain = ControllerAimMath.trackpad(current: ControllerVector2(x: 0.5, y: 0), previous: .zero, dt: 0.015, sensitivity: 1).x
-        check(fastGain > slowGain + 0.2 && fastGain < 1, "Touch sensitivity remains distinct for fast swipes instead of clipping both to maximum")
-        precision.reset()
-        for _ in 0..<30 { slow = precision.sample(ControllerVector2(x: 0.008, y: 0.001), dt: 1.0/60, noise: 0.003, sensitivity: 0.45, floor: 0.12) }
-        check(slow.x > 0.12 && slow.y == 0, "Slow horizontal aiming does not amplify vertical sensor noise")
-        var turnaround = ControllerPrecisionGyro()
-        for _ in 0..<40 { _ = turnaround.sample(ControllerVector2(x: 0.6, y: 0), dt: 1.0/60, noise: 0.003, sensitivity: 0.45, floor: 0.12) }
-        var reversed: Float = 1
-        for i in 0..<8 {
-            let rate: Float = i < 3 ? 0 : -0.6
-            reversed = turnaround.sample(ControllerVector2(x: rate, y: 0), dt: 1.0/60, noise: 0.003, sensitivity: 0.45, floor: 0.12).x
-        }
-        check(reversed < 0 && abs(reversed + 0.12) > 0.15, "Reversed gyro keeps its full response across the turnaround pause")
-        let defaults = ControllerEnhancements()
-        check((defaults.gyroStick ?? .right) == .right && (defaults.touchpadStick ?? .right) == .right, "Both aim targets default to right stick")
-        check(defaults.effectiveGyroNoiseThreshold == 0.003, "Legacy default motion dead zone migrates to precision threshold")
-        var chosen = defaults; chosen.gyroStick = .left; chosen.touchpadStick = .right
-        let decodedChosen = try JSONDecoder().decode(ControllerEnhancements.self, from: JSONEncoder().encode(chosen))
-        check(decodedChosen.gyroStick == .left && decodedChosen.touchpadStick == .right, "Independent stick targets survive profile round trip")
-        check(defaults.gyroMode == .off, "Disabled gyro maps to the Off mode")
-        var modeProbe = defaults
-        modeProbe.setGyroMode(.steering)
-        check(modeProbe.gyroEnabled && modeProbe.gyroStick == .left && modeProbe.gyroMode == .steering, "Steering mode selects the left stick")
-        modeProbe.setGyroMode(.flickShift)
-        check(modeProbe.gyroFlickMode == true && modeProbe.gyroStick == .right && modeProbe.gyroMode == .flickShift, "Flick mode returns to the right stick")
-        let held = ControllerAimMath.steering(angle: 0.15, centre: 0, range: .pi / 6, floor: 0.12)
-        check(held > 0.12, "Held steering angle produces a persistent stick position")
-        let cruising = ControllerAimMath.steering(angle: 0.06, centre: 0, range: .pi / 6, floor: 0.30)
-        check(cruising > 0.30, "Slow cruising tilt clears a large game inner dead zone")
-        var wheelFilter = ControllerAdaptiveFilter()
-        var wheel: Float = 0
-        for _ in 0..<600 { wheel = wheelFilter.sample(held, dt: 1.0/60) }
-        check(abs(wheel - held) < 0.001, "Steering does not recenter during ten seconds held at an angle")
-        var serviceWheel = ControllerAdaptiveFilter()
-        var heldWheel: Float = 0
-        for _ in 0..<120 { heldWheel = serviceWheel.sample(held, dt: 1.0/60, minimum: 12, beta: 4, neutralImmediately: false) }
-        check(abs(heldWheel - held) < 0.001, "Steering filter holds the angle without a reset-on-neutral restart")
-        check(ControllerAimMath.steering(angle: 0, centre: 0, range: .pi / 6, floor: 0.12) == 0, "Steering returns to zero only at saved neutral")
-        check(ControllerAimMath.steering(angle: -0.15, centre: 0, range: .pi / 6, floor: 0.12) < -0.12, "Steering holds in both directions")
-        check(ControllerAimMath.touchGain(2, sensitivity: 3, floor: 0) > ControllerAimMath.touchGain(2, sensitivity: 0.05, floor: 0) + 0.7, "Touch sensitivity changes cached filtered movement immediately")
-        let halfSpeed = ControllerAimMath.touchGain(1, sensitivity: 0.35, floor: 0)
-        check(abs(halfSpeed - ControllerAimMath.touchGain(2, sensitivity: 0.35, floor: 0) / 2) < 0.001, "Touch output is linear in finger speed instead of saturating early")
-        var servo = ControllerTouchServo()
-        var moment = 0.0
-        for _ in 0..<10 {
-            servo.move(dx: 0.02, dy: 0, sensitivity: 0.35, at: moment)
-            moment += 1.0 / 66
-            _ = servo.sample(dt: 1.0/60, floor: 0.12, now: moment, contact: true)
-        }
-        check(abs(servo.target.x - 0.07) < 0.0001, "Touch travel accumulates into the servo target")
-        servo.move(dx: 0.15, dy: 0, sensitivity: 0.35, at: moment)
-        moment += 1.0 / 60
-        var burst = servo.sample(dt: 1.0/60, floor: 0.12, now: moment, contact: true)
-        check(burst.x > 0.9, "A flick commands near-full camera speed immediately")
-        moment += 1.0 / 60
-        for _ in 0..<60 {
-            moment += 1.0 / 60
-            burst = servo.sample(dt: 1.0/60, floor: 0.12, now: moment, contact: true)
-        }
-        check(abs(burst.x) < 0.001 && abs(servo.target.x - servo.delivered.x) < 0.006, "The servo delivers the flick with a short glide, then rests with no creep")
-        servo.move(dx: 0.004, dy: 0, sensitivity: 0.35, at: moment)
-        moment += 1.0 / 60
-        let glide = servo.sample(dt: 1.0/60, floor: 0.12, now: moment, contact: true)
-        check(glide.x > 0.12 && glide.x < 0.5, "A very slow drag still glides above the game dead zone")
-        servo.stop()
-        let lifted = servo.sample(dt: 1.0/60, floor: 0.12, now: moment + 0.1, contact: false)
-        check(lifted == .zero, "Lifting the finger stops the camera immediately")
-        var walk = ControllerTouchServo()
-        var shiver = 0.0
-        for i in 0..<60 {
-            walk.move(dx: i % 3 == 2 ? -0.002 : 0.002, dy: 0, sensitivity: 0.35, at: shiver)
-            shiver += 0.016
-            _ = walk.sample(dt: 1.0/60, floor: 0.12, now: shiver, contact: true)
-        }
-        for _ in 0..<30 {
-            shiver += 0.016
-            _ = walk.sample(dt: 1.0/60, floor: 0.12, now: shiver, contact: true)
-        }
-        check(abs(walk.delivered.x) < 0.05, "Coordinate shiver on a resting finger cannot walk the camera away")
-        func wheelReading(_ angle: Double, gravity: Bool = false, pitch: Double = 0) -> ControllerWheelMotion {
-            let vector = ControllerMotionVector(x: sin(angle)*cos(pitch), y: -cos(angle)*cos(pitch), z: -sin(pitch))
-            return ControllerWheelMotion.select(hasGravity: gravity, gravity: gravity ? vector : .zero,
-                                                acceleration: vector)!
-        }
-        let fallback = wheelReading(0.2)
-        check(fallback.source == .acceleration, "Wheel uses acceleration when separate gravity is unavailable")
-        check(wheelReading(0.2, gravity: true).source == .gravity, "Valid separated gravity is preferred")
-        check(ControllerWheelMotion.select(hasGravity: true, gravity: .zero, acceleration: fallback.vector)?.source == .acceleration,
-              "Zero gravity cannot silently disable steering when acceleration is valid")
-        check(ControllerWheelMotion.select(hasGravity: false, gravity: .zero, acceleration: .zero) == nil,
-              "Missing sensor data is unavailable rather than a valid zero angle")
-        var sensorWheel = ControllerWheelState()
-        _ = sensorWheel.sample(wheelReading(0), rate: .zero, now: 0)
-        var time = 0.0
-        for _ in 0..<600 {
-            time += 1.0/60
-            _ = sensorWheel.sample(wheelReading(0.2), rate: .zero, now: time)
-        }
-        check(abs(sensorWheel.angle - 0.2) < 0.0001, "Acceleration-only wheel holds an angle for ten seconds with zero rotation rate")
-        for _ in 0..<120 {
-            time += 1.0/60
-            _ = sensorWheel.sample(wheelReading(0.201), rate: .zero, now: time)
-        }
-        check(sensorWheel.angle > 0.2009, "Held wheel registers a 0.057 degree adjustment")
-        sensorWheel.center()
-        check(sensorWheel.angle == 0, "Center saves the current measured wheel angle")
-        for _ in 0..<120 {
-            time += 1.0/60
-            _ = sensorWheel.sample(wheelReading(0.101), rate: .zero, now: time)
-        }
-        check(abs(sensorWheel.angle + 0.1) < 0.0001, "Wheel turns relative to a nonzero saved centre")
-        check(sensorWheel.sample(nil, rate: .zero, now: time + 1) == nil && !sensorWheel.available,
-              "Unavailable wheel sensor suppresses synthetic steering")
-        var fastWheel = ControllerWheelState()
-        _ = fastWheel.sample(wheelReading(0), rate: .zero, now: 0)
-        for frame in 1...30 {
-            _ = fastWheel.sample(wheelReading(Double(frame)/60),
-                rate: ControllerMotionVector(x: 0, y: 0, z: -1), now: Double(frame)/60)
-        }
-        check(abs(fastWheel.angle - 0.5) < 0.001, "Gyro prediction tracks fast wheel turns without accelerometer filter lag")
-        var tiltedWheel = ControllerWheelState()
-        _ = tiltedWheel.sample(wheelReading(0, pitch: 0.6), rate: .zero, now: 0)
-        for frame in 1...180 {
-            _ = tiltedWheel.sample(wheelReading(-0.3, pitch: 0.6), rate: .zero, now: Double(frame)/60)
-        }
-        check(abs(tiltedWheel.angle + 0.3) < 0.001, "Wheel angle works with a face-toward-player pitched grip")
-        // Gravity leaves the wheel plane entirely (wheel axis near vertical):
-        // steering must continue on the wheel-axis gyro rate and re-anchor
-        // seamlessly once the plane becomes observable again.
-        var lockedWheel = ControllerWheelState()
-        _ = lockedWheel.sample(wheelReading(0, gravity: true, pitch: 0.6), rate: .zero, now: 0)
-        var lockedTime = 0.0
-        for frame in 1...60 {
-            lockedTime = Double(frame) / 60
-            _ = lockedWheel.sample(wheelReading(0.5 * lockedTime, gravity: true, pitch: 0.6),
-                rate: ControllerMotionVector(x: 0, y: 0, z: -0.5), now: lockedTime)
-        }
-        check(lockedWheel.available && abs(lockedWheel.angle - 0.5) < 0.001,
-              "Observable steering reaches a known angle before the axis locks")
-        var expectedLocked = 0.5 * lockedTime
-        var lostLockedFrames = 0
-        for _ in 1...120 {
-            lockedTime += 1.0/60
-            expectedLocked += 1.0/60
-            // pitch 1.45 rad leaves ~0.014 in-plane magnitude, under the 0.04 limit
-            if lockedWheel.sample(wheelReading(expectedLocked, gravity: true, pitch: 1.45),
-                rate: ControllerMotionVector(x: 0, y: 0, z: -1), now: lockedTime) == nil {
-                lostLockedFrames += 1
-            }
-        }
-        check(lostLockedFrames == 0 && lockedWheel.available,
-              "Steering continues while the wheel axis points at the ceiling")
-        check(abs(lockedWheel.angle - Float(atan2(sin(expectedLocked), cos(expectedLocked)))) < 0.05,
-              "Axis-locked steering tracks the wheel rate without drifting away")
-        for _ in 1...60 {
-            lockedTime += 1.0/60
-            expectedLocked += 1.0/60
-            _ = lockedWheel.sample(wheelReading(expectedLocked, gravity: true, pitch: 0.6),
-                rate: ControllerMotionVector(x: 0, y: 0, z: -1), now: lockedTime)
-        }
-        check(abs(lockedWheel.angle - Float(atan2(sin(expectedLocked), cos(expectedLocked)))) < 0.02,
-              "Wheel re-anchors to gravity on return from the axis-locked zone")
-        var quietWheel = ControllerWheelState()
-        _ = quietWheel.sample(wheelReading(0), rate: .zero, now: 0)
-        var maximumNoise: Float = 0
-        var quietResponse = ControllerSteeringResponse()
-        quietResponse.reset(at: 0)
-        for frame in 1...240 {
-            let value = quietWheel.sample(wheelReading(frame % 2 == 0 ? 0.003 : -0.003), rate: .zero, now: Double(frame)/60)!
-            let output = quietResponse.sample(target: Double(value), now: Double(frame)/60, smoothing: 0.5)
-            if frame > 60 { maximumNoise = max(maximumNoise, abs(output)) }
-        }
-        check(maximumNoise < 0.0004, "Final steering smoother removes over 86% of alternating stationary angle jitter")
-        let minute = ControllerAimMath.steering(angle: 0.001, centre: 0, range: 0.7, floor: 0)
-        check(minute > 0, "Sub-degree wheel changes are no longer discarded by a hard neutral zone")
-        check(abs(ControllerAimMath.steering(angle: 0.002, centre: 0, range: 0.7, floor: 0) - minute*2) < 0.000001,
-              "Steering response is proportional rather than a power curve")
-        check(ControllerAimMath.steering(angle: -0.001, centre: 0, range: 0.7, floor: 0) == -minute,
-              "Small left and right turns have symmetric output")
-        var reversalWheel = ControllerWheelState()
-        _ = reversalWheel.sample(wheelReading(0), rate: .zero, now: 0)
-        var expectedAngle = 0.0
-        var peakError: Float = 0
-        var lostFrames = 0
-        for frame in 1...120 {
-            let speed = frame <= 30 ? -2.0 : (frame <= 90 ? 2.0 : -2.0)
-            expectedAngle += speed / 60
-            // A brief acceleration rejection exactly when direction reverses.
-            let reading: ControllerWheelMotion? = (31...33).contains(frame) || (91...93).contains(frame) ? nil : wheelReading(expectedAngle)
-            if let actual = reversalWheel.sample(reading, rate: ControllerMotionVector(x: 0, y: 0, z: -speed), now: Double(frame)/60) {
-                peakError = max(peakError, abs(actual - Float(expectedAngle)))
-            } else { lostFrames += 1 }
-        }
-        check(lostFrames == 0 && peakError < 0.001, "Fast bidirectional reversals bridge three rejected samples without centering or lag")
-        check(reversalWheel.bridgedSamples == 6, "Short sensor rejection uses bounded gyro prediction")
-        for frame in 121...36120 {
-            _ = reversalWheel.sample(wheelReading(expectedAngle), rate: .zero, now: Double(frame)/60)
-        }
-        check(abs(reversalWheel.angle - Float(expectedAngle)) < 0.0001, "Absolute steering remains held for ten simulated minutes")
-        let beforeOldSample = reversalWheel.angle
-        _ = reversalWheel.sample(wheelReading(1), rate: .zero, now: 600)
-        check(reversalWheel.angle == beforeOldSample, "Out-of-order sample cannot rewind the wheel")
-        check(reversalWheel.sample(nil, rate: .zero, now: 603) == nil, "Sustained sensor loss releases steering instead of sticking forever")
-        var noRateWheel = ControllerWheelState()
-        _ = noRateWheel.sample(wheelReading(0), rate: .zero, now: 0, hasRate: false)
-        check(noRateWheel.sample(nil, rate: .zero, now: 0.016, hasRate: false) == nil, "Missing rotation sensor cannot pretend to predict a turn")
-        check(abs(ControllerAimMath.steering(angle: .pi/3, centre: 0, range: .pi*2/3, floor: 0) - 0.5) < 0.0001,
-              "120-degree full lock gives half steering at 60 degrees")
-        check(ControllerAimMath.steering(angle: 0.01, centre: 0, range: 1, floor: 0.3, deadzone: 0.02) == 0,
-              "Optional center dead zone suppresses rest jitter")
-        check(abs(ControllerAimMath.steering(angle: 0.5, centre: 0, range: 1, floor: 0, exponent: 2, inverted: true) + 0.25) < 0.0001,
-              "Steering curve and inversion are independent of wheel angle tracking")
-        var wheelSettings = ControllerEnhancements()
-        wheelSettings.steeringRangeDegrees = 110; wheelSettings.steeringSmoothing = 0.8
-        wheelSettings.steeringDeadzoneDegrees = 0.5; wheelSettings.steeringExponent = 1.4; wheelSettings.steeringInverted = true
-        let savedWheel = try JSONDecoder().decode(ControllerEnhancements.self, from: JSONEncoder().encode(wheelSettings))
-        check(savedWheel == wheelSettings, "New steering controls survive profile save and reload")
-        for smooth in [0.0, 0.5, 1.0] {
-            for direction in [-1.0, 1.0] {
-                var preciseWheel = ControllerWheelState()
-                _ = preciseWheel.sample(wheelReading(0), rate: .zero, now: 0)
-                var maxSlowError: Float = 0
-                var slowResponse = ControllerSteeringResponse()
-                slowResponse.reset(at: 0)
-                // Deliberately inverted gyro projection: it must not fight angle input.
-                for frame in 1...600 {
-                    let position = direction * Double(frame) / 60 * (Double.pi / 180)
-                    _ = preciseWheel.sample(wheelReading(position, gravity: true),
-                        rate: ControllerMotionVector(x: 0, y: 0, z: direction * Double.pi / 180), now: Double(frame)/60)
-                    let mapped = ControllerAimMath.steering(angle: preciseWheel.angle, centre: 0, range: 25 * .pi/180, floor: 0)
-                    let finalOutput = slowResponse.sample(target: Double(mapped), now: Double(frame)/60, smoothing: smooth)
-                    maxSlowError = max(maxSlowError, abs(finalOutput * 25 * .pi/180 - Float(position)))
-                }
-                check(maxSlowError < 0.0015, "One-degree/second center movement stays within 0.086 degrees, smoothing \(smooth), direction \(direction)")
-                preciseWheel.reset()
-                _ = preciseWheel.sample(wheelReading(0), rate: .zero, now: 0)
-                for frame in 1...60 {
-                    let position = direction * Double(frame)/60 * 25 * .pi/180
-                    _ = preciseWheel.sample(wheelReading(position, gravity: true),
-                        rate: ControllerMotionVector(x: 0, y: 0, z: direction * 25 * .pi/180), now: Double(frame)/60)
-                }
-                let lock = ControllerAimMath.steering(angle: preciseWheel.angle, centre: 0, range: 25 * .pi/180, floor: 0)
-                check(abs(lock) > 0.99, "25 physical degrees maps to over 99% target with opposing gyro, smoothing \(smooth), direction \(direction)")
-            }
-        }
-        for smooth in [0.0, 0.5, 1.0] {
-            let time = ControllerSteeringResponse.responseTime(smoothing: smooth)
-            var step = ControllerSteeringResponse(); step.reset(at: 0)
-            let completed = step.sample(target: 1, now: time, smoothing: smooth)
-            check(abs(completed - 1) < 0.00001, "Smoothing time matches complete response at setting \(smooth)")
-            var heldResponse = ControllerSteeringResponse(); heldResponse.reset(at: 0)
-            var previous: Float = 0
-            var intermediate = 0
-            var monotonic = true
-            for frame in 1...180 {
-                let result = heldResponse.sample(target: 0.6, now: Double(frame)/60, smoothing: smooth)
-                monotonic = monotonic && result >= previous - 0.000001 && result <= 0.600001
-                if result > 0.001 && result < 0.599 { intermediate += 1 }
-                previous = result
-            }
-            check(monotonic, "Step progresses without bounce, setting \(smooth)")
-            check(intermediate >= 1 && abs(previous - 0.6) < 0.000001, "15-degree step passes through intermediate values and holds exact target")
-        }
-        var fastResponse = ControllerSteeringResponse(); fastResponse.reset(at: 0)
-        var gentleResponse = ControllerSteeringResponse(); gentleResponse.reset(at: 0)
-        let fastStart = fastResponse.sample(target: 1, now: 1.0/60, smoothing: 0)
-        let gentleStart = gentleResponse.sample(target: 1, now: 1.0/60, smoothing: 1)
-        check(gentleStart <= fastStart * 0.21, "Smoothing slider produces a substantial, predictable transition difference")
-        var substep = ControllerSteeringResponse(); substep.reset(at: 0)
-        var wholeStep = ControllerSteeringResponse(); wholeStep.reset(at: 0)
-        let whole = wholeStep.sample(target: 0.7, now: 0.1, smoothing: 0.5)
-        var split: Float = 0
-        for frame in 1...12 { split = substep.sample(target: 0.7, now: Double(frame)/120, smoothing: 0.5) }
-        check(abs(whole - split) < 0.000001, "Time-weighted smoother agrees for one step and twelve substeps")
-        var compensationResponse = ControllerSteeringResponse(); compensationResponse.reset(at: 0)
-        let tinyTurn = ControllerAimMath.steering(angle: 0.01, centre: 0, range: 0.44, floor: 0.3)
-        let smoothedTinyTurn = compensationResponse.sample(target: Double(tinyTurn), now: 1.0/60, smoothing: 0.5)
-        check(smoothedTinyTurn > 0 && smoothedTinyTurn < tinyTurn * 0.2, "Final output smoothing also softens the game's dead-zone compensation step")
-        var microResponse = ControllerSteeringResponse(); microResponse.reset(at: 0)
-        var microOutput: Float = 0
-        for frame in 1...120 { microOutput = microResponse.sample(target: 0.0001, now: Double(frame)/60, smoothing: 1) }
-        check(abs(microOutput - 0.0001) < 0.00000001, "Smoothing never discards a tiny held steering target")
-        var reversalResponse = ControllerSteeringResponse(); reversalResponse.reset(at: 0)
-        var reversedSteering: Float = 0
-        var reversalBounded = true
-        for frame in 1...60 {
-            reversedSteering = reversalResponse.sample(target: frame < 15 ? 1 : -1, now: Double(frame)/60, smoothing: 0.5)
-            reversalBounded = reversalBounded && reversedSteering.isFinite && abs(reversedSteering) <= 1
-        }
-        check(reversalBounded, "Rapid reversal remains bounded")
-        check(reversedSteering < -0.999, "Reversal settles fully on the new side")
-        reversalResponse.reset(at: 1)
-        check(reversalResponse.sample(target: 0, now: 1.016, smoothing: 1) == 0, "Center/reset clears all old steering momentum")
-        check(reversalResponse.sample(target: 1, now: 2, smoothing: 1) == 0, "Long scheduling gap releases stale output")
-        for amplitude in [0.1, 0.3, 0.4, 0.5, 0.8, 1.0, -0.1, -0.3, -0.4, -0.5, -0.8, -1.0] {
-            var ramp = ControllerSteeringResponse(); ramp.reset(at: 0)
-            var straightRamp = true
-            for part in 1...9 {
-                let actual = ramp.sample(target: amplitude, now: Double(part) / 60, smoothing: 1)
-                straightRamp = straightRamp && abs(Double(actual) - amplitude * Double(part)/9) < 0.000001
-            }
-            check(straightRamp, "Equal-time increments are equal across the whole step, target \(amplitude)")
-        }
-        var wholeRangeLinear = true
-        for percent in -100...100 {
-            let fraction = Float(percent) / 100
-            let mapped = ControllerAimMath.steering(angle: fraction * 50 * .pi/180, centre: 0, range: 50 * .pi/180, floor: 0)
-            wholeRangeLinear = wholeRangeLinear && abs(mapped - fraction) < 0.000001
-        }
-        check(wholeRangeLinear, "Every 1% angle increment maps to 1% target, including 30–50% travel")
-        var firstSignal = ControllerSteeringResponse(); firstSignal.reset(at: 0)
-        var secondSignal = ControllerSteeringResponse(); secondSignal.reset(at: 0)
-        var combinedSignal = ControllerSteeringResponse(); combinedSignal.reset(at: 0)
-        var superposition = true
-        for frame in 1...600 {
-            let first = sin(Double(frame) * 0.071) * 0.3
-            let second = cos(Double(frame) * 0.033) * 0.4
-            let now = Double(frame)/60
-            let a = firstSignal.sample(target: first, now: now, smoothing: 1)
-            let b = secondSignal.sample(target: second, now: now, smoothing: 1)
-            let ab = combinedSignal.sample(target: first + second, now: now, smoothing: 1)
-            superposition = superposition && abs(ab - a - b) < 0.000001
-        }
-        check(superposition, "Smoothing obeys linear superposition for changing targets and reversals")
-        var limitedSteering = ControllerEnhancements()
-        check(limitedSteering.effectiveSteeringMaximum == 1, "Existing profiles retain full steering output")
-        limitedSteering.steeringMaximum = 0.6
-        let restoredSteering = try JSONDecoder().decode(ControllerEnhancements.self, from: JSONEncoder().encode(limitedSteering))
-        check(restoredSteering.effectiveSteeringMaximum == 0.6, "Maximum steering survives profile serialization")
-        limitedSteering.steeringMaximum = .nan
-        check(limitedSteering.effectiveSteeringMaximum == 1, "Invalid maximum steering safely falls back to full output")
-        check(AdaptiveTriggerPreset.recommendedCatalog.count == 14, "DualSenseX-style default menu offers fourteen built-in modes")
-        check(AdaptiveTriggerPreset.recommendedCatalog.first == .off && AdaptiveTriggerPreset.recommendedCatalog.last == .choppy, "Catalog order mirrors the DualSenseX menu")
-        var click = ControllerTriggerEnvelope()
-        _ = click.sample(preset: .twoStage, pressure: 0, now: 0)
-        check(click.sample(preset: .twoStage, pressure: 0.9, now: 1.0/60).intensity == 0.7, "Two-stage break fires once at the wall")
-        check(click.sample(preset: .twoStage, pressure: 0.9, now: 2.0/60).intensity == 0, "Two-stage wall holds without repeating impulses")
-        check(click.sample(preset: .twoStage, pressure: 0, now: 3.0/60).intensity == 0.60, "Two-stage release produces the digital click kick")
-        var semi = ControllerTriggerEnvelope()
-        _ = semi.sample(preset: .pistol, pressure: 0, now: 0)
-        _ = semi.sample(preset: .pistol, pressure: 0.6, now: 1.0/60)
-        check(semi.sample(preset: .pistol, pressure: 0, now: 2.0/60).intensity == 0.60, "Semi-automatic release kicks after the break")
-        var machine = ControllerTriggerEnvelope()
-        _ = machine.sample(preset: .machineGun, pressure: 0, now: 0)
-        let bursts = machine.sample(preset: .machineGun, pressure: 0.8, now: 1.0/60)
-        check(bursts.intensity > 0 && bursts.forceBoost > 0, "Machine mode rhythm combines haptics and bounded recoil")
-        var shot = ControllerTriggerEnvelope()
-        _ = shot.sample(preset: .pistol, pressure: 0, now: 0)
-        check(shot.sample(preset: .pistol, pressure: 0.5, now: 0.016).intensity > 0, "Pistol break produces one impulse")
-        check(shot.sample(preset: .pistol, pressure: 0.5, now: 0.032).intensity == 0, "Holding a pistol does not repeat break impulses")
-        check(shot.sample(preset: .pistol, pressure: 0, now: 0.048).intensity == 0.6, "Pistol release produces a separate kick")
-        check(shot.sample(preset: .pistol, pressure: 0, now: 0.064).intensity == 0, "Release kick cannot repeat at rest")
-        var automatic = ControllerTriggerEnvelope()
-        _ = automatic.sample(preset: .automatic, pressure: 0, now: 0)
-        let firing = automatic.sample(preset: .automatic, pressure: 1, now: 0.016)
-        check(firing.intensity > 0 && firing.forceBoost > 0, "Automatic fire combines haptics and bounded resistance recoil")
-        check(automatic.sample(preset: .automatic, pressure: 1, now: 0.05).forceBoost == 0, "Recoil spike expires while trigger stays held")
-        check(automatic.sample(preset: .automatic, pressure: 0, now: 0.07).forceBoost == 0, "Release clears recoil immediately")
-        var disturbed = ControllerWheelState()
-        _ = disturbed.sample(wheelReading(0), rate: .zero, now: 0)
-        let disturbedAngle = disturbed.sample(wheelReading(0.25), rate: .zero, now: 1.0/60)!
-        check(abs(disturbedAngle) < 0.03, "A one-frame accelerometer disturbance cannot abruptly steer by fourteen degrees")
-        do {
-            // Sustained rumble shakes the whole controller around the angle
-            // being held (centre wheel). A gravity-source reading re-anchors
-            // instantly without the guard, so engine drone walks the wheel;
-            // with the guard the gyro prediction carries the angle and only
-            // the slow average of the shaking sensors corrects.
-            func shake(_ sign: Double) -> ControllerWheelMotion { wheelReading(0.12 * sign, gravity: true) }
-            var guarded = ControllerWheelState()
-            for frame in 0..<60 { _ = guarded.sample(shake(0), rate: .zero, now: Double(frame)/60) }
-            var maxGuarded: Float = 0
-            for frame in 60..<180 {
-                let sign = frame % 2 == 0 ? 1.0 : -1.0
-                if let angle = guarded.sample(shake(sign), rate: .zero, now: Double(frame)/60, vibrating: true) {
-                    maxGuarded = max(maxGuarded, abs(angle))
-                }
-            }
-            check(maxGuarded < 0.03, "Rumble guard holds a centred wheel steady through two seconds of shaking sensors")
-            var maxUnguarded: Float = 0
-            var unguarded = ControllerWheelState()
-            for frame in 0..<60 { _ = unguarded.sample(shake(0), rate: .zero, now: Double(frame)/60) }
-            for frame in 60..<180 {
-                let sign = frame % 2 == 0 ? 1.0 : -1.0
-                if let angle = unguarded.sample(shake(sign), rate: .zero, now: Double(frame)/60) {
-                    maxUnguarded = max(maxUnguarded, abs(angle))
-                }
-            }
-            check(maxUnguarded > 0.08, "Without the guard the same shaking sensors do wander the wheel (test proves the fix matters)")
-            // When the rumble stops the wheel must re-anchor to the real angle.
-            var recovered: Float = 0
-            for frame in 180..<240 {
-                if let angle = guarded.sample(wheelReading(0.2), rate: .zero, now: Double(frame)/60) { recovered = angle }
-            }
-            check(abs(recovered - 0.2) < 0.02, "After rumble stops the wheel re-anchors to the held angle")
-            // While the guard holds the prediction, a genuine held turn after
-            // the rumble must still register fully within a few frames.
-            var turned: Float = 0
-            for frame in 240..<250 {
-                if let angle = guarded.sample(wheelReading(0.2), rate: .zero, now: Double(frame)/60) { turned = angle }
-            }
-            check(abs(turned - 0.2) < 0.02, "Steering input immediately after rumble is not suppressed")
-            // Accelerometer-only source with the guard keeps steady too.
-            var guardedAccel = ControllerWheelState()
-            for frame in 0..<60 { _ = guardedAccel.sample(wheelReading(0), rate: .zero, now: Double(frame)/60) }
-            var maxAccel: Float = 0
-            for frame in 60..<180 {
-                let sign = frame % 2 == 0 ? 1.0 : -1.0
-                if let angle = guardedAccel.sample(wheelReading(0.12 * sign), rate: .zero, now: Double(frame)/60, vibrating: true) {
-                    maxAccel = max(maxAccel, abs(angle))
-                }
-            }
-            check(maxAccel < 0.03, "Rumble guard steadies an accelerometer-only controller the same way")
-        }
-        var slowRaw = ControllerWheelState()
-        _ = slowRaw.sample(wheelReading(0), rate: .zero, now: 0)
-        var rawError: Float = 0
-        for frame in 1...600 {
-            let angle = Double(frame)/60 * Double.pi/180
-            let actual = slowRaw.sample(wheelReading(angle), rate: ControllerMotionVector(x: 0, y: 0, z: -Double.pi/180), now: Double(frame)/60)!
-            rawError = max(rawError, abs(actual - Float(angle)))
-        }
-        check(rawError < 0.001, "Gyro-assisted raw acceleration follows one-degree-per-second turns without deadband")
+
         print("\(checks) controller/model contract checks passed. No hardware or user data touched.")
     }
 }

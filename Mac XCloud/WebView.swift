@@ -31,6 +31,7 @@ struct WebView: NSViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         // Paint every backdrop black so the browser never flashes white while
         // the splash video is fading out or a page hasn't painted yet.
         webView.wantsLayer = true
@@ -48,6 +49,7 @@ struct WebView: NSViewRepresentable {
             coordinator.browser.webView = nil
         }
         nsView.navigationDelegate = nil
+        nsView.uiDelegate = nil
         nsView.configuration.userContentController.removeScriptMessageHandler(forName: "spikeHandler")
         nsView.stopLoading()
     }
@@ -93,7 +95,12 @@ struct WebView: NSViewRepresentable {
             var hasAuthForm = !!document.querySelector('input[type="email"], input[name="loginfmt"], form');
             var hasXboxShell = !!document.querySelector('#PageContent, [class*="HomePage"], main, [role="main"]');
             var bridgeReady = typeof window.BxCBridge === 'object';
-            if (!interactive || !(isAuth ? hasAuthForm : (hasXboxShell && bridgeReady))) return;
+            /* Better xCloud (and its bridge) only runs on xbox.com/play; any
+               other page is ready as soon as it has rendered. */
+            var needsBridge = host === 'www.xbox.com' && /\/play(\/|$)/.test(location.pathname || '');
+            var rendered = !!(document.body && document.body.childElementCount > 0);
+            var ready = isAuth ? hasAuthForm : (needsBridge ? hasXboxShell && bridgeReady : rendered);
+            if (!interactive || !ready) return;
             didSendReady = true;
             send('site-ready', {
               url: location.href,
@@ -202,7 +209,7 @@ extension WebView.Coordinator: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        browser.navigationFailed(error, url: webView.url)
+        browser.navigationFailed(error, url: webView.url, provisional: false)
         browser.note("Navigation failed: \(error.localizedDescription)")
     }
 
@@ -214,6 +221,35 @@ extension WebView.Coordinator: WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         browser.webContentTerminated()
         browser.note("Web content process terminated")
+    }
+}
+
+extension WebView.Coordinator: WKUIDelegate {
+    /// Links that open a new window (Help, Learn more, store pages) open in
+    /// the user's default browser rather than silently doing nothing.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
+    // Pointer lock. WKWebView denies every request unless its UI delegate
+    // grants it through this (private, long-standing) WebKit hook; without it
+    // neither Xbox's native keyboard & mouse nor Better xCloud's virtual
+    // controller can capture the mouse. Granted only to the Xbox page while
+    // the game window has focus.
+    @objc(_webViewDidRequestPointerLock:completionHandler:)
+    func webViewDidRequestPointerLock(_ webView: WKWebView, completionHandler: @escaping (Bool) -> Void) {
+        // Capture state comes from the page's pointerlockchange; granting is
+        // not the same as the lock taking hold.
+        completionHandler(browser.allowsPointerLock(for: webView))
+    }
+
+    @objc(_webViewDidLosePointerLock:)
+    func webViewDidLosePointerLock(_ webView: WKWebView) {
+        browser.pointerLockChanged(false)
     }
 }
 

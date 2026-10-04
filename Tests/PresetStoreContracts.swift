@@ -44,31 +44,28 @@ struct PresetStoreContracts {
             precondition(condition, label); checks += 1; print("PASS: \(label)")
         }
         let store = InputPresetStore(browser: browser, fileManager: files, defaults: defaults)
-        browser.controllerFeatures.updateSettings { $0.adaptiveTriggers.leftPreset = .bowAndArrow }
+        browser.controllerFeatures.updateSettings { $0.adaptiveTriggers.leftPreset = .bow }
         await store.createPreset(named: "Racing")
         check(store.presets.count == 2, "New profile can save with the web bridge unavailable")
         let racing = store.activePresetID
-        check(store.activePreset.controller.adaptiveTriggers.leftPreset == .bowAndArrow, "New profile captures native settings")
+        check(store.activePreset.controller.adaptiveTriggers.leftPreset == .bow, "New profile captures native settings")
         check(store.operationMessage?.contains("not captured") == true, "Offline save discloses retained web selections")
-        browser.controllerFeatures.updateSettings { $0.adaptiveTriggers.leftPreset = .braking }
+        browser.controllerFeatures.updateSettings { $0.adaptiveTriggers.leftPreset = .brake }
         await store.applyPreset(id: InputPreset.defaultID)
-        check(store.presets.first { $0.id == racing }?.controller.adaptiveTriggers.leftPreset == .braking, "Switch flushes outgoing native edit before debounce")
-        check(store.activePreset.controller.adaptiveTriggers.leftPreset == .bowAndArrow, "Switch does not copy outgoing setting into Default")
+        check(store.presets.first { $0.id == racing }?.controller.adaptiveTriggers.leftPreset == .brake, "Switch flushes outgoing native edit before debounce")
+        check(store.activePreset.controller.adaptiveTriggers.leftPreset == .bow, "Switch does not copy outgoing setting into Default")
         store.renamePreset(id: racing, name: "Driving")
-        check(store.presets.first { $0.id == racing }?.controller.adaptiveTriggers.leftPreset == .braking, "Rename preserves inactive profile data")
+        check(store.presets.first { $0.id == racing }?.controller.adaptiveTriggers.leftPreset == .brake, "Rename preserves inactive profile data")
         store.renamePreset(id: InputPreset.defaultID, name: "Wrong")
         await store.deletePreset(id: InputPreset.defaultID)
         check(store.presets.contains { $0.isDefault && $0.name == "Default" }, "Default cannot be renamed or deleted")
         browser.controllerFeatures.updateSettings { $0.haptics.intensityMultiplier = 0.8 }
         await store.updatePreset(id: racing)
         check(store.presets.first { $0.id == racing }?.controller.haptics.intensityMultiplier == 0.8, "Explicit offline update saves native settings")
-        let trigger = store.createTriggerPreset(named: "Pulse", parameters: .default)!
-        check(store.customTriggerPresets.contains { $0.id == trigger }, "Custom trigger library saves separately")
         store.reloadFromDisk()
-        check(store.presets.count == 2 && store.customTriggerPresets.count == 1, "Written checksummed files reload intact")
-        store.deleteTriggerPreset(id: trigger)
+        check(store.presets.count == 2, "Written checksummed files reload intact")
         await store.deletePreset(id: racing)
-        check(store.presets.count == 1 && store.customTriggerPresets.isEmpty, "Custom records can be deleted without affecting Default")
+        check(store.presets.count == 1, "Custom records can be deleted without affecting Default")
         let portable = try store.exportPresetData(id: InputPreset.defaultID)
         let imported = try store.importPresetData(portable)
         check(imported != InputPreset.defaultID && store.presets.count == 2, "Import creates a new profile without overwriting Default")

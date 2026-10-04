@@ -1,27 +1,28 @@
 import SwiftUI
 
-struct AdaptiveTriggerCommands: Commands {
-    let service: ControllerFeatureService
-
-    init(service: ControllerFeatureService) {
-        self.service = service
-    }
+/// The Controller menu: quick motion actions and trigger effects.
+struct ControllerCommands: Commands {
+    let browser: BrowserModel
 
     var body: some Commands {
-        CommandMenu("Left Trigger") { modes(for: .left) }
-        CommandMenu("Right Trigger") { modes(for: .right) }
-    }
-
-    @ViewBuilder
-    private func modes(for side: AdaptiveTriggerSide) -> some View {
-        ForEach(AdaptiveTriggerPreset.recommendedCatalog, id: \.self) { preset in
-            Button(preset.htmlName) { select(preset, side: side) }
+        CommandMenu("Controller") {
+            Button("Recenter Steering") { browser.controllerFeatures.recenterSteering() }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+            Button("Calibrate Gyro") { browser.controllerFeatures.calibrateGyro() }
+            Divider()
+            Menu("Left Trigger Effect") { effects(for: .left) }
+            Menu("Right Trigger Effect") { effects(for: .right) }
+            Divider()
+            Button("Controller Settings…") { browser.openSettingsWindow(route: .pane(.controller)) }
         }
     }
 
-    private func select(_ selection: AdaptiveTriggerPreset, side: AdaptiveTriggerSide) {
-        service.updateSettings {
-            $0.adaptiveTriggers.select(selection, for: side)
+    @ViewBuilder
+    private func effects(for side: AdaptiveTriggerSide) -> some View {
+        ForEach(AdaptiveTriggerPreset.recommendedCatalog, id: \.self) { preset in
+            Button(preset.htmlName) {
+                browser.controllerFeatures.updateSettings { $0.adaptiveTriggers.select(preset, for: side) }
+            }
         }
     }
 }

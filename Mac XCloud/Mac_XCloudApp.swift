@@ -13,8 +13,15 @@ import Sparkle
 /// Sparkle checks for updates automatically on launch and hourly
 /// (SUEnableAutomaticChecks / SUScheduledCheckInterval in Config/Info.plist).
 enum UpdaterService {
+    #if DEBUG
+    /// Development builds never update themselves over the release.
+    private static let startsAutomatically = false
+    #else
+    private static let startsAutomatically = true
+    #endif
+
     static let controller = SPUStandardUpdaterController(
-        startingUpdater: true,
+        startingUpdater: startsAutomatically,
         updaterDelegate: nil,
         userDriverDelegate: nil
     )
@@ -84,7 +91,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct Mac_XCloudApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var browser = BrowserModel()
+    /// Held without observation: the model publishes many times a second,
+    /// and re-rendering the App body rebuilds the menu bar, which closes any
+    /// open submenu. Views observe it through the environment instead.
+    @State private var browser = BrowserModel()
 
     var body: some Scene {
         WindowGroup {
@@ -94,21 +104,43 @@ struct Mac_XCloudApp: App {
                     .frame(width: 1, height: 1)
             }
             .environmentObject(browser)
-            .onAppear { appDelegate.browser = browser }
+            .onAppear {
+                appDelegate.browser = browser
+                // Validation affordance for scripted UI checks: launching with
+                // --xcg-open-settings opens Settings (optionally on the page
+                // named by --xcg-settings-route) without UI scripting.
+                let arguments = ProcessInfo.processInfo.arguments
+                if let index = arguments.firstIndex(of: "--xcg-appearance"), arguments.indices.contains(index + 1) {
+                    NSApp.appearance = NSAppearance(named: arguments[index + 1] == "dark" ? .darkAqua : .aqua)
+                }
+                #if DEBUG
+                if let index = arguments.firstIndex(of: "--xcg-snapshot-settings"), arguments.indices.contains(index + 1) {
+                    SettingsSnapshotter.run(browser: browser, directory: URL(fileURLWithPath: arguments[index + 1]))
+                }
+                #endif
+                if arguments.contains("--xcg-open-settings") {
+                    let route: SettingsRoute
+                    if let index = arguments.firstIndex(of: "--xcg-settings-route"),
+                       arguments.indices.contains(index + 1) {
+                        route = SettingsRoute.launchRoute(named: arguments[index + 1])
+                    } else {
+                        route = .home
+                    }
+                    browser.openSettingsWindow(route: route)
+                }
+            }
         }
         .commands {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView()
-                Divider()
-                Button("Sign Out") { browser.signOut() }
             }
-            CommandMenu("Settings") {
-                Button("Open Settings…") { browser.openSettingsWindow() }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { browser.openSettingsWindow() }
                     .keyboardShortcut(",", modifiers: .command)
                 Divider()
-
+                Button("Sign Out of Xbox…") { browser.confirmSignOut() }
             }
-            AdaptiveTriggerCommands(service: browser.controllerFeatures)
+            ControllerCommands(browser: browser)
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
                     .keyboardShortcut("r", modifiers: .command)
@@ -120,9 +152,7 @@ struct Mac_XCloudApp: App {
                 Button("Go to xbox.com/play") { browser.loadHome() }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                 Divider()
-                Button(browser.showReport ? "Hide Diagnostics" : "Show Diagnostics") {
-                    browser.showReport.toggle()
-                }
+                Button { browser.showReport.toggle() } label: { DiagnosticsMenuLabel(browser: browser) }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 Divider()
                 Button("Toggle Full Screen") { browser.toggleFullscreen() }
@@ -130,4 +160,10 @@ struct Mac_XCloudApp: App {
             }
         }
     }
+}
+
+/// Menu label that follows the diagnostics overlay state on its own.
+private struct DiagnosticsMenuLabel: View {
+    @ObservedObject var browser: BrowserModel
+    var body: some View { Text(browser.showReport ? "Hide Diagnostics" : "Show Diagnostics") }
 }

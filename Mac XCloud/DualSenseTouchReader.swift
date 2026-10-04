@@ -7,6 +7,9 @@ import GameController
     private var manager: IOHIDManager?
     private var lastReport = -Double.infinity
     private var points: [ControllerTouchPoint] = []
+    /// Every decoded report, in order, with its arrival time. Touch aiming
+    /// consumes these directly so no finger sample is lost between ticks.
+    var onReport: (([ControllerTouchPoint], TimeInterval) -> Void)?
     func start() {
         guard manager == nil else { return }
         let hid = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -24,6 +27,7 @@ import GameController
                       let decoded = DualSenseTouchPacket.decode(Array(UnsafeBufferPointer(start: bytes, count: count))) else { return }
                 reader.points = decoded
                 reader.lastReport = ProcessInfo.processInfo.systemUptime
+                reader.onReport?(decoded, reader.lastReport)
             }
         }, Unmanaged.passUnretained(self).toOpaque())
         IOHIDManagerScheduleWithRunLoop(hid, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
@@ -40,7 +44,9 @@ import GameController
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         self.manager = nil; points = []; lastReport = -.infinity
     }
-    var hasReports: Bool { !points.isEmpty }
+    /// Raw reports are flowing right now (they can stop when a second
+    /// controller or a duplicate connection appears).
+    var hasReports: Bool { !points.isEmpty && ProcessInfo.processInfo.systemUptime - lastReport < 0.25 }
     var reportTime: Double { lastReport }
     deinit {
         if let manager {

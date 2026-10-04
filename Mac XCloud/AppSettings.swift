@@ -34,15 +34,104 @@ enum SettingKind {
     case pingTest
 }
 
-/// Settings owns its own same-window history instead of relying on a split-view
-/// selection. Controller tools are first-class destinations in the same history.
+/// The Settings sidebar destinations.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case general, streaming, overlay
+    case controller, motion, touchpad, keyboardMouse, shortcuts, profiles
+    case site, advanced, about
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: return "General"
+        case .streaming: return "Streaming"
+        case .overlay: return "Performance Overlay"
+        case .controller: return "Controller"
+        case .motion: return "Motion Controls"
+        case .touchpad: return "Touchpad"
+        case .keyboardMouse: return "Keyboard & Mouse"
+        case .shortcuts: return "Shortcuts & Macros"
+        case .profiles: return "Game Profiles"
+        case .site: return "Xbox Website"
+        case .advanced: return "Advanced"
+        case .about: return "About"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape.fill"
+        case .streaming: return "play.tv.fill"
+        case .overlay: return "chart.bar.xaxis"
+        case .controller: return "gamecontroller.fill"
+        case .motion: return "gyroscope"
+        case .touchpad: return "hand.point.up.left.fill"
+        case .keyboardMouse: return "keyboard.fill"
+        case .shortcuts: return "command"
+        case .profiles: return "square.stack.3d.up.fill"
+        case .site: return "globe"
+        case .advanced: return "wrench.and.screwdriver.fill"
+        case .about: return "info.circle.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .general: return .gray
+        case .streaming: return .blue
+        case .overlay: return .green
+        case .controller: return .indigo
+        case .motion: return .orange
+        case .touchpad: return .teal
+        case .keyboardMouse: return .purple
+        case .shortcuts: return .pink
+        case .profiles: return .cyan
+        case .site: return .blue
+        case .advanced: return .gray
+        case .about: return .gray
+        }
+    }
+
+    /// Extra words the sidebar search matches for this page.
+    var keywords: String {
+        switch self {
+        case .general: return "region server latency ping language updates"
+        case .streaming: return "resolution quality bitrate video picture clarity sharpness fps audio volume remote play"
+        case .overlay: return "stats hud ping fps bitrate"
+        case .controller: return "dualsense battery light bar led triggers adaptive haptics rumble vibration calibration test"
+        case .motion: return "gyro aiming steering wheel racing tilt"
+        case .touchpad: return "trackpad camera gestures swipe"
+        case .keyboardMouse: return "mkb mouse keyboard pointer emulation virtual controller"
+        case .shortcuts: return "macro rapid fire chord remap"
+        case .profiles: return "preset per game import export"
+        case .site: return "theme oled layout animations splash sections"
+        case .advanced: return "privacy tracking polling co-op diagnostics reset backup"
+        case .about: return "version license support ko-fi"
+        }
+    }
+
+    static let groups: [[SettingsPane]] = [
+        [.general, .streaming, .overlay],
+        [.controller, .motion, .touchpad, .keyboardMouse, .shortcuts, .profiles],
+        [.site, .advanced, .about],
+    ]
+
+    /// Pages whose live previews need the controller sampled quickly.
+    var showsLiveInput: Bool { self == .controller || self == .motion || self == .touchpad }
+}
+
+/// Settings owns its own same-window history; profile editors open inside it.
 enum SettingsRoute: Equatable {
-    case home
-    case category(String)
-    case controllerSection(ControllerToolSection)
-    // The virtual-controller / keyboard-shortcut editors open inside the
-    // settings panel's own navigation instead of a separate window.
+    case pane(SettingsPane)
     case profileEditor(ProfileKind)
+
+    nonisolated static let home = SettingsRoute.pane(.general)
+
+    var pane: SettingsPane? {
+        if case .pane(let pane) = self { return pane }
+        return nil
+    }
 }
 
 struct SettingDef: Identifiable {
@@ -328,10 +417,22 @@ struct SettingsCategory: Identifiable {
                    scope: .stream, kind: .ledColor),
         SettingDef(id: "controller.pollingRate", label: "Polling rate",
                    note: "How often input is sent to the cloud. Higher = lower latency, more CPU.",
-                   scope: .stream, kind: .range(min: 4, max: 60, step: 4, defaultValue: 4, format: { "\((1000.0 / $0).rounded()) Hz" })),
+                   scope: .stream, kind: .numberOption(
+                        values: [4, 8, 16],
+                        labels: ["250 Hz (lowest latency)", "125 Hz", "60 Hz"],
+                        defaultValue: 4)),
         SettingDef(id: "localCoOp.enabled", label: "Enable local co-op support",
                    note: "Two controllers as two players in the same stream. Only works with some games.",
                    scope: .stream, kind: .toggle(defaultValue: false)),
+        SettingDef(id: "mkb.enabled", label: "Keyboard & mouse emulation",
+                   note: "Plays keyboard/mouse through Better xCloud's virtual controller in games without native MKB. Configure paths in Controller Tools → Keyboard & Mouse.",
+                   scope: .global, kind: .toggle(defaultValue: false)),
+        SettingDef(id: "nativeMkb.mode", label: "Native keyboard/mouse",
+                   note: "For games that support MKB natively: Default lets the game decide, On forces the native path, Off routes everything through emulation.",
+                   scope: .global, kind: .option(
+                        values: ["default", "on", "off"],
+                        labels: ["Default", "On (force native)", "Off (force emulated)"],
+                        defaultValue: "default")),
     ]
 }
 
@@ -404,7 +505,7 @@ extension SettingsModel {
                 let defaults = UserDefaults.standard
                 for key in ["nativeBetterXcloudGlobal", "nativeBetterXcloudStream",
                             "nativeRendererRecoveryVersion", "cachedServerRegions",
-                            "ledColorIndex", "ledCustomR", "ledCustomG", "ledCustomB",
+                            "ledColorIndex", "ledCustomR", "ledCustomG", "ledCustomB", "ledUsesCustom",
                             "app.clarityPipeline", "inputPresets.defaultWebMigrated.v2",
                             "nativeController.settings.v1", "nativeController.settingsVersion",
                             "controller.globalRumbleGain", "controller.streamCalibration"] {
@@ -644,21 +745,39 @@ extension SettingsModel {
 
 @MainActor
 final class SettingsModel: ObservableObject {
-    enum Pane { case sidebar, rows }
-
-    @Published var selectedCategoryId = SettingsCategory.all[0].id
     @Published var route: SettingsRoute = .home
     @Published private(set) var backStack: [SettingsRoute] = []
     @Published private(set) var forwardStack: [SettingsRoute] = []
-    @Published var pane: Pane = .sidebar
-    @Published var sidebarFocus = 0
-    @Published var rowFocus = 0
-    @Published var homeFocus = 0
     @Published var ledColorIndex: Int {
         didSet {
             UserDefaults.standard.set(ledColorIndex, forKey: "ledColorIndex")
-            browser?.controllerInput.setLED(LEDColor.all[ledColorIndex])
+            ledUsesCustomColor = false
+            applyLightBar()
         }
+    }
+    /// The light bar shows the custom color instead of a preset.
+    @Published var ledUsesCustomColor = UserDefaults.standard.bool(forKey: "ledUsesCustom") {
+        didSet { UserDefaults.standard.set(ledUsesCustomColor, forKey: "ledUsesCustom") }
+    }
+
+    /// Sends the chosen light-bar color to the controller (on connect, after
+    /// the "game ready" flash, or after a change).
+    func applyLightBar() {
+        // Until a color is chosen, the controller keeps its own light.
+        guard ledUsesCustomColor || UserDefaults.standard.object(forKey: "ledColorIndex") != nil else { return }
+        if ledUsesCustomColor {
+            let c = customLEDComponents
+            browser?.controllerInput.setLED(r: c.r, g: c.g, b: c.b, force: true)
+        } else if LEDColor.all.indices.contains(ledColorIndex) {
+            let preset = LEDColor.all[ledColorIndex]
+            browser?.controllerInput.setLED(r: preset.red, g: preset.green, b: preset.blue, force: true)
+        }
+    }
+
+    private var customLEDComponents: (r: Double, g: Double, b: Double) {
+        (UserDefaults.standard.object(forKey: "ledCustomR") as? Double ?? 0.30,
+         UserDefaults.standard.object(forKey: "ledCustomG") as? Double ?? 0.85,
+         UserDefaults.standard.object(forKey: "ledCustomB") as? Double ?? 0.35)
     }
     @Published private(set) var bridgeAvailable = false
     @Published private(set) var regions: [(value: String, label: String)] = [("default", "Auto (closest server)")]
@@ -892,20 +1011,17 @@ final class SettingsModel: ObservableObject {
     /// App-local: a custom LED color chosen with the color picker.
     var customLEDColor: Color {
         get {
-            let r = UserDefaults.standard.object(forKey: "ledCustomR") as? Double ?? 0.30
-            let g = UserDefaults.standard.object(forKey: "ledCustomG") as? Double ?? 0.85
-            let b = UserDefaults.standard.object(forKey: "ledCustomB") as? Double ?? 0.35
-            return Color(red: r, green: g, blue: b)
+            let c = customLEDComponents
+            return Color(red: c.r, green: c.g, blue: c.b)
         }
         set {
             let srgb = NSColor(newValue).usingColorSpace(.sRGB)
-            let r = Double(srgb?.redComponent ?? 0)
-            let g = Double(srgb?.greenComponent ?? 0)
-            let b = Double(srgb?.blueComponent ?? 0)
-            UserDefaults.standard.set(r, forKey: "ledCustomR")
-            UserDefaults.standard.set(g, forKey: "ledCustomG")
-            UserDefaults.standard.set(b, forKey: "ledCustomB")
-            browser?.controllerInput.setLED(r: r, g: g, b: b)
+            UserDefaults.standard.set(Double(srgb?.redComponent ?? 0), forKey: "ledCustomR")
+            UserDefaults.standard.set(Double(srgb?.greenComponent ?? 0), forKey: "ledCustomG")
+            UserDefaults.standard.set(Double(srgb?.blueComponent ?? 0), forKey: "ledCustomB")
+            ledUsesCustomColor = true
+            applyLightBar()
+            objectWillChange.send()
         }
     }
 
@@ -921,10 +1037,13 @@ final class SettingsModel: ObservableObject {
         self.browser = browser
         let savedLED = UserDefaults.standard.object(forKey: "ledColorIndex") as? Int ?? 1
         ledColorIndex = min(max(savedLED, 0), max(0, LEDColor.all.count - 1))
-    }
-
-    var selectedCategory: SettingsCategory {
-        SettingsCategory.all.first { $0.id == selectedCategoryId } ?? SettingsCategory.all[0]
+        // Earlier builds kept the custom color well separate from the preset
+        // menu; someone who picked a custom color was using it.
+        if UserDefaults.standard.object(forKey: "ledUsesCustom") == nil,
+           UserDefaults.standard.object(forKey: "ledCustomR") != nil {
+            ledUsesCustomColor = true
+            UserDefaults.standard.set(true, forKey: "ledUsesCustom")
+        }
     }
 
     var canGoBackInSettings: Bool { !backStack.isEmpty }
@@ -956,40 +1075,22 @@ final class SettingsModel: ObservableObject {
         navigate(to: .home)
     }
 
-    func openControllerTools(_ section: ControllerToolSection = .overview) {
-        navigate(to: .controllerSection(section))
-    }
-
     private func applyRoute(_ destination: SettingsRoute) {
         route = destination
-        rowFocus = 0
-        searchQuery = ""
-        switch destination {
-        case .home:
-            pane = .sidebar
-            homeFocus = min(homeFocus, max(0, homeDestinationCount - 1))
-        case .category(let id):
-            selectedCategoryId = SettingsCategory.all.first(where: { $0.id == id })?.id ?? SettingsCategory.all[0].id
-            sidebarFocus = SettingsCategory.all.firstIndex { $0.id == selectedCategoryId } ?? 0
-            pane = .rows
-        case .controllerSection(let section):
-            homeFocus = SettingsCategory.all.count + (ControllerToolSection.allCases.firstIndex(of: section) ?? 0)
-            pane = .sidebar
-        case .profileEditor:
-            // The inline editor keeps the settings pane focused on itself.
-            pane = .rows
-        }
         browser?.settingsRouteDidChange()
         objectWillChange.send()
     }
 
-    func selectCategory(_ id: String) {
-        navigate(to: .category(id))
+    /// The Better xCloud setting with this id, from the catalog.
+    func def(_ id: String) -> SettingDef? {
+        Self.catalog[id]
     }
 
-    private var homeDestinationCount: Int {
-        SettingsCategory.all.count + ControllerToolSection.allCases.count
-    }
+    private static let catalog: [String: SettingDef] = {
+        var all: [String: SettingDef] = [:]
+        for row in SettingsCategory.all.flatMap(\.rows) + SettingsCategory.controllerRows { all[row.id] = row }
+        return all
+    }()
 
     // MARK: - Load
 
@@ -1066,6 +1167,27 @@ final class SettingsModel: ObservableObject {
                     self.testRegions(automaticallySelectBest: true)
                 }
             }
+        }
+    }
+
+    var regionCount: Int { regions.count }
+
+    func globalValue(_ key: String) -> Any? { globalValues[key] }
+
+    /// Records a global value the app changed through another path.
+    func noteGlobal(_ key: String, value: Any) {
+        globalValues[key] = value
+        objectWillChange.send()
+    }
+    func streamValue(_ key: String) -> Any? { streamValues[key] }
+
+    /// Index of a setting's default option, shown while it is untouched.
+    func defaultOptionIndex(_ def: SettingDef) -> Int {
+        switch def.kind {
+        case .option(let values, _, let fallback): return values.firstIndex(of: fallback) ?? 0
+        case .numberOption(let values, _, let fallback): return values.firstIndex(of: fallback) ?? 0
+        case .serverRegion: return regionIndex
+        default: return 0
         }
     }
 
@@ -1268,106 +1390,7 @@ extension SettingDef {
     }
 }
 
-// MARK: - Controller navigation
-
 extension SettingsModel {
-    func moveFocus(_ direction: Int) {
-        switch route {
-        case .home:
-            homeFocus = wrap(homeFocus + direction, homeDestinationCount)
-        case .category:
-            let count = rows.count
-            guard count > 0 else { return }
-            rowFocus = wrap(rowFocus + direction, count)
-        case .controllerSection, .profileEditor:
-            // Controller/editor controls retain native focus. Do not route d-pad
-            // input into a hidden settings row.
-            return
-        }
-        objectWillChange.send()
-    }
-
-    func adjustFocused(_ delta: Int) {
-        switch route {
-        case .home:
-            moveFocus(delta)
-        case .category:
-            guard rows.indices.contains(rowFocus) else { return }
-            adjust(rows[rowFocus], delta: delta)
-        case .controllerSection, .profileEditor:
-            // Let native focused controls handle keyboard/controller activation;
-            // never mutate rows from a category that is not visible.
-            return
-        }
-    }
-
-    func activateFocused() {
-        switch route {
-        case .home:
-            guard homeDestinationCount > 0 else { return }
-            if homeFocus < SettingsCategory.all.count {
-                navigate(to: .category(SettingsCategory.all[homeFocus].id))
-            } else {
-                let sectionIndex = homeFocus - SettingsCategory.all.count
-                guard ControllerToolSection.allCases.indices.contains(sectionIndex) else { return }
-                navigate(to: .controllerSection(ControllerToolSection.allCases[sectionIndex]))
-            }
-        case .category:
-            guard rows.indices.contains(rowFocus) else { return }
-            let def = rows[rowFocus]
-            if case .toggle = def.kind {
-                toggle(def)
-            } else {
-                adjust(def, delta: 1)
-            }
-        case .controllerSection, .profileEditor:
-            return
-        }
-    }
-
-    func handleCancel() {
-        if route == .home {
-            browser?.closeSettingsWindow()
-        } else {
-            navigateBack()
-        }
-    }
-
-    func switchDestination(_ delta: Int) {
-        switch route {
-        case .home:
-            moveFocus(delta)
-        case .category(let id):
-            guard let current = SettingsCategory.all.firstIndex(where: { $0.id == id }) else { return }
-            let destinations = SettingsCategory.all.count + ControllerToolSection.allCases.count
-            let next = wrap(current + delta, destinations)
-            if next < SettingsCategory.all.count {
-                navigate(to: .category(SettingsCategory.all[next].id))
-            } else {
-                navigate(to: .controllerSection(ControllerToolSection.allCases[next - SettingsCategory.all.count]))
-            }
-        case .controllerSection(let section):
-            let categoryCount = SettingsCategory.all.count
-            guard let sectionIndex = ControllerToolSection.allCases.firstIndex(of: section) else { return }
-            let destinations = categoryCount + ControllerToolSection.allCases.count
-            let next = wrap(categoryCount + sectionIndex + delta, destinations)
-            if next < categoryCount {
-                navigate(to: .category(SettingsCategory.all[next].id))
-            } else {
-                navigate(to: .controllerSection(ControllerToolSection.allCases[next - categoryCount]))
-            }
-        case .profileEditor:
-            // Keyboard input belongs to the inline editor; nothing to switch.
-            return
-        }
-    }
-
-    var rows: [SettingDef] {
-        guard case .category(let id) = route,
-              let category = SettingsCategory.all.first(where: { $0.id == id }) else { return [] }
-        return category.rows
-    }
-
     // MARK: - Settings search
 
     var isSearching: Bool {

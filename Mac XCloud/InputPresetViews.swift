@@ -1,125 +1,125 @@
 import SwiftUI
 
+/// Saved profiles: which one is in use, switching, and per-profile actions.
 struct InputPresetManagerView: View {
     @ObservedObject var store: InputPresetStore
-    @State private var newName = ""
     @State private var renameID: UUID?
     @State private var renameText = ""
+    @State private var creating = false
+    @State private var newName = ""
+    @State private var deleting: InputPreset?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Profiles save controller, motion, effects and controller mappings. Game recall also keeps live picture and audio adjustments.")
-                .foregroundStyle(.secondary)
-
-            storageCard
-
-            SettingsGroup("Game Profiles & Sharing") {
-                SettingsRow("Remember settings per game", note: "Saves adaptive triggers, gyro mode and stick, steering range and smoothing, touchpad, flick shift, mappings, macros and haptics for each game. Uses the game ID, with its website title as a fallback. Hardware calibration stays local.") {
-                    Toggle("Remember settings per game", isOn: $store.autoGameProfiles).labelsHidden().toggleStyle(.switch)
-                }
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(footer: "When a game starts for the first time, it gets its own copy of your current settings. Changes you make while playing are saved to that game.") {
+                SettingsToggleRow(label: "Remember settings for each game", isOn: $store.autoGameProfiles)
                 Divider()
-                SettingsRow("Active game profile", note: store.currentGameID.isEmpty ? "A game profile will apply when a stream starts." : "\(store.currentGameTitle.isEmpty ? store.currentGameID : store.currentGameTitle) is using \(store.activePreset.name).") {
-                    Image(systemName: store.currentGameID.isEmpty ? "gamecontroller" : "checkmark.circle.fill")
-                        .foregroundStyle(store.currentGameID.isEmpty ? Color.secondary : Color.green)
+                SettingsRow("Now using", note: store.currentGameID.isEmpty ? nil
+                            : "For \(store.currentGameTitle.isEmpty ? "this game" : store.currentGameTitle)") {
+                    Text(store.activePreset.name).foregroundStyle(.secondary)
                 }
-                Divider()
-                HStack {
-                    Button("Import Profile…", action: store.importPresetFile)
-                    Spacer()
-                    Button("Export Saved Profile…", action: store.exportPresetFile)
-                }.settingsRow()
             }
-            SettingsGroup("Save & Create Profiles") {
-                SettingsRow("Active profile", note: store.activePreset.name) {
-                    Button("Save Current Profile") { Task { await store.updatePreset(id: store.activePresetID) } }
-                        .disabled(store.isBusy)
-                }
-                Divider()
-                SettingsRow("Default preset", note: "Default can be updated but cannot be renamed or deleted.") {
-                    Button("Save Current as Default") { Task { await store.saveCurrentAsDefault() } }
-                        .disabled(store.isBusy)
-                }
-                Divider()
-                SettingsRow("New preset name") {
-                    TextField("Preset name", text: $newName)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 180)
-                }
-                HStack {
-                    Spacer()
-                    Button("Create New Profile") {
-                        let name = newName
-                        newName = ""
-                        Task { await store.createPreset(named: name) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(store.isBusy)
-                }.settingsRow()
-            }
-
-            SettingsGroup("Input Presets") {
+            SettingsGroup("Profiles") {
                 ForEach(Array(store.presets.enumerated()), id: \.element.id) { index, preset in
                     if index > 0 { Divider() }
-                    HStack(spacing: 10) {
-                        SettingsSymbol(name: preset.isDefault ? "lock.fill" : "slider.horizontal.3",
-                                       color: preset.isDefault ? .gray : .purple)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(preset.name).fontWeight(store.activePresetID == preset.id ? .semibold : .regular)
-                            Text(preset.isDefault ? "Protected name · update with Save Current as Default" : "Native controller + Better xCloud input profiles")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
-                        Spacer()
-                        if store.activePresetID == preset.id {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                .accessibilityLabel("Active preset")
-                        }
-                        Button("Select") { Task { await store.applyPreset(id: preset.id) } }
-                            .disabled(store.activePresetID == preset.id || store.isBusy)
-                        if !preset.isDefault {
-                            Menu {
-                                Button("Update from Current Settings") { Task { await store.updatePreset(id: preset.id) } }
-                                Button("Rename…") { renameID = preset.id; renameText = preset.name }
-                                Button("Duplicate") { store.duplicatePreset(id: preset.id) }
-                                Divider()
-                                Button("Delete", role: .destructive) { Task { await store.deletePreset(id: preset.id) } }
-                            } label: { Image(systemName: "ellipsis.circle") }
-                                .menuStyle(.borderlessButton)
-                                .fixedSize()
-                                .accessibilityLabel("Actions for \(preset.name)")
-                        }
-                    }
-                    .settingsRow()
+                    row(preset)
                 }
+                Divider()
+                HStack(spacing: 8) {
+                    Button("Import…", action: store.importPresetFile)
+                    Spacer()
+                    Button("New Profile…") { newName = ""; creating = true }
+                        .disabled(store.isBusy)
+                }
+                .controlSize(.small)
+                .settingsRow()
             }
-
             if let message = store.operationMessage {
-                Text(message).font(.caption).foregroundStyle(.secondary)
+                Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
-        .alert("Rename Preset", isPresented: Binding(get: { renameID != nil }, set: { if !$0 { renameID = nil } })) {
+        .alert("Rename Profile", isPresented: Binding(get: { renameID != nil }, set: { if !$0 { renameID = nil } })) {
             TextField("Name", text: $renameText)
             Button("Cancel", role: .cancel) { renameID = nil }
-            Button("Save") {
+            Button("Rename") {
                 guard let id = renameID else { return }
                 renameID = nil
                 store.renamePreset(id: id, name: renameText)
             }
         }
+        .alert("New Profile", isPresented: $creating) {
+            TextField("Name", text: $newName)
+            Button("Cancel", role: .cancel) {}
+            Button("Create") { let name = newName; Task { await store.createPreset(named: name) } }
+        } message: {
+            Text("The new profile starts from your current settings.")
+        }
+        .alert("Delete “\(deleting?.name ?? "")”?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("Cancel", role: .cancel) { deleting = nil }
+            Button("Delete", role: .destructive) {
+                guard let id = deleting?.id else { return }
+                deleting = nil
+                Task { await store.deletePreset(id: id) }
+            }
+        } message: {
+            Text("Games that used this profile return to Default.")
+        }
     }
 
-    private var storageCard: some View {
-        SettingsGroup("Local Storage") {
-            SettingsRow("Stored on this Mac", note: store.storageStatus.detail) {
-                SettingsSymbol(name: "externaldrive.fill", color: .gray)
+    private func row(_ preset: InputPreset) -> some View {
+        let active = store.activePresetID == preset.id
+        return HStack(spacing: 10) {
+            Image(systemName: active ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(active ? Color.accentColor : Color.secondary.opacity(0.5))
+                .font(.system(size: 15))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(preset.name).lineLimit(1)
+                Text(preset.isDefault ? "Used when a game has no profile" : "Updated \(preset.updatedAt.formatted(.relative(presentation: .named)))")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            Divider()
-            HStack {
-                Spacer()
-                Button("Reload", action: store.reloadFromDisk)
-                Button("Show Local Folder", action: store.revealStorage)
+            Spacer()
+            if !active {
+                Button("Use") { Task { await store.applyPreset(id: preset.id) } }
+                    .controlSize(.small)
+                    .disabled(store.isBusy)
+            }
+            Menu {
+                Button("Save Current Settings to Profile") { Task { await store.updatePreset(id: preset.id) } }
+                if !preset.isDefault {
+                    Button("Rename…") { renameID = preset.id; renameText = preset.name }
+                }
+                Button("Duplicate") { store.duplicatePreset(id: preset.id) }
+                Button("Export…") { store.exportPresetFile(id: preset.id) }
+                if !preset.isDefault {
+                    Divider()
+                    Button("Delete…", role: .destructive) { deleting = preset }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Actions for \(preset.name)")
+        }
+        .settingsRow()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(preset.name)\(active ? ", in use" : "")")
+    }
+}
+
+/// Where profiles live on disk.
+struct ProfileFilesView: View {
+    @ObservedObject var store: InputPresetStore
+
+    var body: some View {
+        SettingsGroup(footer: "Profiles are plain JSON files you can back up or move to another Mac.") {
+            SettingsRow("Profile folder", note: store.storageStatus.detail) {
+                Button("Show in Finder", action: store.revealStorage)
+                    .controlSize(.small)
                     .disabled(store.storageStatus.directoryURL == nil)
-            }.settingsRow()
+            }
         }
     }
 }

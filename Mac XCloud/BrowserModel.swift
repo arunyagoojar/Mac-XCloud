@@ -224,7 +224,8 @@ final class BrowserModel: ObservableObject {
         do {
             let report: [String: Any] = ["game": currentGameTitle, "web": controllerWebDiagnostics,
                 "nativeMotion": controllerFeatures.gyroAvailable, "rumbleSamples": rumbleSamples,
-                "steeringSensor": controllerFeatures.steeringPreview, "motionStatus": controllerFeatures.motionStatus,
+                "steeringAngle": controllerFeatures.liveSteeringAngle, "motionStatus": controllerFeatures.motionStatus,
+                "motionReportRateHz": controllerFeatures.motionReportRateHz,
                 "inputBridgeCalls": inputBridgeCalls, "inputBridgeAverageMs": inputBridgeTotalMs / Double(max(inputBridgeCalls, 1)),
                 "inputBridgeMaxMs": inputBridgeMaxMs]
             try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
@@ -236,6 +237,181 @@ final class BrowserModel: ObservableObject {
     private var inputBridgeTotalMs = 0.0
     private var inputBridgeMaxMs = 0.0
     weak var webView: WKWebView?
+    /// True while the page holds pointer lock (keyboard & mouse play).
+    @Published private(set) var pointerCaptured = false
+    /// True while Better xCloud's keyboard-driven virtual controller is live.
+    @Published private(set) var virtualControllerActive = false
+    @Published private(set) var isFullscreen = false
+    private var escapeHoldTask: Task<Void, Never>?
+    private var escapeForwarded = false
+
+    /// Delivers one virtual-controller state through the shared
+    /// newest-sample-wins bridge path (used by motion engines and the
+    /// keyboard/mouse fallback alike; stale samples never queue).
+    private func submitStreamInput(_ values: [String: Double]) {
+        guard controllerInputOwner == .stream, Date() >= aimTestUntil else { return }
+        pendingStreamInput = values
+        guard !streamInputInFlight else { return }
+        streamInputInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.streamInputInFlight = false }
+            while let values = self.pendingStreamInput {
+                self.pendingStreamInput = nil
+                guard self.controllerInputOwner == .stream, Date() >= self.aimTestUntil else { break }
+                let deliveredAt = ProcessInfo.processInfo.systemUptime
+                defer {
+                    let elapsed = (ProcessInfo.processInfo.systemUptime - deliveredAt) * 1000
+                    self.inputBridgeCalls += 1; self.inputBridgeTotalMs += elapsed
+                    self.inputBridgeMaxMs = max(self.inputBridgeMaxMs, elapsed)
+                }
+                do {
+                    let reply = try await self.callAsyncJS("const b = window.BxCBridge; return {ready: Boolean(b?.updateNativeInput(values))};", arguments: ["values": values]) as? [String: Any] ?? [:]
+                    let ready = reply["ready"] as? Bool ?? false
+                    let status = ready ? "Browser input updated" : "Browser aiming connection unavailable — reload stream"
+                    if self.controllerFeatures.aimDeliveryStatus != status { self.controllerFeatures.aimDeliveryStatus = status }
+                } catch {
+                    let status = "Browser input failed: \(error.localizedDescription)"
+                    if self.controllerFeatures.aimDeliveryStatus != status { self.controllerFeatures.aimDeliveryStatus = status }
+                }
+            }
+        }
+    }
+
+    func runMkbDiagnostics() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await self.callAsyncJS("""
+                    const b = window.BxCBridge;
+                    if (!b || !b.mkbDiagnostics) return JSON.stringify({bridge: false});
+                    return JSON.stringify(b.mkbDiagnostics(), null, 2);
+                    """) as? String ?? "No browser response"
+                self.controllerWebDiagnostics = "Keyboard & mouse diagnostics:\n" + result
+            } catch {
+                self.controllerWebDiagnostics = "MKB diagnostics failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Whether the keyboard-driven virtual controller is available ("ready"),
+    /// in use ("active") or not part of the current game ("off").
+    @Published private(set) var keyboardEmulationState = "off"
+
+    /// Turns the virtual controller on or off immediately (no reload).
+    func setEmulatedKeyboardMouse(_ on: Bool) {
+        NativeSettingsMirror.save(on, for: "mkb.enabled", scope: .global)
+        settingsModel.noteGlobal("mkb.enabled", value: on)
+        evaluateJS("try { window.BxCBridge && BxCBridge.setEmulatedMkb(\(on)); } catch (e) {}")
+    }
+
+    /// Applies a keyboard layout choice to the running game.
+    func refreshKeyboardLayout() {
+        evaluateJS("try { window.BxCBridge && BxCBridge.refreshMkbLayout(); } catch (e) {}")
+    }
+
+    /// Starts the keyboard-driven virtual controller in the current stream.
+    func activateEmulatedKeyboardMouse() {
+        evaluateJS("try { window.BxCBridge && BxCBridge.activateEmulatedMkb(); } catch (e) {}")
+    }
+
+    func setMouseSensitivity(_ value: Double) {
+        KeyboardMouseSettings.mouseSensitivity = value
+        evaluateJS("try { window.BxCBridge && BxCBridge.setMouseSensitivity(\(KeyboardMouseSettings.mouseSensitivity)); } catch (e) {}")
+    }
+
+    // MARK: - Pointer capture and Escape
+
+    /// Called by the web view's pointer-lock delegate and the page.
+    func pointerLockChanged(_ locked: Bool) {
+        guard pointerCaptured != locked else { return }
+        pointerCaptured = locked
+        if !locked {
+            escapeHoldTask?.cancel(); escapeHoldTask = nil
+            if escapeForwarded {
+                escapeForwarded = false
+                evaluateJS("try { window.BxCBridge && BxCBridge.forwardEscape(false); } catch (e) {}")
+            }
+        }
+    }
+
+    /// May the page capture the mouse right now?
+    func allowsPointerLock(for webView: WKWebView) -> Bool {
+        controllerInputOwner == .stream && webView.window?.isKeyWindow == true
+            && WebView.Coordinator.isTrustedBridgeHost(webView.url?.host)
+    }
+
+    /// Forgets keyboard & mouse state belonging to a page that is going away.
+    private func resetKeyboardMouseState() {
+        escapeHoldTask?.cancel(); escapeHoldTask = nil
+        escapeForwarded = false
+        if pointerCaptured { pointerCaptured = false }
+        if virtualControllerActive { virtualControllerActive = false }
+        if keyboardEmulationState != "off" { keyboardEmulationState = "off" }
+        controllerFeatures.setMKBStreamActive(false, emulated: false)
+    }
+
+    /// User scripts are built once per web view; rebuild them before a reload
+    /// so the page starts from the current settings (keyboard & mouse
+    /// switches, mouse sensitivity, mirrored Better xCloud values).
+    private func refreshUserScripts() {
+        guard let controller = webView?.configuration.userContentController else { return }
+        controller.removeAllUserScripts()
+        BetterXCloud.userScripts().forEach(controller.addUserScript)
+        controller.addUserScript(WKUserScript(source: WebView.Coordinator.capabilitiesScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+    }
+
+    /// Escape in the main window. While the mouse is captured WebKit would
+    /// release it on any Escape press; instead a quick press is forwarded to
+    /// the game and holding it releases the mouse. Otherwise Escape leaves
+    /// full screen, then reaches the page as usual.
+    private func routeEscape(_ event: NSEvent) -> NSEvent? {
+        if pointerCaptured || escapeForwarded {
+            if event.type == .keyDown {
+                guard !event.isARepeat else { return nil }
+                escapeForwarded = true
+                evaluateJS("try { window.BxCBridge && BxCBridge.forwardEscape(true); } catch (e) {}")
+                escapeHoldTask?.cancel()
+                escapeHoldTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(KeyboardMouseSettings.escapeHoldToRelease * 1_000_000_000))
+                    guard let self, !Task.isCancelled, self.escapeForwarded else { return }
+                    self.evaluateJS("try { window.BxCBridge && BxCBridge.releasePointer(); } catch (e) {}")
+                }
+            } else {
+                escapeHoldTask?.cancel(); escapeHoldTask = nil
+                if escapeForwarded {
+                    escapeForwarded = false
+                    evaluateJS("try { window.BxCBridge && BxCBridge.forwardEscape(false); } catch (e) {}")
+                }
+            }
+            return nil
+        }
+        if event.type == .keyDown, !event.isARepeat, let window = mainWindow, window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+            return nil
+        }
+        return event
+    }
+
+    // MARK: - Full screen
+
+    /// The page asked for (or left) element fullscreen.
+    private func setNativeFullscreen(_ enter: Bool) {
+        guard let window = mainWindow else { return }
+        if window.styleMask.contains(.fullScreen) != enter { window.toggleFullScreen(nil) }
+    }
+
+    private func nativeFullscreenChanged(_ window: NSWindow) {
+        guard window === mainWindow else { return }
+        let active = window.styleMask.contains(.fullScreen)
+        if isFullscreen != active { isFullscreen = active }
+        // Leaving full screen from the window keeps the page "full screen"
+        // while the mouse is captured (keyboard & mouse keeps working in a
+        // window); otherwise the page follows, so its own button stays in sync.
+        if !active, !pointerCaptured {
+            evaluateJS("try { window.__xcgExitPageFullscreen && window.__xcgExitPageFullscreen(); } catch (e) {}")
+        }
+    }
 
     init() {
         controllerInput.onToggleOverlay = { [weak self] in
@@ -249,7 +425,10 @@ final class BrowserModel: ObservableObject {
         // Auto-hide the mouse cursor while a controller is connected.
         controllerInput.onPresenceChange = { [weak self] connected in
             self?.evaluateJS("window.postMessage({ type: 'xcg-cursor-hide', enabled: \(connected) }, '*')")
+            // A controller wakes up with its own light; show the chosen color.
+            if connected { self?.settingsModel.applyLightBar() }
         }
+        controllerFeatures.onLightRestore = { [weak self] in self?.settingsModel.applyLightBar() }
         controllerInput.onBatteryLow = { [weak self] percent in
             self?.notifyBatteryLow(percent: percent)
         }
@@ -283,34 +462,10 @@ final class BrowserModel: ObservableObject {
         }
         controllerFeatures.onStreamInput = { [weak self] values in
             guard let self, self.controllerInputOwner == .stream, Date() >= self.aimTestUntil else { return }
-            self.pendingStreamInput = values
-            guard !self.streamInputInFlight else { return }
-            self.streamInputInFlight = true
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                defer { self.streamInputInFlight = false }
-                while let values = self.pendingStreamInput {
-                    self.pendingStreamInput = nil
-                    guard self.controllerInputOwner == .stream, Date() >= self.aimTestUntil else { break }
-                    let deliveredAt = ProcessInfo.processInfo.systemUptime
-                    defer {
-                        let elapsed = (ProcessInfo.processInfo.systemUptime - deliveredAt) * 1000
-                        self.inputBridgeCalls += 1; self.inputBridgeTotalMs += elapsed
-                        self.inputBridgeMaxMs = max(self.inputBridgeMaxMs, elapsed)
-                    }
-                    do {
-                        let reply = try await self.callAsyncJS("const b = window.BxCBridge; return {ready: Boolean(b?.updateNativeInput(values))};", arguments: ["values": values]) as? [String: Any] ?? [:]
-                        let ready = reply["ready"] as? Bool ?? false
-                        let status = ready ? "Browser input updated" : "Browser aiming connection unavailable — reload stream"
-                        if self.controllerFeatures.aimDeliveryStatus != status { self.controllerFeatures.aimDeliveryStatus = status }
-                    } catch {
-                        let status = "Browser input failed: \(error.localizedDescription)"
-                        if self.controllerFeatures.aimDeliveryStatus != status { self.controllerFeatures.aimDeliveryStatus = status }
-                    }
-                }
-            }
+            self.submitStreamInput(values)
         }
-        controllerFeatures.startPolling(interval: 1.0 / 60.0)
+        // 120 Hz: motion and touch reach the page within ~8 ms of the hand.
+        controllerFeatures.startPolling(interval: 1.0 / 120.0)
         _ = inputPresets
 
         // This app drives a website, not documents: File and Edit menus add
@@ -322,6 +477,14 @@ final class BrowserModel: ObservableObject {
         }
 
         let center = NotificationCenter.default
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            focusObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let window = notification.object as? NSWindow else { return }
+                    self?.nativeFullscreenChanged(window)
+                }
+            })
+        }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSWindow.willCloseNotification, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
             focusObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 MainActor.assumeIsolated {
@@ -435,11 +598,10 @@ final class BrowserModel: ObservableObject {
         window.delegate = mainDelegate
         mainWindow = window
         if escapeMonitor == nil {
-            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard event.keyCode == 53, let window = self?.mainWindow,
-                      window.styleMask.contains(.fullScreen) else { return event }
-                window.toggleFullScreen(nil)
-                return nil
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+                guard event.keyCode == 53, let self, let window = self.mainWindow,
+                      event.window === window else { return event }
+                return self.routeEscape(event)
             }
         }
         window.makeKeyAndOrderFront(nil)
@@ -515,14 +677,15 @@ final class BrowserModel: ObservableObject {
         }
         if settingsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 720),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = "Mac Xcloud"
             window.identifier = NSUserInterfaceItemIdentifier("xcg-settings")
             window.contentMinSize = NSSize(width: 800, height: 620)
-            window.titlebarAppearsTransparent = false
+            // Unified toolbar look: the SwiftUI sidebar material and its
+            // header row render inside the titlebar region itself.
+            window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
-            window.toolbarStyle = .unifiedCompact
             window.isReleasedWhenClosed = false
             window.center()
             window.contentView = NSHostingView(rootView:
@@ -557,21 +720,8 @@ final class BrowserModel: ObservableObject {
         settingsWindow?.performClose(nil)
     }
 
-    /// Deep-links Controller Tools into Settings. Repeated opens participate in
-    /// Settings history and never create a standalone controller-tools window.
-    func openControllerTools(section: ControllerToolSection = .overview) {
-        openSettingsWindow(route: .controllerSection(section))
-    }
-
     func settingsRouteDidChange() {
         reconcileControllerOwnerState()
-        // Keep the throttle in sync when navigation happens without a window
-        // focus change (sidebar clicks while Settings is already key).
-        if case .controllerSection(let section) = settingsModel.route {
-            controllerFeatures.setHighRateUIDetail(controllerInputOwner == .settings && (section == .test || section == .calibration))
-        } else {
-            controllerFeatures.setHighRateUIDetail(false)
-        }
     }
 
     private var isGamepadPollingPaused = false
@@ -689,17 +839,12 @@ final class BrowserModel: ObservableObject {
             // Profile editors remain separate and do not consume controller UI.
             setGamepadPollingPaused(false)
         }
-        let controllerRouteIsVisible: Bool
-        if case .controllerSection(let section) = settingsModel.route {
-            controllerRouteIsVisible = true
-            // Live test/calibration pages need per-frame snapshots; everywhere
-            // else the published snapshot is throttled so Settings never lags.
-            controllerFeatures.setHighRateUIDetail(controllerInputOwner == .settings && (section == .test || section == .calibration))
-        } else {
-            controllerRouteIsVisible = false
-            controllerFeatures.setHighRateUIDetail(false)
-        }
-        controllerFeatures.setControllerToolsActive(controllerInputOwner == .settings && controllerRouteIsVisible)
+        // Live previews (stick dots, wheel angle, controller test) need fast
+        // snapshots; every other page gets the throttled rate so Settings
+        // never costs the game anything.
+        let liveRoute = controllerInputOwner == .settings && (settingsModel.route.pane?.showsLiveInput ?? false)
+        controllerFeatures.setHighRateUIDetail(liveRoute)
+        controllerFeatures.setControllerToolsActive(liveRoute)
     }
 
     private func transitionControllerOwner(to next: ControllerInputOwner) {
@@ -715,6 +860,8 @@ final class BrowserModel: ObservableObject {
         reconcileControllerOwnerState()
         controllerFeatures.streamInputEnabled = next == .stream
         if next != .stream {
+            // Another window took input: never leave the mouse captured.
+            if pointerCaptured { evaluateJS("try { window.BxCBridge && BxCBridge.releasePointer(); } catch (e) {}") }
             controllerFeatures.resetMacros()
             evaluateJS("window.BxCBridge?.updateNativeInput({});")
         }
@@ -743,15 +890,18 @@ final class BrowserModel: ObservableObject {
     // MARK: - Actions
 
     func loadHome() {
+        refreshUserScripts()
         webView?.load(URLRequest(url: Self.homeURL))
     }
 
     func reload() {
         navigationStarted()
+        refreshUserScripts()
         webView?.reload()
     }
 
     func retryLoading() {
+        refreshUserScripts()
         loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
         if let webView, webView.url != nil { webView.reload() } else { loadHome() }
     }
@@ -766,6 +916,17 @@ final class BrowserModel: ObservableObject {
 
     func toggleFullscreen() {
         (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+    }
+
+    /// Asks first: signing out clears every Xbox website cookie and storage.
+    func confirmSignOut() {
+        let alert = NSAlert()
+        alert.messageText = "Sign out of Xbox?"
+        alert.informativeText = "You'll need to sign in with your Microsoft account again. Your Mac Xcloud settings and game profiles are kept."
+        alert.addButton(withTitle: "Sign Out")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        if alert.runModal() == .alertFirstButtonReturn { signOut() }
     }
 
     /// Wipes the persistent session cookies, signing the user out of the site.
@@ -917,6 +1078,7 @@ final class BrowserModel: ObservableObject {
         stopSyntheticInputTest(message: "Input test cancelled: page navigation started.")
         inputPresets.invalidateWebOperationsForNavigation()
         controllerFeatures.resetMacros()
+        resetKeyboardMouseState()
         bridgeReady = false
         // The new page starts with polling enabled; clear the cache so the
         // next ownership reconcile re-sends the correct flag.
@@ -928,6 +1090,8 @@ final class BrowserModel: ObservableObject {
         loadPhase = hasReachedInitialReadiness ? .subsequentLoading : .initialLoading
         loadingTimeout?.cancel()
         let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isLoading else { return }
+            self.failUnlessPageIsAlive { [weak self] in
             guard let self, self.isLoading else { return }
             self.loadPhase = .failed(BrowserLoadFailure(
                 title: self.isOffline ? "You appear to be offline" : "Connection issue",
@@ -941,9 +1105,30 @@ final class BrowserModel: ObservableObject {
             ))
             self.isLoading = false
             if self.isOffline { self.autoRetryOnReconnect = true }
+            }
         }
         loadingTimeout = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 40, execute: work)
+    }
+
+    /// The load watchdog's last check: a page that has rendered and answers
+    /// script is working, whatever WebKit's navigation callbacks said (a
+    /// replaced or same-document navigation never reports "finished").
+    private func failUnlessPageIsAlive(_ fail: @escaping () -> Void) {
+        guard let webView, !isOffline else { fail(); return }
+        webView.evaluateJavaScript("document.readyState === 'complete' && !!document.body && document.body.childElementCount > 0") { [weak self] result, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if result as? Bool == true {
+                    self.note("Load watchdog: page is responsive, treating it as ready")
+                    self.pageBecameReady()
+                    self.isLoading = false
+                    if self.hasReachedInitialReadiness { self.loadPhase = .ready }
+                } else {
+                    fail()
+                }
+            }
+        }
     }
 
     func setLoading(_ loading: Bool) {
@@ -962,13 +1147,16 @@ final class BrowserModel: ObservableObject {
             if self.isSiteSemanticallyReady {
                 self.completeInitialLoadIfPossible()
             } else {
-                self.loadPhase = .failed(BrowserLoadFailure(
-                    title: "Connection issue",
-                    message: "Xbox Cloud Gaming finished loading but never became ready.",
-                    recoverySuggestion: "Retry to reload the page.",
-                    failingURL: self.webView?.url
-                ))
-                self.isLoading = false
+                self.failUnlessPageIsAlive { [weak self] in
+                    guard let self else { return }
+                    self.loadPhase = .failed(BrowserLoadFailure(
+                        title: "Connection issue",
+                        message: "Xbox Cloud Gaming finished loading but never became ready.",
+                        recoverySuggestion: "Retry to reload the page.",
+                        failingURL: self.webView?.url
+                    ))
+                    self.isLoading = false
+                }
             }
         }
         loadingTimeout = work
@@ -999,9 +1187,49 @@ final class BrowserModel: ObservableObject {
         withAnimation(.easeInOut(duration: 0.55)) { loadPhase = .ready }
     }
 
-    func navigationFailed(_ error: Error, url: URL? = nil) {
+    private var silentRetryAt = Date.distantPast
+
+    func navigationFailed(_ error: Error, url: URL? = nil, provisional: Bool = true) {
         let nsError = error as NSError
-        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
+        // A navigation replaced by another one, or interrupted by a policy
+        // decision, is not a failure.
+        let interrupted = (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled)
+            || (nsError.domain == "WebKitErrorDomain" && (nsError.code == 102 || nsError.code == 204))
+        if interrupted {
+            if webView?.isLoading == false {
+                loadingTimeout?.cancel(); loadingTimeout = nil
+                isLoading = false
+                if hasReachedInitialReadiness, case .subsequentLoading = loadPhase { loadPhase = .ready }
+            }
+            return
+        }
+        // A late error on a page that already committed and is working (a
+        // dropped request after load) must not cover the page.
+        if !provisional, hasReachedInitialReadiness {
+            note("Ignored a late load error on a working page: \(nsError.localizedDescription)")
+            loadingTimeout?.cancel(); loadingTimeout = nil
+            isLoading = false
+            if case .subsequentLoading = loadPhase { loadPhase = .ready }
+            return
+        }
+        // Brief network hiccups (Wi-Fi roaming, a connection reset) get one
+        // quiet retry before anything is shown.
+        let transient: Set<Int> = [NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut, NSURLErrorCannotConnectToHost,
+                                   NSURLErrorSecureConnectionFailed, NSURLErrorDNSLookupFailed]
+        if nsError.domain == NSURLErrorDomain, transient.contains(nsError.code), !isOffline,
+           Date().timeIntervalSince(silentRetryAt) > 20 {
+            silentRetryAt = Date()
+            note("Retrying after a transient network error: \(nsError.localizedDescription)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self else { return }
+                if let url, self.webView?.url == nil || self.webView?.url == url {
+                    self.webView?.load(URLRequest(url: url))
+                } else {
+                    self.webView?.reload()
+                }
+            }
+            return
+        }
         loadingTimeout?.cancel()
         loadingTimeout = nil
         isLoading = false
@@ -1027,6 +1255,7 @@ final class BrowserModel: ObservableObject {
         loadingTimeout = nil
         isLoading = false
         bridgeReady = false
+        resetKeyboardMouseState()
         controllerFeatures.stopHaptics()
         let now = Date()
         webContentTerminationDates = webContentTerminationDates.filter { now.timeIntervalSince($0) < 60 }
@@ -1084,7 +1313,7 @@ final class BrowserModel: ObservableObject {
         case "gamepad-error":
             note("Gamepad polling error: \(body["detail"] as? String ?? "unknown")")
         case "app-fullscreen":
-            toggleFullscreen()
+            if let enter = body["enter"] as? Bool { setNativeFullscreen(enter) } else { toggleFullscreen() }
         case "site-ready":
             let readyState = body["readyState"] as? String ?? ""
             if readyState == "interactive" || readyState == "complete" {
@@ -1097,6 +1326,7 @@ final class BrowserModel: ObservableObject {
             evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
             reconcileControllerOwnerState()
             controllerFeatures.recheckMotionSensors()
+            setMouseSensitivity(KeyboardMouseSettings.mouseSensitivity)
             setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
             // The automatic region selector must receive Xbox's offered
@@ -1119,6 +1349,22 @@ final class BrowserModel: ObservableObject {
                 leftTrigger: Float(body["leftTriggerMotorPercent"] as? Double ?? 0) / 100,
                 rightTrigger: Float(body["rightTriggerMotorPercent"] as? Double ?? 0) / 100,
                 duration: durationMs / 1_000)
+        case "mkb-emulation":
+            let state = body["state"] as? String ?? "off"
+            if keyboardEmulationState != state { keyboardEmulationState = state }
+        case "mkb-state":
+            // The page reports when a keyboard/mouse path owns the stream
+            // (pointer lock active or the Better xCloud virtual controller is
+            // connected); native motion engines must stand down until it ends.
+            let active = body["active"] as? Bool ?? false
+            let emulated = body["emulated"] as? Bool ?? false
+            // Only the virtual controller replaces the physical one; games with
+            // native keyboard & mouse keep the controller (and its gyro and
+            // touchpad) working alongside.
+            _ = active
+            controllerFeatures.setMKBStreamActive(emulated, emulated: emulated)
+            if virtualControllerActive != emulated { virtualControllerActive = emulated }
+            pointerLockChanged(body["pointerLocked"] as? Bool ?? false)
 
         default:
             note("\(type): \(body["detail"] as? String ?? "")")

@@ -12,7 +12,7 @@
     <a href="#key-features">Key Features</a> · 
     <a href="#screenshots">Screenshots</a> · 
     <a href="#dualsense-adaptive-trigger-modes">Adaptive Triggers</a> · 
-    <a href="#motion-steering-gyro-aiming--flick-shifting">Motion & Steering</a> · 
+    <a href="#motion-steering--gyro-aiming">Motion & Steering</a> · 
     <a href="#deep-links">Deep Links</a> · 
     <a href="#app-shortcuts">Shortcuts</a> · 
     <a href="#installation--requirements">Download</a> · 
@@ -58,7 +58,7 @@ Running in Apple's native `WKWebView`, stream video benefits from custom WebKit 
 - **Keep-Awake While Running**: The Mac's display and system sleep are suppressed while the app is open, so long sessions aren't interrupted.
 - **Quit Confirmation**: Quitting during an active stream asks for confirmation first.
 - **Persistent Microsoft Authentication**: Dedicated cookie and local storage isolation keeps you signed in between launches.
-- **Settings Search**: Filter every cloud, video, overlay, and appearance setting from the settings header.
+- **Native Settings**: A System Settings–style window with a searchable sidebar, plain-language options, live previews for motion and touch controls, and advanced tuning tucked away until you need it.
 - **Background Menu Bar Companion**: Quick menu bar status item with instant access to settings, trigger presets, and stream actions.
 - **Automatic Updates**: Built-in [Sparkle](https://sparkle-project.org/) framework delivers seamless background checks with detailed, versioned release notes.
 - **Deep Links**: `macxcloud://play/<game-id>` launches a game directly, `macxcloud://resume` reopens your last game, and `macxcloud://home` returns to the start page. Works from the Terminal (`open "macxcloud://…"`), Raycast, Alfred, Shortcuts, or browser links. The current game's ID is shown in the Diagnostics panel with a copy button.
@@ -72,13 +72,12 @@ Running in Apple's native `WKWebView`, stream video benefits from custom WebKit 
 - **Low Battery Alert**: A macOS notification fires once per discharge cycle when the controller drops to about 20%.
 - **"Game Ready" Alert**: When a queued game finally connects, you get a macOS notification plus three light-green lightbar pulses with a controller rumble each — so you can browse elsewhere and still know when to hop back in.
 
-### 🏎️ Motion Steering, Gyro Aiming & Flick Shifting
-- **Virtual Steering Wheel (left stick)**: You hold the controller facing you and rotate it left and right like a wheel. The app reads the controller's motion sensors to track its rotation angle and writes that angle to the **left analog stick**, so the game sees normal stick steering — no wheel driver or in-game wheel support needed. The full-turn angle, response curve, and smoothing are adjustable. While game rumble or adaptive-trigger vibration is active, steering rides on gyroscope motion instead of reading the shaking sensors, so holding the throttle doesn't pull your line.
-- **Flick Shifting (right stick)**: A quick upward or downward flick of the controller sends a right-stick up/down pulse for gear changes; the return movement is ignored so one flick is one shift. **This requires mapping upshift to Right Stick Up and downshift to Right Stick Down in the game's control settings** (most racing games support this, e.g. Forza Horizon 5).
-- **Touchpad Aiming (DualSense)**: The touchpad can act as a right-stick aim input. It works, but it is the least polished of the motion features — give it a try if it suits you.
-- **Touchpad Gestures**: Configurable swipe and tap gestures on the DualSense touchpad mapped to app actions (toggle stats, fullscreen, screenshot, and more).
-- **Gyro Aiming (right stick)**: Tilting the controller maps angular motion to the right stick for fine aiming. It is usable today, though there are known issues that will be worked on over time.
-- **Gyro-Assisted Tracking**: Reduces accelerometer jolts while preserving fine corrections and held turns.
+### 🏎️ Motion Steering & Gyro Aiming
+Motion controls run on a gyro + accelerometer fusion that processes every sensor report (not a 60 Hz snapshot), learns the gyroscope's drift whenever the controller rests, and ignores rumble, adaptive-trigger buzz and arm movement.
+- **Steering (left stick)**: Hold the controller like a wheel and turn it. The wheel angle is the controller's *bank* relative to the horizon, so tilting it toward or away from you, or turning it on the spot, never steers the car, and the center can't drift. Set the steering range and how quick the response is around center; Recenter (⌥⌘R) makes your natural hold straight ahead.
+- **Gyro Aiming (right stick)**: Turn the controller to move the camera, like aiming with a mouse. Works held flat, tilted or upright, ignores hand tremor at rest, and stops the instant your hand stops. Compensates the game's own right-stick dead zone so the smallest movement registers. Active all the time or only while aiming (LT).
+- **Touchpad Camera (DualSense)**: The touchpad works like a trackpad for the camera — slow strokes are precise, fast swipes turn further, and the camera stops when your finger stops or lifts. Nothing accumulates or coasts.
+- **Touchpad Gestures**: Swipe and tap gestures mapped to app actions (performance overlay, full screen, screenshot, macros, and more).
 
 ### 📊 Native Performance HUD & Diagnostics
 - **Pill HUD Overlay**: Lightweight macOS material overlay rendering FPS, network ping, bitrate (Mbps), decode time, packet loss, and dropped frames.
@@ -136,34 +135,31 @@ Mac Xcloud features a DualSenseX-inspired trigger preset catalog. Each mode maps
 
 ---
 
-## Input Focus & Keyboard/Mouse Support
+## Keyboard & Mouse
 
-Mac Xcloud is purpose-built for **gamepad play, motion steering, and haptics**. 
+* **Games with keyboard & mouse support** get them natively, exactly as in Chrome or Edge. Click the game to capture the mouse. A quick press of **Esc** goes to the game (pause menus); **hold Esc** to release the mouse.
+* **Every other game** can be played with keyboard and mouse through a virtual controller (Settings → Keyboard & Mouse → Play with keyboard & mouse), with Standard and Shooter layouts and adjustable mouse sensitivity.
+* **Game controllers**: PlayStation DualSense / DualSense Edge, DualShock 4, Xbox Wireless Controllers, Nintendo Switch Pro Controllers and MFi gamepads via Apple's `GameController` framework.
 
-* **Game Controllers**: Full support for PlayStation DualSense / DualSense Edge, Xbox Wireless Controllers, Nintendo Switch Pro Controllers, and MFi gamepads via Apple's `GameController` framework.
-* **Mouse & Keyboard**: For app controls, window management, web navigation, and Microsoft account sign-in. Virtual mouse-to-stick emulation was deliberately removed to avoid pointer-lock conflicts in Apple's `WKWebView`; game input is gamepad-focused.
+Why it works here: Xbox's web client enables keyboard & mouse only when the browser offers the Keyboard Lock API, pointer lock and element fullscreen. `WKWebView` lacks Keyboard Lock and denies pointer lock unless the host app grants it, so Mac Xcloud provides all three — see `KeyboardMouse.swift`.
 
 ---
 
-## Forza Horizon 5: Suggested Steering Setup
+## Forza Horizon: Suggested Steering Setup
 
-When using **Motion Steering**, the app translates controller rotation into a native left-stick axis. Configure the game's gamepad settings (not steering wheel force-feedback menus):
+Motion steering drives the game's normal left-stick steering, so configure the game's controller settings (not wheel settings):
 
-| Mac Xcloud Steering Setting | Recommended Baseline |
+| Mac Xcloud (Motion Controls → Steering) | Recommended Baseline |
 | :--- | :--- |
-| **Full Turn Angle** | 45° per side (adjust to 50–55° if overly sensitive) |
-| **Response Exponent** | 1.0 (Linear) |
-| **Smoothing** | 0.35 (~70 ms filter window) |
-| **Center Dead Zone** | 0° |
-| **Game Dead-Zone Compensation** | 0 |
-| **Maximum Output** | 100% |
-| **Invert Direction** | Off |
+| **Steering range** | 35–45° |
+| **Center response** | Middle (linear); a little toward Quick for arcade handling |
+| **Center boost** (Advanced) | 0% to start; raise it if small turns feel dead |
+| **Smoothing** (Advanced) | Low |
 
-*Inside Forza Horizon 5*:
-- Steering: **Normal** (adds standard gamepad assistance; switch to Simulation once accustomed).
-- Steering Linearity: Neutral **50** (or `0.5`).
-- Inside / Outside Steering Deadzones: **0 / 100**.
-- Shifting: Enable manual gears and use **Flick Shifting** (map Right Stick Up to Upshift and Right Stick Down to Downshift).
+*Inside Forza Horizon*:
+- Steering: **Normal** to start, **Simulation** once comfortable.
+- Steering Linearity: **50**.
+- Steering Axis Deadzone Inside / Outside: **0 / 100**.
 
 ---
 
@@ -258,6 +254,12 @@ Automated regression and validation suites verify trigger math, profile encoding
 
 # Run preset store encoding contracts
 ./Tests/run-preset-store-contracts.sh
+
+# Keyboard & mouse web contract in a real WKWebView
+./Tests/run-webkit-contracts.sh
+
+# Injected script and bridge contracts
+for test in Tests/*.cjs; do node "$test"; done
 ```
 
 ---
