@@ -113,14 +113,15 @@ final class BrowserModel: ObservableObject {
     /// The running app's model, for App Intents (Shortcuts, Siri, Spotlight).
     private(set) static weak var current: BrowserModel?
 
-    let controllerFeatures = ControllerFeatureService()
+    let controllerFeatures = ControllerFeatureService(defaults: BrowserModel.checkDefaults ?? .standard,
+                                                      automaticallyAttach: !BrowserModel.isAutomatedCheck)
     let keyboardMouse = KeyboardMouseStore()
     let gameLibrary = GameLibrary()
     let streamHealth = StreamHealthMonitor()
     lazy var dockMenu = DockMenuBuilder(browser: self)
     lazy var controllerInput = ControllerInputService(controllerProvider: controllerFeatures.selectedControllerProvider)
     lazy var inputPresets: InputPresetStore = {
-        let store = InputPresetStore(browser: self)
+        let store = InputPresetStore(browser: self, defaults: Self.checkDefaults ?? .standard, directory: Self.checkProfilesDirectory)
         store.onSettingsApplied = { [weak self] in
             guard let self, self.isSettingsWindowOpen else { return }
             self.settingsModel.load()
@@ -258,14 +259,6 @@ final class BrowserModel: ObservableObject {
     /// keyboard/mouse fallback alike; stale samples never queue).
     private func submitStreamInput(_ values: [String: Double]) {
         guard controllerInputOwner == .stream, Date() >= aimTestUntil else { return }
-        var values = values
-        // Mouse movement from gyro is a delta, not a state: a sample replaced
-        // before delivery hands its movement on instead of losing it.
-        if let pending = pendingStreamInput, pending["mouseSeq"] != nil {
-            values["mouseX"] = (values["mouseX"] ?? 0) + (pending["mouseX"] ?? 0)
-            values["mouseY"] = (values["mouseY"] ?? 0) + (pending["mouseY"] ?? 0)
-            values["mouseSeq"] = values["mouseSeq"] ?? pending["mouseSeq"]
-        }
         pendingStreamInput = values
         guard !streamInputInFlight else { return }
         streamInputInFlight = true
@@ -310,9 +303,10 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// The keyboard & mouse controller layout in the current game: "off"
-    /// (no game, or the game supports keyboard & mouse itself), "ready",
-    /// "keys" (keys in use) or "active" (the mouse is captured).
+    /// Who plays in the current game: "off" (no game, or nothing used yet in
+    /// a game with its own keyboard & mouse support), "ready" (nothing used
+    /// yet), "keyboard", "mouse" (keyboard with the mouse captured),
+    /// "native" (the game's own keyboard & mouse) or "controller".
     @Published private(set) var keyboardEmulationState = "off"
 
     // MARK: - Full screen for games
@@ -389,11 +383,6 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// Starts or stops the page listening to the game's sound for vibration.
-    func pushAudioHaptics(_ on: Bool) {
-        evaluateJS("try { window.BxCBridge && BxCBridge.setAudioHaptics(\(on)); } catch (e) {}")
-    }
-
     /// Sends the current keyboard layout and settings to the running page.
     func pushKeyboardConfiguration() {
         let json = keyboardMouse.pageConfigurationJSON
@@ -427,7 +416,6 @@ final class BrowserModel: ObservableObject {
         escapeForwarded = false
         if pointerCaptured { pointerCaptured = false }
         if keyboardEmulationState != "off" { keyboardEmulationState = "off" }
-        controllerFeatures.gyroMouseAvailable = false
         setupOfferTask?.cancel()
         if setupOffer != nil { setupOffer = nil }
     }
@@ -496,10 +484,7 @@ final class BrowserModel: ObservableObject {
 
     init() {
         Self.current = self
-        gameLibrary.onChange = { [weak self] in
-            AppShortcutsSync.refresh()
-            self?.statusController?.refreshMenu()
-        }
+        gameLibrary.onChange = { AppShortcutsSync.refresh() }
         controllerInput.onToggleOverlay = { [weak self] in
             self?.openSettingsWindow()
         }
@@ -516,7 +501,6 @@ final class BrowserModel: ObservableObject {
         }
         controllerFeatures.onLightRestore = { [weak self] in self?.settingsModel.applyLightBar() }
         keyboardMouse.onChange = { [weak self] in self?.pushKeyboardConfiguration() }
-        controllerFeatures.onAudioHapticsWanted = { [weak self] on in self?.pushAudioHaptics(on) }
         streamHealth.onNotice = { [weak self] issue in
             guard let self, self.controllerInputOwner == .stream, self.setupOffer == nil else { return }
             self.showHint("\(issue.title) · \(issue.shortAdvice)", symbol: issue.symbol)
@@ -586,6 +570,9 @@ final class BrowserModel: ObservableObject {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.recomputeControllerOwner()
+                    if notification.name == NSApplication.didBecomeActiveNotification {
+                        self.controllerFeatures.restoreControllerEffects()
+                    }
                     if let window = notification.object as? NSWindow,
                        window.identifier?.rawValue == "xcg-main",
                        window.isVisible {
@@ -648,17 +635,37 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func endKeepingAwake() {
-        guard displaySleepAssertion != 0 else { return }
-        IOPMAssertionRelease(displaySleepAssertion)
-        displaySleepAssertion = 0
-    }
-
     // MARK: - Main window
 
     private(set) var mainWindow: NSWindow?
     private var mainWindowDelegate: WindowCloseDelegate?
     private var escapeMonitor: Any?
+
+    /// An unattended development check (see AutomatedCheck) is running.
+    static var isAutomatedCheck: Bool {
+        #if DEBUG
+        AutomatedCheck.isRunning
+        #else
+        false
+        #endif
+    }
+
+    /// Where such a check keeps game profiles and controller settings (nil:
+    /// the real ones).
+    private static var checkProfilesDirectory: URL? {
+        #if DEBUG
+        AutomatedCheck.isRunning ? AutomatedCheck.profilesDirectory : nil
+        #else
+        nil
+        #endif
+    }
+    private static var checkDefaults: UserDefaults? {
+        #if DEBUG
+        AutomatedCheck.isRunning ? AutomatedCheck.defaults : nil
+        #else
+        nil
+        #endif
+    }
 
     /// The main window is created in AppKit with its final chrome-less style
     /// mask from the start, so the game content runs edge-to-edge under the
@@ -684,6 +691,7 @@ final class BrowserModel: ObservableObject {
         window.isMovableByWindowBackground = true
         window.minSize = NSSize(width: 1024, height: 576)
         restoreMainWindowFrame(window)
+        if Self.isAutomatedCheck { window.setFrameOrigin(NSPoint(x: -8000, y: -8000)) }
         window.contentView = NSHostingView(rootView:
             ContentView()
                 .environmentObject(self)
@@ -695,6 +703,7 @@ final class BrowserModel: ObservableObject {
             self.recomputeControllerOwner()
         }
         mainDelegate.onFrameChange = { [weak self] window in
+            guard !Self.isAutomatedCheck else { return }
             self?.saveMainWindowFrame(window)
         }
         mainWindowDelegate = mainDelegate
@@ -817,10 +826,6 @@ final class BrowserModel: ObservableObject {
         for item in mainMenu.items where ["File", "Edit"].contains(item.title) {
             mainMenu.removeItem(item)
         }
-    }
-
-    func closeSettingsWindow() {
-        settingsWindow?.performClose(nil)
     }
 
     func settingsRouteDidChange() {
@@ -1170,7 +1175,6 @@ final class BrowserModel: ObservableObject {
                     nativeHUDValues = [:]
                 }
                 if !isStreaming { streamHealth.reset() }
-                statusController?.refreshMenu()
             } catch {
                 // Keep the last good telemetry sample; the page may be navigating.
             }
@@ -1405,10 +1409,6 @@ final class BrowserModel: ObservableObject {
             report.gamepadAPI = (body["gamepadAPI"] as? Bool) ?? false
             report.webRTC = (body["webrtc"] as? Bool) ?? false
             report.userAgent = body["ua"] as? String ?? ""
-        case "remote-status":
-            report.remotePlayActive = body["active"] as? Bool ?? false
-            report.remoteServerStatus = body["server"] as? String ?? "Unknown"
-            report.remoteConsoleStatus = body["console"] as? String ?? "Unknown"
         case "gamepads":
             report.webControllerIDs = body["ids"] as? [String] ?? []
             if report.webControllerIDs.count != 1 {
@@ -1437,7 +1437,6 @@ final class BrowserModel: ObservableObject {
             reconcileControllerOwnerState()
             controllerFeatures.recheckMotionSensors()
             pushKeyboardConfiguration()
-            pushAudioHaptics(controllerFeatures.audioHapticsWanted)
             setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
             // The automatic region selector must receive Xbox's offered
@@ -1463,15 +1462,9 @@ final class BrowserModel: ObservableObject {
         case "mkb-emulation":
             let state = body["state"] as? String ?? "off"
             if keyboardEmulationState != state { keyboardEmulationState = state }
-        case "audio-level":
-            controllerFeatures.receiveAudioLevel(body["level"] as? Double ?? 0)
-        case "title-input":
-            let mouse = body["nativeMouse"] as? Bool ?? false
-            if controllerFeatures.gyroMouseAvailable != mouse { controllerFeatures.gyroMouseAvailable = mouse }
         case "mkb-state":
-            // The keyboard layer adds to the controller instead of replacing
-            // it, so gyro and touchpad keep working; only Escape routing
-            // depends on the mouse being captured.
+            // Only Escape routing depends on the mouse being captured; who
+            // plays is decided in the page (see "mkb-emulation").
             pointerLockChanged(body["pointerLocked"] as? Bool ?? false)
 
         default:

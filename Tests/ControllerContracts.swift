@@ -150,21 +150,21 @@ struct ControllerContracts {
         check(simd_length(restingFusion.bias - MotionVector(0.4, -0.3, 0.5) * deg) < 0.05 * deg, "A controller resting on a table has its gyro offset measured")
         check(restingFusion.biasSource == .rested, "A table rest counts as a measurement")
 
-        // Held in the hands: tremor-level noise, then a slow deliberate turn
-        // that keeps gravity put (pure yaw). It must not be taken for drift.
+        // Held in the hands, learning keeps going: a stale offset (the
+        // controller warmed up since it was measured) is corrected while the
+        // player holds it still, as in 1.3.9.
         let trueBias = MotionVector(0.4, -0.3, 0.5) * deg
-        var heldMeasured = MotionFusion(bias: trueBias, source: .rested)
-        for reading in simulate(6, gyroNoise: 0.7 * deg, pose: { t in (0, 35 * deg, t < 2 ? 0 : 0.8 * deg * (t - 2)) }) {
-            heldMeasured.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
+        var warmedUp = MotionFusion(bias: trueBias + MotionVector(0.3, -0.25, 0.2) * deg, source: .rested)
+        for reading in simulate(14, gyroNoise: 0.7 * deg, pose: { _ in (0, 35 * deg, 0) }) {
+            warmedUp.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
         }
-        check(simd_length(heldMeasured.bias - trueBias) < 0.01 * deg, "A measured offset is never overwritten while the controller is held")
+        check(simd_length(warmedUp.bias - trueBias) < 0.1 * deg, "A held controller keeps its drift offset up to date")
         var heldLearning = MotionFusion()
-        for reading in simulate(8, gyroNoise: 0.7 * deg, pose: { t in (0, 35 * deg, t < 4 ? 0 : 0.8 * deg * (t - 4)) }) {
+        for reading in simulate(8, gyroNoise: 0.7 * deg, pose: { _ in (0, 35 * deg, 0) }) {
             heldLearning.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
         }
         check(heldLearning.biasSource < .rested, "Holding the controller is not mistaken for a table rest")
-        check(abs(heldLearning.bias.z * cos(35 * deg) + heldLearning.bias.y * sin(35 * deg)) < 0.25 * deg,
-              "A slow deliberate turn is not learned as drift")
+        check(simd_length(heldLearning.bias - trueBias) < 0.15 * deg, "Drift is learned while the controller is held still")
         // A lap or a stand that sways slowly (breathing) is not a table.
         var lap = MotionFusion()
         for reading in simulate(12, gyroNoise: 0.05 * deg, pose: { t in (0, (35 + 0.4 * sin(2 * .pi * 0.25 * t)) * deg, 0) }) {
@@ -211,6 +211,31 @@ struct ControllerContracts {
         let step = steer(simulate(4, pose: { t in let x = min(max((t - 2) / 0.12, 0), 1); return (25 * deg * x * x * (3 - 2 * x), 35 * deg, 0) }))
         let handAt = step.first { abs($0.truth) > 0.9 * 25 * deg }!.t, wheelAt = step.first { abs($0.angle) > 0.9 * 25 * deg }!.t
         check(wheelAt - handAt < 0.02 && step.map { abs($0.angle) }.max()! < 25.6 * deg, "A quick turn arrives within 20 ms without overshoot")
+        // Smoothing is never fully off: hand tremor (8–11 Hz, a tenth of a
+        // degree) is steadied even at the lightest setting.
+        func shake(_ xs: [Double]) -> Double {
+            var deviations: [Double] = []
+            for i in 6..<(xs.count - 6) { deviations.append(xs[i] - xs[(i - 6)...(i + 6)].reduce(0, +) / 13) }
+            return rms(deviations)
+        }
+        let trembling: (Double) -> (bank: Double, pitch: Double, yaw: Double) = { t in ((10 + 0.15 * sin(2 * .pi * 8 * t) + 0.08 * sin(2 * .pi * 11 * t)) * deg, 35 * deg, 0) }
+        let lightest = steer(simulate(6, pose: trembling), configuration: .init(smoothing: 0)).filter { $0.t > 1.5 }
+        let standard = steer(simulate(6, pose: trembling)).filter { $0.t > 1.5 }
+        check(shake(lightest.map(\.angle)) < 0.8 * shake(lightest.map(\.truth)) && shake(standard.map(\.angle)) < 0.65 * shake(standard.map(\.truth)),
+              "Hand tremor is steadied, even with Smoothing at its lightest")
+        // Rumble the app was not told about leaves no lasting pull.
+        let rumbled = simulate(3, rumble: true, pose: { _ in (12 * deg, 35 * deg, 0) })
+        let calm = simulate(3, pose: { _ in (12 * deg, 35 * deg, 0) }).map { Reading(t: $0.t + 3, gyro: $0.gyro, acc: $0.acc, gravity: $0.gravity) }
+        let afterRumble = steer(rumbled + calm, bias: learned).filter { $0.t > 4 }
+        check(afterRumble.map { abs($0.angle - $0.truth) }.max()! < 0.3 * deg, "After rumble the wheel is back on the hand's angle within a second")
+        // Between sensor reports the angle is projected at most 8 ms ahead, so
+        // a hand that stops is never carried past where it stopped.
+        var spinning = MotionFusion()
+        for reading in simulate(0.5, pose: { t in (150 * deg * t, 35 * deg, 0) }) {
+            spinning.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
+        }
+        let projected = acos(min(simd_dot(spinning.predictedGravity(after: 0.05)!, spinning.gravity!), 1))
+        check(projected < 150 * deg * 0.0085, "Between reports the angle is projected at most 8 ms ahead")
 
         var recentered = SteeringWheelEngine()
         let tilted = orientation(bank: 6 * deg, pitch: 30 * deg, yaw: 0).transpose * MotionVector(0, 0, -1)
@@ -302,24 +327,7 @@ struct ControllerContracts {
         check(quickTurn.map(\.x).reduce(0, +) > baseTurn.map(\.x).reduce(0, +) * 1.4, "Sensitivity scales aim speed")
         check(StickShaper.magnitude(demand: 0, exponent: 1, antiDeadzone: 0.2) == 0, "Zero demand is exactly zero even with compensation")
 
-                // Gyro as a mouse: the per-tick turn adds up to the real rotation, so
-        // a mouse following it moves exactly as far as the hand turned.
-        var mouseAim = GyroAimEngine()
-        mouseAim.configure(GyroAimEngine.Configuration(smoothing: 0))
-        var turned = 0.0
-        for _ in 0..<120 {   // one second at 120 Hz, turning right at 30°/s while held flat
-            _ = mouseAim.sample(rate: MotionVector(0, 0, -30 * deg), gravity: MotionVector(0, 0, -1), dt: 1.0 / 120)
-            turned += mouseAim.turn.x
-        }
-        check(abs(turned * 180 / .pi - 30) < 1.5, "Gyro mouse output adds up to the controller's real turn (\(Int((turned * 180 / .pi).rounded()))°)")
-        var restingTurn = 0.0
-        for tick in 0..<120 {   // then a second of a resting hand (tremor-level 0.4°/s)
-            _ = mouseAim.sample(rate: MotionVector(0, 0, -0.4 * deg), gravity: MotionVector(0, 0, -1), dt: 1.0 / 120)
-            if tick >= 24 { restingTurn += abs(mouseAim.turn.x) + abs(mouseAim.turn.y) }
-        }
-        check(restingTurn == 0, "A resting hand moves the mouse not at all")
-
-// MARK: - Touchpad camera
+        // MARK: - Touchpad camera
 
         func touch(_ positions: (Double) -> (Double, Double)?, duration: Double, rate: Double = 250, configuration: TouchpadCameraEngine.Configuration = .init()) -> [(t: Double, x: Double, y: Double)] {
             var engine = TouchpadCameraEngine(); engine.configure(configuration)
@@ -342,6 +350,24 @@ struct ControllerContracts {
         check(slowStroke.allSatisfy { abs($0 - slowMean) < slowMean * 0.25 }, "Slow strokes move smoothly, without pixel stutter")
         let stopping = touch({ t in t < 1 ? (-400 + 500 * t, 0) : (100, 0) }, duration: 2)
         check(stopping.filter { $0.t > 1.12 }.allSatisfy { $0.x == 0 }, "The camera stops within about 100 ms of the finger stopping")
+        // At the DualSense's Bluetooth rate (~65 Hz) with ±1 px of sensor
+        // jitter: a resting finger is perfectly still and slow strokes are even.
+        func jittered(_ positions: @escaping (Double) -> (Double, Double), duration: Double) -> [(t: Double, x: Double)] {
+            var engine = TouchpadCameraEngine()
+            var noise: UInt64 = 0x2545F4914F6CDD1D
+            func pixel() -> Double { noise = noise &* 6364136223846793005 &+ 1442695040888963407; return Double(Int64(bitPattern: noise >> 33) % 3) }
+            var result: [(Double, Double)] = []; var report = 0.0, tick = 0.0
+            while tick < duration {
+                while report <= tick { let p = positions(report); engine.report(position: (p.0.rounded() + pixel(), p.1.rounded() + pixel()), at: report); report += 1.0 / 65 }
+                result.append((tick, Double(engine.tick(now: tick, dt: 1.0 / 120).coarse.x))); tick += 1.0 / 120
+            }
+            return result
+        }
+        check(jittered({ _ in (100, 50) }, duration: 2).allSatisfy { $0.x == 0 }, "At Bluetooth rate, a resting finger's jitter never moves the camera")
+        let evenStroke = jittered({ t in (-800 + 60 * t, 0) }, duration: 1.2).filter { $0.t > 0.25 && $0.t < 1.1 }.map(\.x)
+        let evenMean = evenStroke.reduce(0, +) / Double(evenStroke.count)
+        let evenRipple = (evenStroke.map { ($0 - evenMean) * ($0 - evenMean) }.reduce(0, +) / Double(evenStroke.count)).squareRoot() / evenMean
+        check(evenRipple < 0.07, "A slow 60 px/s stroke moves the camera evenly (ripple \(Int((evenRipple * 100).rounded()))%)")
         let lifting = touch({ t in t < 1 ? (-400 + 500 * t, 0) : nil }, duration: 2)
         check(lifting.filter { $0.t > 1.01 }.allSatisfy { $0.x == 0 }, "Lifting the finger stops the camera at once")
         let sparse = touch({ t in (-400 + 500 * t, 0) }, duration: 1.2, rate: 60).filter { $0.t > 0.2 && $0.t < 1.1 }

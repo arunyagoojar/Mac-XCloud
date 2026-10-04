@@ -55,27 +55,44 @@ final class StreamHealthMonitor: ObservableObject {
     deinit { pathMonitor.cancel() }
 
     /// The Wi-Fi conditions right now (signal, noise, band, link rate).
+    /// CoreWLAN answers in a few milliseconds, too long for the main thread,
+    /// which also reads the controller: it is asked on a background queue.
     func refreshNetwork() {
         #if DEBUG
         guard !previewing else { return }
         #endif
-        var conditions = NetworkConditions(link: link)
-        if link == .wifi, let wifi = CWWiFiClient.shared().interface() {
-            let rssi = wifi.rssiValue(), noise = wifi.noiseMeasurement()
-            conditions.rssi = rssi != 0 ? rssi : nil
-            conditions.noise = noise != 0 ? noise : nil
-            // CWChannelBand raw values: 1 = 2.4 GHz, 2 = 5 GHz, 3 = 6 GHz.
-            switch wifi.wlanChannel()?.channelBand.rawValue {
-            case 1?: conditions.band = .ghz2
-            case 2?: conditions.band = .ghz5
-            case 3?: conditions.band = .ghz6
-            default: conditions.band = nil
-            }
-            let rate = wifi.transmitRate()
-            conditions.transmitRateMbps = rate > 0 ? rate : nil
+        let link = self.link
+        guard link == .wifi else {
+            let conditions = NetworkConditions(link: link)
+            if network != conditions { network = conditions }
+            return
         }
-        if network != conditions { network = conditions }
+        Self.wifiQueue.async { [weak self] in
+            var conditions = NetworkConditions(link: .wifi)
+            if let wifi = CWWiFiClient.shared().interface() {
+                let rssi = wifi.rssiValue(), noise = wifi.noiseMeasurement()
+                conditions.rssi = rssi != 0 ? rssi : nil
+                conditions.noise = noise != 0 ? noise : nil
+                // CWChannelBand raw values: 1 = 2.4 GHz, 2 = 5 GHz, 3 = 6 GHz.
+                switch wifi.wlanChannel()?.channelBand.rawValue {
+                case 1?: conditions.band = .ghz2
+                case 2?: conditions.band = .ghz5
+                case 3?: conditions.band = .ghz6
+                default: conditions.band = nil
+                }
+                let rate = wifi.transmitRate()
+                conditions.transmitRateMbps = rate > 0 ? rate : nil
+            }
+            let measured = conditions
+            let monitor = self
+            Task { @MainActor in
+                guard let monitor, monitor.link == .wifi, monitor.network != measured else { return }
+                monitor.network = measured
+            }
+        }
     }
+
+    private static let wifiQueue = DispatchQueue(label: "xcg.stream-health.wifi", qos: .utility)
 
     func ingest(_ telemetry: StreamTelemetry) {
         let now = ProcessInfo.processInfo.systemUptime

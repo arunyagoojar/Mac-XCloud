@@ -47,7 +47,6 @@ import GameController
     /// Raw reports are flowing right now (they can stop when a second
     /// controller or a duplicate connection appears).
     var hasReports: Bool { !points.isEmpty && ProcessInfo.processInfo.systemUptime - lastReport < 0.25 }
-    var reportTime: Double { lastReport }
     deinit {
         if let manager {
             IOHIDManagerRegisterInputReportCallback(manager, nil, nil)

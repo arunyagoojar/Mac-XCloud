@@ -81,12 +81,6 @@ final class GameLibrary: ObservableObject {
         if game.catalogCheckedAt == nil { Task { _ = await details(for: id) } }
     }
 
-    func forget(_ id: String) {
-        recent.removeAll { $0.id == id }
-        save()
-        CSSearchableIndex.default().deleteSearchableItems(withIdentifiers: [Self.spotlightID(id)]) { _ in }
-    }
-
     /// The game with its catalog details, looked up once and remembered.
     func details(for id: String) async -> RecentGame? {
         if let known = game(id), known.catalogCheckedAt != nil { return known }

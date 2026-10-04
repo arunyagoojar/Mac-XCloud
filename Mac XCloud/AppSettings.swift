@@ -436,46 +436,9 @@ struct SettingsCategory: Identifiable {
     ]
 }
 
-// MARK: - Suggested settings (curated for Mac)
+// MARK: - Reset and writes
 
 extension SettingsModel {
-    struct SuggestedChange {
-        let key: String
-        let scope: SettingScope
-        let value: Any
-    }
-
-    static let suggestedForMac: [SuggestedChange] = [
-        .init(key: "server.region", scope: .global, value: "default"),
-        .init(key: "server.ipv6.prefer", scope: .global, value: true),
-        .init(key: "stream.video.resolution", scope: .global, value: "1080p-hq"),
-        .init(key: "stream.video.codecProfile", scope: .global, value: "high"),
-        // Unlimited bitrate allows full resolution/quality without artificial cap.
-        .init(key: "stream.video.maxBitrate", scope: .global, value: 0.0),
-        .init(key: "stream.video.preventResolutionDrops", scope: .global, value: false),
-        .init(key: "ui.splashVideo.skip", scope: .global, value: true),
-        .init(key: "ui.feedbackDialog.disabled", scope: .global, value: true),
-        .init(key: "ui.controllerFriendly", scope: .global, value: true),
-        .init(key: "block.tracking", scope: .global, value: true),
-        .init(key: "stats.showWhenPlaying", scope: .stream, value: false),
-        .init(key: "stats.items", scope: .stream, value: ["ping", "fps", "btr", "dt", "pl", "fl"]),
-        .init(key: "stats.position", scope: .stream, value: "top-right"),
-        .init(key: "stats.opacity.all", scope: .stream, value: 90.0),
-        .init(key: "stats.opacity.background", scope: .stream, value: 65.0),
-        .init(key: "stats.colors", scope: .stream, value: true),
-        .init(key: "video.player.type", scope: .stream, value: "webgl2"),
-        .init(key: "video.player.powerPreference", scope: .stream, value: "high-performance"),
-        .init(key: "video.processing", scope: .stream, value: "cas"),
-        .init(key: "video.processing.mode", scope: .stream, value: "quality"),
-        .init(key: "video.processing.sharpness", scope: .stream, value: 2.0),
-        .init(key: "video.maxFps", scope: .stream, value: 60.0),
-        .init(key: "video.brightness", scope: .stream, value: 100.0),
-        .init(key: "video.contrast", scope: .stream, value: 100.0),
-        .init(key: "video.saturation", scope: .stream, value: 100.0),
-        .init(key: "audio.volume", scope: .stream, value: 100.0),
-        .init(key: "controller.pollingRate", scope: .stream, value: 4.0),
-    ]
-
     /// Factory reset across every settings store: saved profiles and per-game
     /// links, native mirrors, page-side Better xCloud preferences and app
     /// preferences. The Xbox page reloads afterwards so the site re-reads its
@@ -533,28 +496,11 @@ extension SettingsModel {
         }
     }
 
-    func applySuggested() {
-        saveMessage = "Applying optimized M1 settings…"
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            for change in Self.suggestedForMac {
-                await self.writeAndWait(id: change.key, scope: change.scope, value: change.value)
-            }
-            self.saveMessage = "Suggested settings saved"
-        }
-    }
-
     /// Verified write: Better xCloud validates/transforms the value, writes it,
     /// and returns a same-scope readback. UI and native mirrors update only after
     /// that response, and per-key generations discard stale completions.
     func write(id: String, scope: SettingScope, value: Any) {
         write(id: id, scope: scope, value: value, completion: nil)
-    }
-
-    private func writeAndWait(id: String, scope: SettingScope, value: Any) async {
-        await withCheckedContinuation { continuation in
-            write(id: id, scope: scope, value: value) { _ in continuation.resume() }
-        }
     }
 
     private func write(id: String, scope: SettingScope, value: Any, completion: ((Bool) -> Void)?) {
@@ -787,9 +733,6 @@ final class SettingsModel: ObservableObject {
     @Published var isPingingRegions = false
     @Published var pingStatusText: String?
     @Published var bestRegionResult: RegionPingResult?
-    /// Live settings-search text; non-empty shows matches instead of the
-    /// normal route content.
-    @Published var searchQuery = ""
 
     struct RegionPingResult: Equatable {
         let name: String
@@ -991,22 +934,6 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    static func clarityDescription(for pipeline: String) -> String {
-        switch pipeline {
-        case "webgpu-cas":
-            return "WebGPU AMD CAS: Modern compute shader contrast-adaptive sharpening with minimal WebKit CPU overhead."
-        case "webgpu-usm":
-            return "WebGPU Unsharp Mask: Modern compute shader unsharp masking running on Apple Silicon WebGPU."
-        case "webgl-cas":
-            return "WebGL 2 AMD CAS: High-performance contrast-adaptive sharpening that enhances textures without halos."
-        case "webgl-usm":
-            return "WebGL 2 Unsharp Mask: Classic high-frequency convolution filter that accentuates edges with low GPU overhead."
-        case "native":
-            return "Native video pass-through: WebKit hardware decoding with zero post-processing overhead or added latency."
-        default:
-            return "Select a clarity and upscaling pipeline for your stream."
-        }
-    }
 
     /// App-local: a custom LED color chosen with the color picker.
     var customLEDColor: Color {
@@ -1069,10 +996,6 @@ final class SettingsModel: ObservableObject {
         guard let destination = forwardStack.popLast() else { return }
         backStack.append(route)
         applyRoute(destination)
-    }
-
-    func navigateHome() {
-        navigate(to: .home)
     }
 
     private func applyRoute(_ destination: SettingsRoute) {
@@ -1174,12 +1097,6 @@ final class SettingsModel: ObservableObject {
 
     func globalValue(_ key: String) -> Any? { globalValues[key] }
 
-    /// Records a global value the app changed through another path.
-    func noteGlobal(_ key: String, value: Any) {
-        globalValues[key] = value
-        objectWillChange.send()
-    }
-    func streamValue(_ key: String) -> Any? { streamValues[key] }
 
     /// Index of a setting's default option, shown while it is untouched.
     func defaultOptionIndex(_ def: SettingDef) -> Int {
@@ -1252,18 +1169,6 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    func defaultValueLabel(_ def: SettingDef) -> String {
-        switch def.kind {
-        case .option(let values, let labels, let defaultValue):
-            if let index = values.firstIndex(of: defaultValue) { return labels.indices.contains(index) ? labels[index] : "Default" }
-        case .numberOption(let values, let labels, let defaultValue):
-            if let index = values.firstIndex(of: defaultValue) { return labels.indices.contains(index) ? labels[index] : "Default" }
-        default:
-            break
-        }
-        return "Default"
-    }
-
     /// Current numeric value for slider rows (falls back to the default).
     func rangeValue(_ def: SettingDef) -> Double? {
         guard case .range(let lower, let upper, _, let defaultValue, _) = def.kind else { return nil }
@@ -1271,11 +1176,6 @@ final class SettingsModel: ObservableObject {
         if let value = raw as? Double { return min(max(value, lower), upper) }
         if let value = raw as? Int, let asDouble = Double(exactly: value) { return min(max(asDouble, lower), upper) }
         return defaultValue
-    }
-
-    func rangeText(_ def: SettingDef) -> String? {
-        guard let value = rangeValue(def), case .range(_, _, _, _, let format) = def.kind else { return nil }
-        return format(value)
     }
 
     func multiSelection(_ def: SettingDef) -> Set<String> {
@@ -1295,39 +1195,11 @@ final class SettingsModel: ObservableObject {
 
     // MARK: - Changes
 
-    func toggle(_ def: SettingDef) {
-        setToggle(def, desired: !isOn(def))
-    }
-
     func setToggle(_ def: SettingDef, desired: Bool) {
         guard case .toggle = def.kind else { return }
         write(def, desired)
     }
 
-    func adjust(_ def: SettingDef, delta: Int) {
-        switch def.kind {
-        case .toggle:
-            toggle(def)
-        case .option(let values, _, _):
-            let index = wrap((optionIndex(def) ?? -1) + delta, values.count)
-            write(def, values[index])
-        case .numberOption(let values, _, _):
-            let index = wrap((optionIndex(def) ?? -1) + delta, values.count)
-            write(def, values[index])
-        case .range(let lower, let upper, let step, let defaultValue, _):
-            let current = rangeValue(def) ?? defaultValue
-            let new = min(max(current + Double(delta) * step, lower), upper)
-            write(def, new)
-        case .serverRegion:
-            let proposed = wrap(regionIndex + delta, regions.count)
-            write(def, regions[proposed].value)
-        case .ledColor:
-            ledColorIndex = min(max(wrap(ledColorIndex + delta, LEDColor.all.count), 0), max(0, LEDColor.all.count - 1))
-        default:
-            break
-        }
-        objectWillChange.send()
-    }
 
     func setOption(_ def: SettingDef, index: Int) {
         switch def.kind {
@@ -1368,11 +1240,6 @@ final class SettingsModel: ObservableObject {
         write(id: def.id, scope: def.scope, value: value)
     }
 
-    private func wrap(_ value: Int, _ count: Int) -> Int {
-        guard count > 0 else { return 0 }
-        return ((value % count) + count) % count
-    }
-
     private func jsonEncoded(_ value: Any) -> String {
         if let bool = value as? Bool { return bool ? "true" : "false" }
         if let int = value as? Int { return String(int) }
@@ -1380,54 +1247,5 @@ final class SettingsModel: ObservableObject {
         if let string = value as? String { return "'\(string.replacingOccurrences(of: "'", with: "\\'"))'" }
         if let array = value as? [String] { return "[" + array.map { "'\($0)'" }.joined(separator: ",") + "]" }
         return "null"
-    }
-}
-
-extension SettingDef {
-    func optionValues() -> [String]? {
-        if case .option(let values, _, _) = kind { return values }
-        return nil
-    }
-}
-
-extension SettingsModel {
-    // MARK: - Settings search
-
-    var isSearching: Bool {
-        !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    struct SearchHit {
-        let category: SettingsCategory
-        let def: SettingDef
-    }
-
-    var searchHits: [SearchHit] {
-        let needle = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return [] }
-        var hits: [SearchHit] = []
-        for category in SettingsCategory.all {
-            for def in category.rows {
-                let haystack = "\(def.label) \(def.note ?? "") \(def.id) \(category.title)".lowercased()
-                if haystack.contains(needle) {
-                    hits.append(SearchHit(category: category, def: def))
-                }
-            }
-        }
-        return hits
-    }
-
-    /// Settings categories that expose at least one matching row, with their
-    /// row count, so results can be grouped by page.
-    var searchCategories: [(category: SettingsCategory, hits: [SearchHit])] {
-        var grouped: [(category: SettingsCategory, hits: [SearchHit])] = []
-        for hit in searchHits {
-            if let index = grouped.firstIndex(where: { $0.category.id == hit.category.id }) {
-                grouped[index].hits.append(hit)
-            } else {
-                grouped.append((hit.category, [hit]))
-            }
-        }
-        return grouped
     }
 }

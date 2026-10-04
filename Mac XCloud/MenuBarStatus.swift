@@ -5,11 +5,7 @@ import SwiftUI
 final class MenuBarStatusController: NSObject, NSMenuDelegate {
     private let item: NSStatusItem
     private weak var browser: BrowserModel?
-    private var timer: Timer?
     private var terminateObserver: NSObjectProtocol?
-    /// Rebuilding a menu while it is open closes its submenus under the
-    /// pointer; refreshes wait until it closes, and it refreshes on opening.
-    private var isMenuOpen = false
 
     init(browser: BrowserModel) {
         self.browser = browser
@@ -17,13 +13,11 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
         super.init()
         item.button?.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "Mac Xcloud")
         item.button?.toolTip = "Mac Xcloud"
-        refreshMenu()
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshMenu() }
-        }
-        // .common mode keeps the status item fresh while a window is dragged.
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        // Built when it opens, so nothing runs on the main thread (which also
+        // reads the controller) while it is closed.
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -31,11 +25,9 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// Removes the status item and its refresh timer during quit so the icon
-    /// never outlives the terminating process.
+    /// Removes the status item during quit so the icon never outlives the
+    /// terminating process.
     func tearDown() {
-        timer?.invalidate()
-        timer = nil
         item.menu = nil
         NSStatusBar.system.removeStatusItem(item)
         if let terminateObserver {
@@ -44,14 +36,9 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
         }
     }
 
-    func menuWillOpen(_ menu: NSMenu) { isMenuOpen = true }
-    func menuDidClose(_ menu: NSMenu) { isMenuOpen = false }
-
-    func refreshMenu() {
-        guard let browser, !isMenuOpen else { return }
-        let menu = NSMenu()
-        menu.delegate = self
-
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let browser else { return }
+        menu.removeAllItems()
         // What's playing, and how the stream is doing, at a glance.
         let playing = browser.isStreaming
         menu.addItem(label(playing && !browser.currentGameTitle.isEmpty ? browser.currentGameTitle : (playing ? "Playing" : "Not playing"), bold: true))
@@ -111,7 +98,6 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(action("Check for Updates…", #selector(checkForUpdates)))
         menu.addItem(action("Quit Mac Xcloud", #selector(quitApp), key: "q"))
-        item.menu = menu
     }
 
     private func label(_ text: String, bold: Bool = false) -> NSMenuItem {

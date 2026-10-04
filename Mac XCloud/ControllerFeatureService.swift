@@ -91,10 +91,6 @@ final class ControllerFeatureService: ObservableObject {
     /// Gyro aiming switched off with a toggling pause button.
     @Published private(set) var gyroAimToggledOff = false
     var onGyroPauseToggled: ((Bool) -> Void)?
-    /// The game in the stream takes mouse input (native keyboard & mouse).
-    @Published var gyroMouseAvailable = false
-    private var mouseRemainder = (x: 0.0, y: 0.0)
-    private var mouseSequence = 0.0
     private var lastTickAt: TimeInterval = 0
     private var lastTouchReportAt: TimeInterval = 0
     private var touchReportsThisTick = 0
@@ -111,15 +107,6 @@ final class ControllerFeatureService: ObservableObject {
     /// shakes exactly like game rumble does.
     private var triggerVibrationActive = false
     private var localHapticEndsAt: TimeInterval = 0
-    /// Rumble targets from the game, per grip, and the level driven by the
-    /// game's sound; the stronger of the two plays.
-    private var gameRumble: [HapticLocality: (intensity: Float, sharpness: Float)] = [:]
-    private var audioRumble: Float = 0
-    private var audioRumbleAt: TimeInterval = 0
-    private var audioRumbleEndsAt: TimeInterval = 0
-    /// Tells the page to start or stop listening to the game's sound.
-    var onAudioHapticsWanted: ((Bool) -> Void)?
-    private(set) var audioHapticsWanted = false
 
     // Live values for the settings previews (published only while visible).
     @Published private(set) var liveSteeringAngle: Double = 0
@@ -137,7 +124,6 @@ final class ControllerFeatureService: ObservableObject {
     @Published private(set) var outputRateHz: Double = 0
     @Published private(set) var motionReportRateHz: Double = 0
     private var outputSamplesThisSecond = 0
-    private var outputRateWindowStart: TimeInterval = 0
     private static let steeringCenterKey = "motion.steeringCenterBank.v2"
     private func legacyBiasKey(for controller: GCController?) -> String {
         "motion.gyroBias.v1." + (controller?.vendorName ?? "controller")
@@ -174,17 +160,6 @@ final class ControllerFeatureService: ObservableObject {
         gyroCalibration = fusion.calibration
     }
 
-    /// Kept for shortcuts and older call sites: recenter steering and restart
-    /// aiming from rest.
-    func centerGyro() {
-        switch enhancements.gyroMode {
-        case .steering: recenterSteering()
-        default: break
-        }
-        gyroAim.reset()
-        touchCamera.reset()
-    }
-
     private func ingestMotion(_ motion: GCMotion) {
         let now = ProcessInfo.processInfo.systemUptime
         lastMotionReportAt = now
@@ -209,10 +184,10 @@ final class ControllerFeatureService: ObservableObject {
         }
     }
 
+    /// The controller is vibrating: its accelerometer is mostly shake then,
+    /// and its gyro too noisy to learn the resting offset from.
     private func isVibrating(at now: TimeInterval) -> Bool {
-        guard enhancements.effectiveSteeringRumbleGuard else { return false }
-        return now < streamRumbleEndsAt || now < triggerFeedbackEndsAt || now < localHapticEndsAt || now < audioRumbleEndsAt
-            || triggerVibrationActive
+        now < streamRumbleEndsAt || now < triggerFeedbackEndsAt || now < localHapticEndsAt || triggerVibrationActive
     }
 
     private func loadBias(for controller: GCController) {
@@ -262,33 +237,13 @@ final class ControllerFeatureService: ObservableObject {
         if controller != nil { saveBias(force: true) }
     }
 
-    func resetRumbleDiagnostics() {
-        rumbleCounts = (0, 0)
-        rumbleEventCount = 0; triggerRumbleEventCount = 0
-        rumbleChannels = "No stream rumble received"
-    }
-
     func stopStreamRumble() {
-        gameRumble = [:]
-        audioRumble = 0
         stopRumblePlayers()
         streamRumbleEndsAt = 0
         triggerRestoreTask?.cancel(); triggerRestoreTask = nil
         if triggerFeedbackEndsAt > 0 { applyAdaptiveTriggerSettings() }
         triggerFeedbackEndsAt = 0
         lastGameTriggerLevels = ControllerVector2(x: -1, y: -1)
-    }
-
-    /// The game's rumble ran out on its own; sound-driven vibration, if
-    /// any, carries on without a gap.
-    private func endGameRumble() {
-        gameRumble = [:]
-        streamRumbleEndsAt = 0
-        triggerRestoreTask?.cancel(); triggerRestoreTask = nil
-        if triggerFeedbackEndsAt > 0 { applyAdaptiveTriggerSettings() }
-        triggerFeedbackEndsAt = 0
-        lastGameTriggerLevels = ControllerVector2(x: -1, y: -1)
-        applyRumbleMix()
     }
 
     func recordRumble(left: Float, right: Float, leftTrigger: Float, rightTrigger: Float) {
@@ -319,6 +274,18 @@ final class ControllerFeatureService: ObservableObject {
         // the whole body still rumbles the way an Xbox controller does.
         let low = min(e.rumble(left, global: globalRumbleGain) * gain, 1)
         let high = min(e.rumble(right, global: globalRumbleGain) * gain, 1)
+        // Trigger rumble plays in a trigger only while it has no effect of
+        // its own: a DualSense trigger cannot resist and vibrate at once, and
+        // a racing game's near-constant trigger rumble would wipe out the
+        // pedal feel. A trigger with an effect keeps it; its rumble is felt
+        // in that side's grip instead.
+        let triggers = settings.adaptiveTriggers
+        let leftFree = triggers.leftPreset == .off && !e.leftLock
+        let rightFree = triggers.rightPreset == .off && !e.rightLock
+        let leftTriggerLevel = e.gameDrivenTriggers ? e.rumble(leftTrigger, global: globalRumbleGain) : 0
+        let rightTriggerLevel = e.gameDrivenTriggers ? e.rumble(rightTrigger, global: globalRumbleGain) : 0
+        let leftGrip = leftFree ? 0 : 0.5 * leftTriggerLevel
+        let rightGrip = rightFree ? 0 : 0.5 * rightTriggerLevel
         let highShare = low + high > 0 ? high / (low + high) : 0
         let texture = (min(max(settings.haptics.sharpness, 0), 1) - 0.5) * 0.4
         func clampUnit(_ value: Float) -> Float { min(max(value, 0), 1) }
@@ -326,22 +293,26 @@ final class ControllerFeatureService: ObservableObject {
         let locality = settings.haptics.preferredLocality
         if (locality == .default || locality == .handles || locality == .all),
            hapticEngines[.leftHandle] != nil, hapticEngines[.rightHandle] != nil {
-            targets[.leftHandle] = (clampUnit(low + 0.35 * high), clampUnit(0.15 + 0.25 * highShare + texture))
-            targets[.rightHandle] = (clampUnit(high + 0.5 * low), clampUnit(0.35 + 0.4 * highShare + texture))
+            targets[.leftHandle] = (clampUnit(low + 0.35 * high + leftGrip), clampUnit(0.15 + 0.25 * highShare + texture))
+            targets[.rightHandle] = (clampUnit(high + 0.5 * low + rightGrip), clampUnit(0.35 + 0.4 * highShare + texture))
         } else {
-            targets[locality] = (clampUnit(max(low, high) + 0.25 * min(low, high)), clampUnit(0.2 + 0.5 * highShare + texture))
+            targets[locality] = (clampUnit(max(low, high) + 0.25 * min(low, high) + max(leftGrip, rightGrip)), clampUnit(0.2 + 0.5 * highShare + texture))
         }
-        gameRumble = targets
-        applyRumbleMix()
+        for (channel, level) in targets { setRumble(level, on: channel) }
         if e.gameDrivenTriggers, let pad = controller?.extendedGamepad as? GCDualSenseGamepad {
-            let levels = ControllerVector2(x: e.rumble(leftTrigger, global: globalRumbleGain), y: e.rumble(rightTrigger, global: globalRumbleGain))
-            if levels != lastGameTriggerLevels {
-                if levels.x <= 0 || levels.y <= 0 { applyAdaptiveTriggerSettings() }
-                if !e.leftLock, levels.x > 0 { pad.leftTrigger.setModeVibrationWithStartPosition(0.1, amplitude: levels.x, frequency: 0.5) }
-                if !e.rightLock, levels.y > 0 { pad.rightTrigger.setModeVibrationWithStartPosition(0.1, amplitude: levels.y, frequency: 0.5) }
-                lastGameTriggerLevels = levels
+            let levels = ControllerVector2(x: leftFree ? leftTriggerLevel : 0, y: rightFree ? rightTriggerLevel : 0)
+            // Only a trigger whose level changed is touched; one that stops
+            // returns to off (its setting, as it has no effect of its own).
+            for (trigger, level, previous) in [(pad.leftTrigger, levels.x, lastGameTriggerLevels.x),
+                                               (pad.rightTrigger, levels.y, lastGameTriggerLevels.y)] where level != previous {
+                if level > 0 {
+                    trigger.setModeVibrationWithStartPosition(0.1, amplitude: level, frequency: 0.5)
+                } else if previous > 0 {
+                    trigger.setModeOff()
+                }
             }
-            triggerFeedbackEndsAt = now + seconds
+            lastGameTriggerLevels = levels
+            if levels.x > 0 || levels.y > 0 { triggerFeedbackEndsAt = now + seconds }
         }
     }
 
@@ -426,14 +397,16 @@ final class ControllerFeatureService: ObservableObject {
         } else {
             settings = .default
         }
-        defaults.set(4, forKey: "nativeController.settingsVersion")
+        defaults.set(max(defaults.integer(forKey: "nativeController.settingsVersion"), 4), forKey: "nativeController.settingsVersion")
         let center = defaults.double(forKey: Self.steeringCenterKey)
         if center.isFinite, abs(center) < .pi / 2 {
             steering.centerBank = center
             steeringCenterDegrees = center * 180 / .pi
         }
-        registerForControllerNotifications()
+        // A service that does not attach (Settings previews, unattended
+        // checks) never takes hold of the player's controller later either.
         if automaticallyAttach {
+            registerForControllerNotifications()
             attach(to: GCController.current ?? GCController.controllers().first)
         }
     }
@@ -481,7 +454,6 @@ final class ControllerFeatureService: ObservableObject {
         applyLEDPolicy()
         publishCurrentSnapshot()
         startPolling()
-        refreshAudioHapticsWanted()
     }
 
     func detach() {
@@ -531,7 +503,6 @@ final class ControllerFeatureService: ObservableObject {
         snapshot = .empty
         previousSnapshot = .empty
         shortcutRuntime.removeAll()
-        refreshAudioHapticsWanted()
     }
 
     func attachFirstAvailableController() {
@@ -594,11 +565,6 @@ final class ControllerFeatureService: ObservableObject {
         highRateUIDetail = enabled
     }
 
-    func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-    }
-
     // MARK: - Settings persistence
 
     func reloadSettings() {
@@ -619,6 +585,7 @@ final class ControllerFeatureService: ObservableObject {
     func updateSettings(_ update: (inout ControllerSettings) -> Void) {
         var copy = settings
         update(&copy)
+        guard copy != settings else { return }
         settings = copy
     }
 
@@ -653,7 +620,6 @@ final class ControllerFeatureService: ObservableObject {
             applyAdaptiveTriggerSettings()
         }
         if settings.led != previous.led { applyLEDPolicy() }
-        refreshAudioHapticsWanted()
     }
 
     // MARK: - Input snapshots
@@ -661,7 +627,7 @@ final class ControllerFeatureService: ObservableObject {
     func publishCurrentSnapshot() {
         guard let controller, let gamepad = controller.extendedGamepad else { return }
         let timestamp = ProcessInfo.processInfo.systemUptime
-        if streamRumbleEndsAt > 0 && timestamp >= streamRumbleEndsAt { endGameRumble() }
+        if streamRumbleEndsAt > 0 && timestamp >= streamRumbleEndsAt { stopStreamRumble() }
         let rawLeftStick = ControllerVector2(x: gamepad.leftThumbstick.xAxis.value, y: gamepad.leftThumbstick.yAxis.value)
         let rawRightStick = ControllerVector2(x: gamepad.rightThumbstick.xAxis.value, y: gamepad.rightThumbstick.yAxis.value)
         let rawLeftTrigger = gamepad.leftTrigger.value
@@ -757,7 +723,6 @@ final class ControllerFeatureService: ObservableObject {
                 let active = (e.effectiveGyroActivation == .always || next.leftTrigger > 0.3) && !paused
                 if active && !gyroAimWasActive { gyroAim.reset() }
                 gyroAimWasActive = active
-                let asMouse = e.effectiveGyroOutput == .mouse && gyroMouseAvailable
                 if active, motionFresh {
                     gyroAim.configure(e.gyroAimConfiguration)
                     // Sensors report slower than the tick (~65 Hz over
@@ -767,19 +732,12 @@ final class ControllerFeatureService: ObservableObject {
                     let hold = max(3 * sampleClock.nominalInterval, 0.05)
                     let rate = timestamp - lastAimRateAt < hold ? lastAimRate : .zero
                     let result = gyroAim.sample(rate: rate, gravity: fusion.gravity, dt: tickDT)
-                    if asMouse {
-                        addMouseTurn(gyroAim.turn, countsPerDegree: Double(e.effectiveGyroMouseSensitivity), to: &output)
-                        output["gyroX"] = 0; output["gyroY"] = 0
-                        output["gyroFineX"] = 0; output["gyroFineY"] = 0
-                    } else {
-                        output["gyroX"] = Double(result.coarse.x)
-                        output["gyroY"] = Double(result.coarse.y)
-                        output["gyroFineX"] = Double(result.fine.x)
-                        output["gyroFineY"] = Double(result.fine.y)
-                    }
+                    output["gyroX"] = Double(result.coarse.x)
+                    output["gyroY"] = Double(result.coarse.y)
+                    output["gyroFineX"] = Double(result.fine.x)
+                    output["gyroFineY"] = Double(result.fine.y)
                 } else {
                     gyroAim.reset()
-                    mouseRemainder = (0, 0)
                     output["gyroX"] = 0; output["gyroY"] = 0
                     output["gyroFineX"] = 0; output["gyroFineY"] = 0
                 }
@@ -882,22 +840,6 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     private var lastLEDCheckAt: TimeInterval = 0
-
-    /// Gyro as a mouse: the tick's turn becomes whole mouse counts, with the
-    /// fraction carried to the next tick so slow turns are never lost. Each
-    /// delta carries a sequence number; the page applies it exactly once.
-    private func addMouseTurn(_ turn: (x: Double, y: Double), countsPerDegree: Double, to output: inout [String: Double]) {
-        let degrees = 180 / Double.pi
-        mouseRemainder.x += turn.x * degrees * countsPerDegree
-        mouseRemainder.y -= turn.y * degrees * countsPerDegree   // turning up moves the mouse up (negative)
-        let x = mouseRemainder.x.rounded(.towardZero), y = mouseRemainder.y.rounded(.towardZero)
-        guard x != 0 || y != 0 else { return }
-        mouseRemainder.x -= x; mouseRemainder.y -= y
-        mouseSequence += 1
-        output["mouseX"] = x
-        output["mouseY"] = y
-        output["mouseSeq"] = mouseSequence
-    }
 
     /// Whether the pause button currently stops gyro aiming. Holding pauses;
     /// with toggling, each press switches gyro aiming off or back on.
@@ -1095,6 +1037,16 @@ final class ControllerFeatureService: ObservableObject {
 
     // MARK: - Adaptive triggers
 
+    /// Puts the trigger effects and the light bar back on the controller, in
+    /// case the system or another app changed them while Mac Xcloud was in
+    /// the background.
+    func restoreControllerEffects() {
+        guard controller != nil, !isApplyingSettings else { return }
+        lastGameTriggerLevels = ControllerVector2(x: 0, y: 0)
+        applyAdaptiveTriggerSettings()
+        applyLEDPolicy()
+    }
+
     func applyAdaptiveTriggerSettings() {
         leftTriggerEnvelope = ControllerTriggerEnvelope(); rightTriggerEnvelope = ControllerTriggerEnvelope()
         leftTriggerBoost = 0; rightTriggerBoost = 0
@@ -1280,60 +1232,6 @@ final class ControllerFeatureService: ObservableObject {
             rumbleLevels[channel] = nil
             let message = "Rumble failed: \(error.localizedDescription)"
             if lastError != message { lastError = message }
-        }
-    }
-
-    // MARK: - Sound-driven vibration
-
-    /// Whether the page should measure the game's sound right now.
-    func refreshAudioHapticsWanted() {
-        let wanted = enhancements.audioHaptics == true && settings.haptics.mode != .off
-            && controller != nil && !hapticEngines.isEmpty
-        guard wanted != audioHapticsWanted else { return }
-        audioHapticsWanted = wanted
-        if !wanted, audioRumble != 0 { audioRumble = 0; applyRumbleMix() }
-        onAudioHapticsWanted?(wanted)
-    }
-
-    /// The loudness of the game's low sounds (RMS below ~140 Hz, 0…1), about
-    /// 50 times a second. Quiet sound does nothing; loud bass approaches the
-    /// chosen strength. Attack is quick, release slower, so engines hum and
-    /// impacts thump without chatter.
-    func receiveAudioLevel(_ rms: Double) {
-        let now = ProcessInfo.processInfo.systemUptime
-        let dt = audioRumbleAt > 0 ? min(max(now - audioRumbleAt, 0.001), 0.2) : 0.02
-        audioRumbleAt = now
-        guard streamInputEnabled, audioHapticsWanted, rms.isFinite else {
-            if audioRumble != 0 { audioRumble = 0; applyRumbleMix() }
-            return
-        }
-        let gate = 0.03, full = 0.3
-        let demand = pow(min(max(rms - gate, 0) / (full - gate), 1), 0.75)
-        let target = Float(demand) * enhancements.effectiveAudioHapticsStrength * min(globalRumbleGain, 1.5)
-        let tau: Float = target > audioRumble ? 0.015 : 0.12
-        audioRumble += (target - audioRumble) * (1 - exp(-Float(dt) / tau))
-        if audioRumble < 0.01 { audioRumble = target > 0 ? audioRumble : 0 }
-        if audioRumble > 0.05 { audioRumbleEndsAt = now + 0.15 }
-        applyRumbleMix()
-    }
-
-    /// Plays the stronger of the game's rumble and the sound-driven level on
-    /// each grip.
-    private func applyRumbleMix() {
-        var targets = gameRumble
-        if audioRumble > 0.003 {
-            let texture = (min(max(settings.haptics.sharpness, 0), 1) - 0.5) * 0.4
-            let locality = settings.haptics.preferredLocality
-            let grips = (locality == .default || locality == .handles || locality == .all)
-                && hapticEngines[.leftHandle] != nil && hapticEngines[.rightHandle] != nil
-            for channel in grips ? [HapticLocality.leftHandle, .rightHandle] : [locality] {
-                if audioRumble > (targets[channel]?.intensity ?? 0) {
-                    targets[channel] = (min(audioRumble, 1), min(max(0.12 + texture, 0), 1))
-                }
-            }
-        }
-        for channel in Set(targets.keys).union(rumbleLevels.keys) {
-            setRumble(targets[channel] ?? (0, 0.5), on: channel)
         }
     }
 

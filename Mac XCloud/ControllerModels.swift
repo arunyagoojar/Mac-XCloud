@@ -515,14 +515,6 @@ enum AdaptiveTriggerSide: String, CaseIterable, Sendable {
     case left, right
 }
 
-/// A library reference is selection metadata; the applied effect is always a snapshot.
-enum AdaptiveTriggerSelection: Hashable, Sendable {
-    case builtIn(AdaptiveTriggerPreset)
-    case custom(UUID)
-    case currentCustomSnapshot
-}
-
-
 struct AdaptiveTriggerSettings: Codable, Equatable, Sendable {
     var leftPreset: AdaptiveTriggerPreset
     var rightPreset: AdaptiveTriggerPreset
@@ -833,17 +825,6 @@ struct ControllerMacro: Codable, Equatable, Identifiable, Sendable {
         }
     }
 
-    mutating func replaceSteps(_ newSteps: [ControllerMacroStep]) throws {
-        let oldSteps = steps
-        steps = newSteps
-        do {
-            try validate()
-        } catch {
-            steps = oldSteps
-            throw error
-        }
-    }
-
     func validate() throws {
         guard steps.count <= Self.maximumStepCount else {
             throw ControllerMacroValidationError.tooManySteps(maximum: Self.maximumStepCount)
@@ -1130,15 +1111,6 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
     var gyroPauseToggles: Bool? = nil
     /// The pause button stops reaching the game (bumpers and stick presses).
     var gyroPauseExclusive: Bool? = nil
-    /// Right stick (every game) or mouse movement (games with keyboard &
-    /// mouse support; others fall back to the stick).
-    var gyroOutput: GyroAimOutput? = nil
-    /// Mouse counts per degree of controller rotation.
-    var gyroMouseSensitivity: Float? = nil
-    /// Low sounds in the game (engines, impacts, explosions) also play as
-    /// vibration, on top of the game's own rumble.
-    var audioHaptics: Bool? = nil
-    var audioHapticsStrength: Float? = nil
     var steeringAngleDegrees: Float? = nil
     var steeringPhysicalDeadzone: Float? = nil
     var steeringRangeDegrees: Float? = nil
@@ -1146,6 +1118,8 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
     var steeringExponent: Float? = nil
     var steeringInverted: Bool? = nil
     var steeringMaximum: Float? = nil
+    // Retired: rumble is always kept out of the wheel now. Decoded so older
+    // profiles round-trip.
     var steeringRumbleGuard: Bool? = nil
     var steeringAntiDeadzone: Float? = nil
     var steeringSmoothing: Float? = nil
@@ -1174,7 +1148,6 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
 
     // MARK: Steering
 
-    var effectiveSteeringRumbleGuard: Bool { steeringRumbleGuard ?? true }
     var effectiveSteeringMaximum: Float { Self.finite(steeringMaximum, 1, 0.2...1) }
     /// Physical rotation per side that reaches full stick output.
     var effectiveSteeringAngleDegrees: Float {
@@ -1212,9 +1185,6 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
     var effectiveAimDeadzoneCompensation: Float { Self.finite(gyroOutputFloor, Self.defaultAimDeadzoneCompensation, 0...0.4) }
     var effectiveGyroStillThreshold: Float { Self.finite(gyroStillThreshold, 1.4, 0.3...5) }
     var effectiveGyroSmoothing: Float { Self.finite(gyroSmoothing, 0.5, 0...1) }
-    var effectiveGyroOutput: GyroAimOutput { gyroOutput ?? .stick }
-    var effectiveAudioHapticsStrength: Float { Self.finite(audioHapticsStrength, 0.6, 0.1...1) }
-    var effectiveGyroMouseSensitivity: Float { Self.finite(gyroMouseSensitivity, 12, 1...60) }
 
     var gyroAimConfiguration: GyroAimEngine.Configuration {
         GyroAimEngine.Configuration(
@@ -1275,18 +1245,6 @@ enum GyroAimActivation: String, Codable, CaseIterable, Sendable {
         switch self {
         case .always: return "Always"
         case .whileAiming: return "While aiming (LT)"
-        }
-    }
-}
-
-/// Where gyro aiming goes.
-enum GyroAimOutput: String, Codable, CaseIterable, Sendable {
-    case stick, mouse
-
-    var title: String {
-        switch self {
-        case .stick: return "Right stick"
-        case .mouse: return "Mouse"
         }
     }
 }

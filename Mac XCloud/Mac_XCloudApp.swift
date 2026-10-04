@@ -51,7 +51,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var quitConfirmed = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if browser.statusController == nil { browser.statusController = MenuBarStatusController(browser: browser) }
+        // Unattended checks stay out of the Dock, the menu bar and the player's way.
+        if BrowserModel.isAutomatedCheck {
+            NSApp.setActivationPolicy(.accessory)
+        } else if browser.statusController == nil {
+            browser.statusController = MenuBarStatusController(browser: browser)
+        }
         browser.openMainWindow()
         handleLaunchArguments()
     }

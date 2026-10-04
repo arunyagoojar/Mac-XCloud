@@ -23,11 +23,11 @@ struct KeyboardMouseSettingsPage: View {
     var body: some View {
         SettingsPage("Keyboard & Mouse") {
             SettingsGroup("Games with Keyboard & Mouse Support",
-                          footer: "Works like Xbox Cloud Gaming in Chrome or Edge: games that support keyboard and mouse get them directly.") {
+                          footer: "These games get your keyboard and mouse directly, as in Chrome or Edge. While you use them, the controller's motion controls pause until you press a button on it. Turn this off to play these games with the layout below instead.") {
                 SettingsToggleRow(label: "Use keyboard & mouse", isOn: nativeEnabled)
             }
             SettingsGroup("Games Made for Controllers",
-                          footer: "Your keyboard and mouse play as an Xbox controller. Keys work as soon as the game starts; click the game to use the mouse, and hold Esc to release it.") {
+                          footer: "Your keyboard and mouse play as an Xbox controller. Whichever you use last is in control: a key or a click hands it to the keyboard, and a button, trigger or stick on the controller takes it back. Click the game to use the mouse, and hold Esc to release it.") {
                 SettingsToggleRow(label: "Play with keyboard & mouse", isOn: $store.controllerLayoutEnabled)
                 if store.controllerLayoutEnabled {
                     Divider()
@@ -107,11 +107,7 @@ private struct KeyboardLayoutEditor: View {
         VStack(alignment: .leading, spacing: 22) {
             if editable {
                 SettingsGroup(footer: notice ?? "Click a key to change it, then press the new key or mouse button. Esc cancels.") {
-                    SettingsRow("Name") {
-                        TextField("Name", text: Binding(get: { layout.name }, set: { store.rename(layout.id, to: $0) }))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: SettingsMetrics.controlWidth)
-                    }
+                    SettingsRow("Name") { LayoutNameField(store: store, layout: layout) }
                     Divider()
                     mouseRows
                 }
@@ -221,6 +217,33 @@ private struct KeyboardLayoutEditor: View {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             if !Task.isCancelled { notice = nil }
         }
+    }
+}
+
+/// The layout's name, saved when editing ends (Return or leaving the field),
+/// so spaces and an empty field while retyping are fine.
+private struct LayoutNameField: View {
+    @ObservedObject var store: KeyboardMouseStore
+    let layout: KeyboardLayout
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("Name", text: $draft)
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.leading)
+            .frame(width: SettingsMetrics.controlWidth)
+            .focused($focused)
+            .onSubmit(commit)
+            .onAppear { draft = layout.name }
+            .onChange(of: layout.id) { _ in draft = layout.name }
+            .onChange(of: focused) { isFocused in if !isFocused { commit() } }
+            .onDisappear(perform: commit)
+    }
+
+    private func commit() {
+        store.rename(layout.id, to: draft)
+        if let saved = store.customLayouts.first(where: { $0.id == layout.id }) { draft = saved.name }
     }
 }
 

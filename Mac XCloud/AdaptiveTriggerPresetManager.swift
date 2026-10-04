@@ -12,6 +12,9 @@ struct AdaptiveTriggerPresetSelector: View {
                 service.updateSettings {
                     $0.adaptiveTriggers.select(selection, for: side)
                 }
+                // Choosing the current preset again puts it back on the
+                // controller (it may have been replaced in the meantime).
+                service.applyAdaptiveTriggerSettings()
             }
         )) {
             ForEach(AdaptiveTriggerPreset.recommendedCatalog, id: \.self) { preset in

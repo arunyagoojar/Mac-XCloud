@@ -54,7 +54,6 @@ struct OneEuroFilter {
     private var primed = false
 
     var current: Double { primed ? value : 0 }
-    var isPrimed: Bool { primed }
 
     mutating func reset() {
         value = 0; raw = 0; derivative = 0; primed = false
@@ -152,12 +151,14 @@ struct MotionSampleClock {
 ///
 /// Gravity is tracked as a unit vector in the controller's own frame. Every
 /// report rotates it by the measured angular velocity (so orientation follows
-/// the hand with zero lag), then nudges it toward the accelerometer with a
-/// time constant near one second. The accelerometer is trusted only when its
-/// magnitude is close to 1 g — hand translation, centripetal acceleration and
-/// rumble all change the magnitude — and far less while the game is
-/// vibrating the controller. Drift is therefore bounded, shakes are
-/// rejected, and nothing ever snaps.
+/// the hand with zero lag), then moves it toward the accelerometer at a
+/// limited speed, after Jibb Smart's GamepadMotionHelpers: quickly while the
+/// accelerometer is steady, slowly while it is shaky (hand jolts, rumble),
+/// and for small differences no faster than a tenth of the controller's own
+/// rotation speed, so corrections hide inside real movement and a steady hold
+/// shows none of the accelerometer's noise. The accelerometer is ignored
+/// outright when its magnitude is far from 1 g or the controller spins fast.
+/// Drift is therefore bounded, shakes are rejected, and nothing ever snaps.
 ///
 /// The gyroscope's bias (its reading at rest, which a stick output would turn
 /// into a slow camera drift) is measured precisely whenever the controller
@@ -165,11 +166,24 @@ struct MotionSampleClock {
 /// such a measurement exists, and can also be measured explicitly.
 struct MotionFusion {
     struct Configuration {
-        /// Accelerometer correction time constant while handling normally.
-        var gravityTimeConstant: Double = 0.9
-        /// While the controller is vibrating the accelerometer is mostly
-        /// shake; the gyroscope carries orientation almost alone.
-        var vibrationTimeConstant: Double = 2.0
+        /// Correction speed toward the accelerometer (gravity lengths per
+        /// second) while it is steady, and while it is shaky or vibrating.
+        var correctionSteadySpeed: Double = 1.0
+        var correctionShakySpeed: Double = 0.1
+        /// Shakiness (g) at which the correction starts slowing, and at which
+        /// it reaches the shaky speed.
+        var shakinessLow: Double = 0.01
+        var shakinessHigh: Double = 0.4
+        /// Small differences are corrected no faster than this share of the
+        /// rotation speed (with a floor), so a held controller never creeps.
+        /// The floor is higher than for aiming: steering reads the angle
+        /// itself, so a small offset left by rumble must not linger.
+        var correctionRotationShare: Double = 0.1
+        var correctionMinimumSpeed: Double = 0.03
+        /// Differences (gravity lengths) below the first are small and
+        /// corrected only alongside movement; above the second, at full speed.
+        var correctionCloseDistance: Double = 0.03
+        var correctionFarDistance: Double = 0.25
         /// Deviation of |acceleration| from 1 g beyond which the
         /// accelerometer is ignored completely.
         var accelerationTolerance: Double = 0.1
@@ -177,9 +191,9 @@ struct MotionFusion {
         var stillRateThreshold: Double = 0.05
         /// Continuous stillness required before held learning starts.
         var stillTimeRequired: Double = 0.6
-        /// Held learning is slow: a deliberate slow turn that passes for
-        /// stillness (pure yaw keeps gravity put) must not become "drift".
-        var biasTimeConstant: Double = 12.0
+        /// Held learning keeps following the offset as the controller warms
+        /// up during play.
+        var biasTimeConstant: Double = 3.0
         var maximumBias: Double = 0.17
         /// Gyro noise (rad/s, noisiest axis) below which the controller is
         /// resting on something solid. A DualSense on a table measures about
@@ -195,8 +209,7 @@ struct MotionFusion {
         var restingTimeTrusted: Double = 4.0
     }
 
-    /// Where the current bias came from, best last. A held estimate is never
-    /// allowed to overwrite a measured one.
+    /// Where the current bias came from, best last (shown in Settings).
     enum BiasSource: Int, Comparable {
         case none = 0
         case held = 1
@@ -222,14 +235,15 @@ struct MotionFusion {
     /// Latest bias-corrected angular velocity (rad/s, controller frame).
     private(set) var rate = MotionVector.zero
     private(set) var stillTime: Double = 0
-    private(set) var accelerometerTrust: Double = 0
+    /// How far the raw acceleration jumps around its recent average (g).
+    private(set) var shakiness: Double = 0
     private(set) var calibration: CalibrationState = .idle
     private(set) var samples = 0
 
     private var stillReference: MotionVector?
     private var averagedRate = MotionVector.zero
     private var filteredAcceleration: MotionVector?
-    private var disagreementTime: Double = 0
+    private var shakeAverage: MotionVector?
     private var accumulatedRotation = MotionVector.zero
     private var accumulatedTime: Double = 0
     private var accumulatedSamples = 0
@@ -256,18 +270,14 @@ struct MotionFusion {
         stillTime = 0
         stillReference = nil
         filteredAcceleration = nil
-        disagreementTime = 0
+        shakeAverage = nil
+        shakiness = 0
         accumulatedRotation = .zero
         accumulatedTime = 0
         accumulatedSamples = 0
         restTime = 0
         restReference = nil
         statisticsPrimed = false
-    }
-
-    mutating func setBias(_ value: MotionVector, source: BiasSource) {
-        bias = Self.clampBias(value, limit: configuration.maximumBias)
-        biasSource = source
     }
 
     /// Starts an explicit gyro calibration: the controller must rest still
@@ -282,10 +292,6 @@ struct MotionFusion {
 
     mutating func cancelCalibration() {
         if case .measuring = calibration { calibration = .idle }
-    }
-
-    mutating func acknowledgeCalibrationResult() {
-        if calibration == .succeeded || calibration == .failedMoved { calibration = .idle }
     }
 
     /// Feeds one sensor report. `rotationRate` is rad/s, `acceleration` is the
@@ -324,64 +330,62 @@ struct MotionFusion {
             filteredAcceleration = acceleration
         }
 
+        // Shakiness: how far the raw acceleration jumps around its own
+        // quarter-second average (rotated with the gyro, so a turn is not a
+        // shake). Jolts and rumble raise it; a steady grip keeps it near zero.
+        if var average = shakeAverage {
+            if speed > 1e-9 { average = Self.rotate(average, axis: axis, angle: -speed * dt) }
+            let keep = exp2(-dt / 0.25)
+            shakiness = max(shakiness * keep, simd_length(acceleration - average))
+            shakeAverage = acceleration + (average - acceleration) * keep
+        } else {
+            shakeAverage = acceleration
+        }
+
         guard var down = gravity else {
             // Start only from a clean reading: an arm in motion would seed a
             // tilted horizon that then takes seconds to unwind.
             if let measuredDown, abs(magnitude - 1) < 0.05 { gravity = measuredDown }
-            accelerometerTrust = 0
             return
         }
         if speed > 1e-9 {
             down = Self.rotate(down, axis: axis, angle: -speed * dt)
         }
-        // Correction toward the accelerometer, weighted by how much it can be
-        // believed right now.
-        var trust = 0.0
         if let filtered = filteredAcceleration {
             let filteredMagnitude = simd_length(filtered)
-            let deviation = abs(filteredMagnitude - 1)
-            let tolerance = configuration.accelerationTolerance
-            if deviation < tolerance, filteredMagnitude > 0.2 {
-                let measured = filtered / filteredMagnitude
-                trust = pow(1 - deviation / tolerance, 2)
-                // Fast rotation adds centripetal acceleration of its own.
-                trust *= min(max(1 - (speed - 1.5) / 3, 0), 1)
-                // Arm movement tilts the measured direction briefly without
-                // much change in magnitude. A sudden disagreement with the
-                // gyro-tracked direction is distrusted; one that persists is
-                // real drift and is corrected normally.
-                let disagreement = acos(min(max(simd_dot(measured, down), -1), 1))
-                if disagreement > 4 * .pi / 180 {
-                    disagreementTime = min(disagreementTime + dt, 2)
-                } else {
-                    disagreementTime = max(disagreementTime - 3 * dt, 0)
+            // Linear acceleration changes the magnitude; a fast spin adds
+            // centripetal acceleration of its own. Neither is gravity.
+            let spinTrust = min(max(1 - (speed - 1.5) / 3, 0), 1)
+            if abs(filteredMagnitude - 1) < configuration.accelerationTolerance, filteredMagnitude > 0.2, spinTrust > 0 {
+                let c = configuration
+                let gap = filtered / filteredMagnitude - down
+                let distance = simd_length(gap)
+                let shake = min(max((shakiness - c.shakinessLow) / (c.shakinessHigh - c.shakinessLow), 0), 1)
+                var correction = c.correctionSteadySpeed + (c.correctionShakySpeed - c.correctionSteadySpeed) * shake
+                if vibrating { correction = min(correction, c.correctionShakySpeed) }
+                correction *= spinTrust
+                let limit = max(speed * c.correctionRotationShare, c.correctionMinimumSpeed)
+                if correction > limit {
+                    let far = min(max((distance - c.correctionCloseDistance) / (c.correctionFarDistance - c.correctionCloseDistance), 0), 1)
+                    correction = limit + (correction - limit) * far
                 }
-                let persistent = disagreementTime >= 0.6
-                if !persistent {
-                    let ratio = disagreement / (3 * .pi / 180)
-                    trust *= 1 / (1 + ratio * ratio)
-                }
-                if trust > 0 {
-                    var tau = vibrating ? configuration.vibrationTimeConstant : configuration.gravityTimeConstant
-                    // A disagreement that outlasts any arm movement is real
-                    // error (a long sensor gap, a hard knock): fix it briskly.
-                    if persistent { tau = min(tau, 0.3) }
-                    let alpha = (1 - exp(-dt / max(tau, 0.05))) * trust
-                    down = simd_normalize(down + (measured - down) * alpha)
+                let step = correction * dt
+                if distance > 1e-9 {
+                    down = step >= distance ? filtered / filteredMagnitude : simd_normalize(down + gap * (step / distance))
                 }
             }
         }
-        accelerometerTrust = trust
         gravity = down
     }
 
     /// Gravity projected `elapsed` seconds past the last report using the
     /// latest angular velocity. Sensors report at ~65 Hz over Bluetooth;
-    /// reading orientation between reports this way removes the 15 ms
-    /// staircase and the half-interval of latency it adds.
+    /// reading orientation between reports this way smooths the 15 ms
+    /// staircase. At most 8 ms (half a report) is projected: further, a hand
+    /// that stops would be carried past where it stopped and then snap back.
     func predictedGravity(after elapsed: Double) -> MotionVector? {
         guard let gravity else { return nil }
-        let step = min(max(elapsed, 0), 0.04)
+        let step = min(max(elapsed, 0), 0.008)
         let speed = simd_length(rate)
         guard step > 0, speed > 1e-9 else { return gravity }
         return Self.rotate(gravity, axis: rate / speed, angle: -speed * step)
@@ -418,21 +422,23 @@ struct MotionFusion {
     }
 
     private mutating func learnBias(raw: MotionVector, down: MotionVector?, magnitude: Double, dt: Double, vibrating: Bool) {
+        // On a table the offset is measured outright (precise and quick).
         if learnRestingBias(down: down, magnitude: magnitude, dt: dt, vibrating: vibrating) { return }
-        // Held still in the hands. Stillness is judged on motion averaged
-        // over ~0.25 s: tremor swings the instantaneous rate past any sensible
-        // threshold but averages out. Learning here is deliberately slow and
-        // stops once a resting measurement exists, because a slow deliberate
-        // turn (pure yaw leaves gravity unchanged) looks the same as drift.
+        // In the hands, stillness is judged on motion averaged over ~0.25 s:
+        // hand tremor in a resting grip swings the instantaneous rate past any
+        // sensible threshold but averages to (bias-sized) nothing, so the drift
+        // keeps being learned while the controller is held, and follows it as
+        // the controller warms up during play.
         averagedRate += (raw - bias - averagedRate) * (1 - exp(-dt / 0.25))
-        guard biasSource < .rested, !vibrating, let down, abs(magnitude - 1) < 0.05,
-              simd_length(averagedRate) < configuration.stillRateThreshold * 0.35,
+        guard !vibrating, let down, abs(magnitude - 1) < 0.05,
+              simd_length(averagedRate) < configuration.stillRateThreshold * 0.6,
               simd_length(raw - bias) < configuration.stillRateThreshold * 3 else {
             stillTime = 0
             stillReference = nil
             return
         }
-        // The (low-passed) gravity direction must stay put too.
+        // The (low-passed) gravity direction must stay put too: a slow
+        // deliberate turn has a low rate but steadily changes it.
         if let reference = stillReference, simd_dot(reference, down) > cos(1.2 * .pi / 180) {
             stillTime += dt
         } else {
@@ -623,9 +629,9 @@ enum SteeringResponse {
 struct SteeringWheelEngine {
     struct Configuration: Equatable {
         var response = SteeringResponse.Parameters()
-        /// 0 (none) … 1 (heavy). The fused angle is already clean; this only
-        /// trims residual jitter and is speed-adaptive, so turns keep their
-        /// speed.
+        /// 0 (light) … 1 (heavy). Always on: it takes out hand tremor and
+        /// sensor noise while the wheel is held, and is speed-adaptive, so
+        /// turns keep their speed.
         var smoothing: Double = 0.2
     }
 
@@ -652,9 +658,10 @@ struct SteeringWheelEngine {
 
     private static func makeFilter(smoothing: Double) -> OneEuroFilter {
         let amount = min(max(smoothing.isFinite ? smoothing : 0.2, 0), 1)
-        // 0 → 25 Hz (transparent), 0.2 → ~15 Hz, 1 → 2.5 Hz.
-        let cutoff = 25 * pow(0.1, amount)
-        return OneEuroFilter(minimumCutoff: cutoff, beta: 10, derivativeCutoff: 4)
+        // Held still: 0 → 8 Hz, 0.2 → 5 Hz, 1 → 0.8 Hz. A turn raises the
+        // cutoff with its speed (beta), so only slow turns see a few ms of lag.
+        let cutoff = 8 * pow(0.1, amount)
+        return OneEuroFilter(minimumCutoff: cutoff, beta: 20, derivativeCutoff: 4)
     }
 
     /// Makes the current physical bank the straight-ahead position.
@@ -684,7 +691,7 @@ struct SteeringWheelEngine {
         available = true
         bank = SteeringGeometry.bank(gravity: gravity)
         let relative = bank - centerBank
-        angle = configuration.smoothing <= 0.001 ? relative : filter.filter(relative, dt: dt)
+        angle = filter.filter(relative, dt: dt)
         output = SteeringResponse.output(angle: angle, parameters: configuration.response)
         return output
     }
@@ -742,9 +749,6 @@ struct GyroAimEngine {
     private(set) var output = ControllerVector2.zero
     private(set) var fine = ControllerVector2.zero
     private(set) var isMoving = false
-    /// The turn of the last tick in radians (x right, y up), after
-    /// smoothing, the rest gate and acceleration: what a mouse should move.
-    private(set) var turn = (x: 0.0, y: 0.0)
     private var history: [(x: Double, y: Double, dt: Double)] = []
 
     mutating func configure(_ configuration: Configuration) {
@@ -754,7 +758,6 @@ struct GyroAimEngine {
     mutating func reset() {
         history.removeAll(keepingCapacity: true)
         raw = .zero; smoothed = .zero; output = .zero; fine = .zero; isMoving = false
-        turn = (0, 0)
     }
 
     /// Player-space projection (JoyShockMapper's "player space"): yaw about
@@ -814,7 +817,7 @@ struct GyroAimEngine {
             isMoving = true
         }
         guard isMoving, magnitude > 1e-9 else {
-            output = .zero; fine = .zero; turn = (0, 0)
+            output = .zero; fine = .zero
             return (output, fine)
         }
         let settle = 1 - exp(-dt / max(0.012 * smoothing, 0.0005))
@@ -823,7 +826,6 @@ struct GyroAimEngine {
         let acceleration = min(max(c.acceleration, 0), 1)
         let blend = StickShaper.smoothstep(0.1, 1.6, magnitude)
         let scale = (1 - 0.5 * acceleration) + (1.5 * acceleration) * blend
-        turn = (sx * dt * scale, sy * dt * scale)
         let demand = magnitude * max(c.sensitivity, 0.01) * scale
         let onset = (magnitude - still * 0.8) / (still * 0.8)
         let coarseMagnitude = StickShaper.magnitude(demand: demand, exponent: c.exponent,
@@ -886,7 +888,6 @@ struct TouchpadCameraEngine {
     private var moving = false
 
     var fingerDown: Bool { contact }
-    var fingerPosition: (x: Double, y: Double)? { contact ? anchor : nil }
 
     mutating func configure(_ configuration: Configuration) {
         self.configuration = configuration
@@ -965,7 +966,17 @@ struct TouchpadCameraEngine {
         let coarse = velocity(endingAt: end, window: slowWindow)
         let coarseSpeed = (coarse.x * coarse.x + coarse.y * coarse.y).squareRoot()
         let window = slowWindow + (0.016 - slowWindow) * StickShaper.smoothstep(150, 900, coarseSpeed)
-        velocity = window < slowWindow - 0.001 ? velocity(endingAt: end, window: window) : coarse
+        let measured = window < slowWindow - 0.001 ? velocity(endingAt: end, window: window) : coarse
+        // Slow strokes move only a pixel or two per report, so their measured
+        // speed ripples; a speed-adaptive low-pass evens it out (strength
+        // follows Smoothing) and is transparent from a few hundred pixels a
+        // second, so swipes keep their bite. It also keeps a resting finger's
+        // sensor jitter from ever reaching the camera.
+        let measuredSpeed = (measured.x * measured.x + measured.y * measured.y).squareRoot()
+        let smoothing = min(max(c.smoothing, 0), 1)
+        let cutoff = 40 * pow(0.1, pow(smoothing, 0.8)) + 40 * StickShaper.smoothstep(100, 450, measuredSpeed)
+        let blend = 1 - exp(-2 * Double.pi * cutoff * min(dt, 0.05))
+        velocity = (velocity.x + (measured.x - velocity.x) * blend, velocity.y + (measured.y - velocity.y) * blend)
         let speed = (velocity.x * velocity.x + velocity.y * velocity.y).squareRoot()
         if moving {
             if speed < Self.restSpeed * 0.5 { moving = false }

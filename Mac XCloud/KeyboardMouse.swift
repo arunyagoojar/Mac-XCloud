@@ -160,6 +160,27 @@ struct KeyboardLayout: Codable, Identifiable, Equatable, Sendable {
     var mouseLook: MouseLookStick = .right
     var invertMouseY = false
 
+    init(id: UUID, name: String, bindings: [String: [String]], mouseLook: MouseLookStick = .right, invertMouseY: Bool = false) {
+        self.id = id
+        self.name = name
+        self.bindings = bindings
+        self.mouseLook = mouseLook
+        self.invertMouseY = invertMouseY
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, bindings, mouseLook, invertMouseY }
+
+    /// Tolerant: a layout saved by another version keeps its keys even if a
+    /// field is missing or unknown.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = (try? c.decode(String.self, forKey: .name)) ?? "My Layout"
+        bindings = (try? c.decode([String: [String]].self, forKey: .bindings)) ?? [:]
+        mouseLook = (try? c.decode(MouseLookStick.self, forKey: .mouseLook)) ?? .right
+        invertMouseY = (try? c.decode(Bool.self, forKey: .invertMouseY)) ?? false
+    }
+
     func inputs(for control: KeyboardControl) -> [String] {
         bindings[control.rawValue] ?? []
     }
@@ -277,8 +298,6 @@ enum KeyboardInputName {
         return table
     }()
 
-    static let mouseInputs = ["Mouse0", "Mouse2", "Mouse1", "Mouse3", "Mouse4", "ScrollUp", "ScrollDown"]
-
     static func code(forKeyCode keyCode: UInt16) -> String? { codes[keyCode] }
 
     /// A short, readable name: "W", "Space", "Left Shift", "Left Click".
@@ -338,8 +357,7 @@ final class KeyboardMouseStore: ObservableObject {
     private static let layoutsKey = "kbm.layouts.v1"
     private static let selectedKey = "kbm.layout.selected.v1"
     private static let sensitivityKey = "mkb.mouseSensitivity.v1"
-    private static let compensationKey = "kbm.mouseDeadzoneCompensation.v1"
-    static let persistedKeys = [emulationKey, layoutsKey, selectedKey, sensitivityKey, compensationKey]
+    static let persistedKeys = [emulationKey, layoutsKey, selectedKey, sensitivityKey]
 
     /// How long Escape must be held to release a captured mouse.
     static let escapeHoldToRelease: TimeInterval = 0.6
@@ -350,8 +368,6 @@ final class KeyboardMouseStore: ObservableObject {
     @Published var selectedLayoutID: UUID { didSet { save() } }
     /// Multiplier on mouse look (1 = layout default).
     @Published var mouseSensitivity: Double { didSet { save() } }
-    /// Lifts the smallest mouse movement past the game's stick dead zone.
-    @Published var mouseDeadzoneCompensation: Double { didSet { save() } }
 
     /// Called after every change so the running page can follow.
     var onChange: (() -> Void)?
@@ -363,7 +379,6 @@ final class KeyboardMouseStore: ObservableObject {
         controllerLayoutEnabled = true
         customLayouts = []
         mouseSensitivity = 1
-        mouseDeadzoneCompensation = 0.2
         selectedLayoutID = BuiltInKeyboardLayouts.standardID
         read()
         loading = false
@@ -379,16 +394,18 @@ final class KeyboardMouseStore: ObservableObject {
 
     private func read() {
         controllerLayoutEnabled = defaults.object(forKey: Self.emulationKey) as? Bool ?? true
+        // One unreadable layout must not cost the others.
         if let data = defaults.data(forKey: Self.layoutsKey),
-           let layouts = try? JSONDecoder().decode([KeyboardLayout].self, from: data) {
-            customLayouts = layouts.filter { !BuiltInKeyboardLayouts.isBuiltIn($0.id) }
+           let items = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            customLayouts = items.compactMap { item -> KeyboardLayout? in
+                guard let itemData = try? JSONSerialization.data(withJSONObject: item) else { return nil }
+                return try? JSONDecoder().decode(KeyboardLayout.self, from: itemData)
+            }.filter { !BuiltInKeyboardLayouts.isBuiltIn($0.id) }
         } else {
             customLayouts = []
         }
         let sensitivity = defaults.object(forKey: Self.sensitivityKey) as? Double ?? 1
         mouseSensitivity = sensitivity.isFinite ? min(max(sensitivity, 0.2), 4) : 1
-        let compensation = defaults.object(forKey: Self.compensationKey) as? Double ?? 0.2
-        mouseDeadzoneCompensation = compensation.isFinite ? min(max(compensation, 0), 0.5) : 0.2
         let stored = defaults.string(forKey: Self.selectedKey).flatMap(UUID.init(uuidString:))
         selectedLayoutID = stored ?? Self.migratedLayoutID()
         if !allLayouts.contains(where: { $0.id == selectedLayoutID }) { selectedLayoutID = BuiltInKeyboardLayouts.standardID }
@@ -427,10 +444,11 @@ final class KeyboardMouseStore: ObservableObject {
         save()
     }
 
+    /// Renames a layout; empty names are ignored.
     func rename(_ id: UUID, to proposed: String) {
         guard let index = customLayouts.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty, trimmed != customLayouts[index].name else { return }
         customLayouts[index].name = uniqueName(String(trimmed.prefix(60)), excluding: id)
         save()
     }
@@ -456,8 +474,7 @@ final class KeyboardMouseStore: ObservableObject {
                 "mapping": layout.pageMapping,
                 "mouseLook": layout.mouseLook.pageValue,
                 "invertY": layout.invertMouseY,
-                "sensitivity": mouseSensitivity,
-                "compensation": mouseDeadzoneCompensation]
+                "sensitivity": mouseSensitivity]
     }
 
     var pageConfigurationJSON: String {
@@ -472,7 +489,6 @@ final class KeyboardMouseStore: ObservableObject {
         if let data = try? JSONEncoder().encode(customLayouts) { defaults.set(data, forKey: Self.layoutsKey) }
         defaults.set(selectedLayoutID.uuidString, forKey: Self.selectedKey)
         defaults.set(mouseSensitivity, forKey: Self.sensitivityKey)
-        defaults.set(mouseDeadzoneCompensation, forKey: Self.compensationKey)
         onChange?()
     }
 }

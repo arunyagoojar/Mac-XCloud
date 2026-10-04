@@ -30,15 +30,6 @@ enum BrowserLoadPhase: Equatable {
             return false
         }
     }
-
-    var presentsFullScreenCover: Bool {
-        switch self {
-        case .initialLoading, .failed:
-            return true
-        case .ready, .subsequentLoading:
-            return false
-        }
-    }
 }
 
 /// Stable, display-ready information captured when a browser navigation fails.
@@ -90,105 +81,6 @@ struct BrowserLoadFailure: Equatable, Identifiable {
             errorDomain: nsError.domain,
             errorCode: nsError.code
         )
-    }
-}
-
-/// Full-window launch treatment shown until the browser first becomes usable.
-struct XboxSplashView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isPulsing = false
-    @State private var isRingRotating = false
-
-    private let xboxGreen = Color(red: 0.05, green: 0.34, blue: 0.10)
-    private let deepGreen = Color(red: 0.012, green: 0.105, blue: 0.035)
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [xboxGreen, deepGreen],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            RadialGradient(
-                colors: [Color.white.opacity(0.09), Color.clear],
-                center: .center,
-                startRadius: 25,
-                endRadius: 390
-            )
-
-            VStack(spacing: 26) {
-                animatedIcon
-
-                VStack(spacing: 7) {
-                    Text("Mac Xcloud")
-                        .font(.system(size: 26, weight: .semibold, design: .rounded))
-                        .tracking(0.2)
-
-                    Text("Connecting to the cloud…")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Color.white.opacity(0.7))
-                }
-                .foregroundStyle(.white)
-            }
-            .padding(48)
-        }
-        .ignoresSafeArea()
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Mac Xcloud")
-        .accessibilityValue("Connecting to the cloud")
-        .onAppear {
-            guard !reduceMotion else { return }
-            isPulsing = true
-            isRingRotating = true
-        }
-    }
-
-    private var animatedIcon: some View {
-        ZStack {
-            Circle()
-                .fill(Color.white.opacity(isPulsing ? 0.03 : 0.11))
-                .frame(width: 158, height: 158)
-                .scaleEffect(isPulsing ? 1.14 : 0.92)
-                .blur(radius: 2)
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 1.55).repeatForever(autoreverses: true),
-                    value: isPulsing
-                )
-
-            Circle()
-                .trim(from: 0.08, to: 0.78)
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            Color.white.opacity(0.08),
-                            Color.white.opacity(0.8),
-                            Color.white.opacity(0.08)
-                        ],
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-                )
-                .frame(width: 132, height: 132)
-                .rotationEffect(.degrees(isRingRotating ? 360 : 0))
-                .animation(
-                    reduceMotion ? nil : .linear(duration: 2.1).repeatForever(autoreverses: false),
-                    value: isRingRotating
-                )
-
-            Image(nsImage: NSApplication.shared.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
-                .frame(width: 92, height: 92)
-                .scaleEffect(isPulsing ? 1.025 : 0.965)
-                .shadow(color: .black.opacity(0.32), radius: 18, y: 9)
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 1.55).repeatForever(autoreverses: true),
-                    value: isPulsing
-                )
-        }
-        .frame(width: 170, height: 170)
     }
 }
 

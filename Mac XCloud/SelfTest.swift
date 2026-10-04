@@ -6,6 +6,24 @@ import WebKit
 /// page as usual (no game is started), waits for the injected scripts, checks
 /// they initialized without errors, records the app's windows, writes
 /// `selftest.json` and quits.
+/// The unattended development launches (--xcg-selftest and
+/// --xcg-snapshot-settings) share the app's bundle ID and data with the
+/// player's own copy, which may be running. They leave the player alone: no
+/// controller is attached, controller settings and game profiles are kept in
+/// a throwaway store and folder, and the app stays out of the Dock with its
+/// window off-screen.
+enum AutomatedCheck {
+    static let isRunning = ProcessInfo.processInfo.arguments.contains { $0 == "--xcg-selftest" || $0 == "--xcg-snapshot-settings" }
+    static let profilesDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("Mac Xcloud check \(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+    /// Starts empty on every check.
+    static let defaults: UserDefaults = {
+        let suite = "cc.eu.arunya.Mac-X-cloud.check"
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+        return UserDefaults(suiteName: suite)!
+    }()
+}
+
 @MainActor
 enum SelfTest {
     /// Collects script errors from the first moment of every page.
@@ -41,9 +59,7 @@ enum SelfTest {
                 out.adapterInstalled = !!(window.__xcgPollInput && window.__xcgPollInput.installed);
                 out.getGamepadsIsAdapter = !!window.__xcgPollInput && navigator.getGamepads.toString().includes("__xcgReadPhysicalPads");
                 out.keyboard = window.__xcgKeyboard ? window.__xcgKeyboard.diagnostics() : null;
-                out.gyroMouse = window.__xcgGyroMouse ? window.__xcgGyroMouse.diagnostics() : null;
                 try { out.mkb = window.BxCBridge.mkbDiagnostics(); } catch (e) { out.mkbError = String(e); }
-                try { out.audio = window.BxCBridge.setAudioHaptics(false); } catch (e) { out.audioError = String(e); }
                 try { out.configure = window.BxCBridge.configureKeyboard({}); } catch (e) { out.configureError = String(e); }
                 out.keyboardLock = !!navigator.keyboard;
                 out.errors = (window.__xcgErrors || []).slice(0, 20);

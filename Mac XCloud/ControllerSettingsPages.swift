@@ -143,18 +143,10 @@ struct ControllerSettingsPage: View {
                 if service.capabilities.hasAdaptiveTriggers {
                     Divider()
                     SettingsToggleRow(label: "Trigger rumble",
-                                      note: "Plays the game's trigger vibration through the adaptive triggers.",
+                                      note: "Plays the game's trigger vibration in the triggers. A trigger with an effect keeps it and you feel the vibration in that grip.",
                                       isOn: service.enhancement(\.gameDrivenTriggers))
                 }
-                Divider()
-                SettingsToggleRow(label: "Feel the game's sound",
-                                  note: "Deep sounds like engines, impacts and explosions also play as vibration. Saved per game.",
-                                  isOn: service.flag(\.audioHaptics))
-                if service.enhancements.audioHaptics == true {
-                    Divider()
-                    SettingsSliderRow(label: "Sound vibration", value: service.tuning(\.audioHapticsStrength) { $0.effectiveAudioHapticsStrength },
-                                      range: 0.1...1, minimumLabel: "Subtle", maximumLabel: "Strong")
-                }
+
                 Divider()
                 SettingsDisclosure("Fine-Tune", isExpanded: $showVibrationDetails) {
                     SettingsSliderRow(label: "Response", note: "Lower makes faint rumble easier to feel.",
@@ -407,7 +399,7 @@ struct MotionSettingsPage: View {
         SettingsPage("Motion Controls", subtitle: "Use the controller's motion sensors to aim or steer.") {
             SettingsGroup(footer: modeFooter) {
                 SettingsRow("Use motion for") {
-                    Picker("Use motion for", selection: mode) {
+                    Picker("Use motion for", selection: mode.deferredWrites()) {
                         Text("Off").tag(ControllerGyroMode.off)
                         Text("Aiming").tag(ControllerGyroMode.aiming)
                         Text("Steering").tag(ControllerGyroMode.steering)
@@ -451,18 +443,7 @@ struct MotionSettingsPage: View {
 
     private var aiming: some View {
         Group {
-            SettingsGroup("Aiming", footer: aimFooter) {
-                SettingsRow("Aim with") {
-                    Picker("Aim with", selection: Binding(
-                        get: { service.enhancements.effectiveGyroOutput },
-                        set: { value in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.gyroOutput = value; $0.enhancements = e } })) {
-                        ForEach(GyroAimOutput.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                Divider()
+            SettingsGroup("Aiming") {
                 SettingsRow("Active") {
                     Picker("Active", selection: Binding(
                         get: { service.enhancements.effectiveGyroActivation },
@@ -472,15 +453,7 @@ struct MotionSettingsPage: View {
                     .settingsPicker()
                 }
                 Divider()
-                if service.enhancements.effectiveGyroOutput == .mouse {
-                    SettingsSliderRow(label: "Mouse speed", note: "Pair it with the game's own mouse sensitivity.",
-                                      value: service.tuning(\.gyroMouseSensitivity) { $0.effectiveGyroMouseSensitivity },
-                                      range: 2...40, minimumLabel: "Slow", maximumLabel: "Fast")
-                    Divider()
-                }
-                SettingsSliderRow(label: service.enhancements.effectiveGyroOutput == .mouse ? "Stick sensitivity" : "Sensitivity",
-                                  note: service.enhancements.effectiveGyroOutput == .mouse ? "In games without mouse support." : nil,
-                                  value: Binding(
+                SettingsSliderRow(label: "Sensitivity", value: Binding(
                     get: { Double(service.enhancements.effectiveGyroSensitivity) },
                     set: { v in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.gyroSensitivity = Float(v); $0.enhancements = e } }),
                     range: 0.25...3, minimumLabel: "Slow", maximumLabel: "Fast")
@@ -520,13 +493,6 @@ struct MotionSettingsPage: View {
                 }
             }
         }
-    }
-
-    private var aimFooter: String? {
-        guard service.enhancements.effectiveGyroOutput == .mouse else { return nil }
-        return service.gyroMouseAvailable
-            ? "This game takes a mouse: aiming follows the controller one to one, with no stick dead zone. The game may show keyboard prompts and turn off aim assist."
-            : "Games with keyboard & mouse support aim with the mouse, one to one. Other games use the right stick."
     }
 
     // MARK: Pause button
@@ -630,10 +596,6 @@ struct MotionSettingsPage: View {
                                       range: 0.2...1, valueText: { percent($0) })
                     Divider()
                     SettingsToggleRow(label: "Reverse direction", isOn: service.flag(\.steeringInverted))
-                    Divider()
-                    SettingsToggleRow(label: "Steady during rumble",
-                                      note: "Keeps vibration and adaptive-trigger buzz from moving the wheel.",
-                                      isOn: service.flag(\.steeringRumbleGuard, default: true))
                 }
             }
         }
@@ -753,7 +715,7 @@ struct TouchpadSettingsPage: View {
             }
             SettingsGroup {
                 SettingsRow("Use the touchpad for") {
-                    Picker("Use the touchpad for", selection: service.enhancement(\.touchpadAimEnabled)) {
+                    Picker("Use the touchpad for", selection: service.enhancement(\.touchpadAimEnabled).deferredWrites()) {
                         Text("Gestures").tag(false)
                         Text("Camera").tag(true)
                     }

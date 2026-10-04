@@ -176,6 +176,39 @@ final class Harness: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
             check((r["a"] as? Double ?? 0) == 0 && (r["reached"] as? Bool) == true,
                   "In a game with keyboard & mouse support, keys go to the game as keys", "\(r)")
 
+            // There, the game's own keyboard & mouse and the controller take
+            // turns: while keys or the mouse are in use, the controller's
+            // motion output pauses; using the controller brings it back.
+            r = await run(nativeGame, """
+                STATES.isPlaying = true;
+                Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+                const pad = __testPad, out = {};
+                const steer = value => {
+                  __xcgPollInput.values = { nativeControllerCount: 1, LeftThumbXAxis: value };
+                  __xcgPollInput.at = performance.now(); pad.timestamp += 5; poll();
+                  return seen[0].axes[0];
+                };
+                // The page above typed into this game: start from the controller.
+                pad.buttons[0] = { pressed: true, touched: true, value: 1 }; steer(0);
+                pad.buttons[0] = { pressed: false, touched: false, value: 0 };
+                out.motion = steer(0.3);
+                key("keydown", "KeyW"); key("keyup", "KeyW");
+                out.pausedByKeys = steer(0.3);
+                pad.buttons[0] = { pressed: true, touched: true, value: 1 };
+                out.resumed = steer(0.3);
+                pad.buttons[0] = { pressed: false, touched: false, value: 0 };
+                Object.defineProperty(document, "pointerLockElement", { configurable: true, get: () => document.documentElement });
+                document.dispatchEvent(new MouseEvent("mousemove", { movementX: 30, movementY: 0, bubbles: true }));
+                out.pausedByMouse = steer(0.3);
+                delete document.pointerLockElement;
+                out.state = window.__xcgKeyboard.diagnostics().nativeInUse;
+                delete document.hidden;
+                return out;
+                """)
+            check((r["motion"] as? Double) == 0.3 && (r["pausedByKeys"] as? Double) == 0 && (r["resumed"] as? Double) == 0.3
+                  && (r["pausedByMouse"] as? Double) == 0 && (r["state"] as? Bool) == true,
+                  "In a game with its own keyboard & mouse, motion pauses while they are used and returns with the controller", "\(r)")
+
             r = await run(disabled, """
                 STATES.isPlaying = true;
                 key("keydown", "Space"); await wait(40);
@@ -196,19 +229,6 @@ final class Harness: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
                 """)
             check((r["old"] as? Double) == 0 && (r["remapped"] as? Double) == 1, "A changed layout applies to the running game at once", "\(r)")
 
-            // Gyro as a mouse: one relative movement per native update, never repeated.
-            r = await run(withPad, """
-                const calls = [];
-                window.BX_EXPOSED = { inputChannel: { queueMouseInput: e => calls.push(e) } };
-                __xcgGyroMouse.apply({ mouseSeq: 1, mouseX: 5, mouseY: -3 });
-                __xcgGyroMouse.apply({ mouseSeq: 1, mouseX: 5, mouseY: -3 });
-                __xcgGyroMouse.apply({ mouseSeq: 2, mouseX: 0, mouseY: 0 });
-                __xcgGyroMouse.apply({ gyroX: 0.2 });
-                return { calls: JSON.stringify(calls) };
-                """)
-            check((r["calls"] as? String) == #"[{"X":5,"Y":-3,"Buttons":0,"WheelX":0,"WheelY":0,"Type":0}]"#,
-                  "Gyro mouse movement reaches Xbox's input channel once per update, as relative movement", "\(r)")
-
             // Escape: a tap while the mouse is captured presses Menu briefly;
             // a hold (which releases the mouse) presses nothing.
             r = await run(standalone, """
@@ -228,8 +248,114 @@ final class Harness: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
                 """)
             check((r["states"] as? String) == "1,0,0", "Tapping Esc presses Menu once; holding it to release the mouse presses nothing", "\(r)")
 
+            // Never both at once: whichever was used last is in control.
+            r = await run(withPad, """
+                STATES.isPlaying = true;
+                const pad = __testPad, out = {};
+                const snap = () => JSON.parse(JSON.stringify(seen[0]));
+                const bump = () => { pad.timestamp += 5; };
+                // This Mac's screen may be locked during the run, which hides every page.
+                Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+                key("keydown", "KeyE"); await wait(20);
+                out.keyboardA = snap().a;
+                pad.axes[0] = 0.3; bump(); await wait(20);                // a drifting stick on the controller
+                out.driftIgnored = snap().axes[0];
+                pad.buttons[1] = { pressed: true, touched: true, value: 1 }; bump(); await wait(20);
+                const back = snap(); out.controllerB = back.b; out.keyAfterSwitch = back.a;
+                key("keyup", "KeyE");
+                key("keydown", "KeyD"); await wait(20);                   // B still held on the controller
+                const typed = snap(); out.typedX = typed.axes[0]; out.heldBIgnored = typed.b;
+                bump(); await wait(20);
+                out.staysKeyboard = snap().axes[0];
+                key("keyup", "KeyD");
+                pad.buttons[1] = { pressed: false, touched: false, value: 0 };
+                pad.axes[0] = 0.8; bump(); await wait(20);                 // stick pushed: the controller again
+                out.stickX = snap().axes[0];
+                pad.axes[0] = 0; bump();
+                // Gyro steering drives the game only while the controller is in
+                // control, and motion alone never takes control back (a
+                // controller bumped on the desk would). Native samples go stale
+                // after 200 ms, so these steps poll at once rather than on a
+                // (possibly throttled) timer.
+                const steer = value => {
+                  __xcgPollInput.values = { nativeControllerCount: 1, LeftThumbXAxis: value };
+                  __xcgPollInput.at = performance.now(); bump(); poll();
+                  return snap().axes[0];
+                };
+                out.steerApplied = steer(0.1);
+                key("keydown", "KeyW");
+                out.steerIgnoredWhileTyping = steer(0.1);
+                key("keyup", "KeyW");
+                out.turnStaysKeyboard = steer(0.6);
+                pad.buttons[7] = { pressed: true, touched: true, value: 0.6 };
+                out.throttleTakesBack = steer(0.5);
+                pad.buttons[7] = { pressed: false, touched: false, value: 0 }; bump();
+                // Mouse movement alone (a brushed trackpad) never takes over.
+                Object.defineProperty(document, "pointerLockElement", { configurable: true, get: () => document.body });
+                for (let i = 0; i < 6; i++) document.dispatchEvent(new MouseEvent("mousemove", { movementX: 40, movementY: 10, bubbles: true }));
+                out.moveStaysController = steer(0.4);
+                delete document.pointerLockElement;
+                // Outside a game the controller always works.
+                key("keydown", "KeyE"); await wait(20);
+                STATES.isPlaying = false; __xcgPollInput.values = {}; __xcgPollInput.at = -Infinity;
+                pad.buttons[0] = { pressed: true, touched: true, value: 1 }; bump(); await wait(20);
+                out.menuA = snap().a;
+                pad.buttons[0] = { pressed: false, touched: false, value: 0 }; key("keyup", "KeyE");
+                delete document.hidden;
+                return out;
+                """)
+            check((r["keyboardA"] as? Double) == 1, "A key press puts the keyboard in control", "\(r)")
+            check((r["driftIgnored"] as? Double) == 0, "While typing, the controller's sticks are ignored", "\(r)")
+            check((r["controllerB"] as? Double) == 1 && (r["keyAfterSwitch"] as? Double) == 0,
+                  "Pressing a controller button hands control back and the keyboard stops pressing", "\(r)")
+            check((r["typedX"] as? Double) == 1 && (r["heldBIgnored"] as? Double) == 0 && (r["staysKeyboard"] as? Double) == 1,
+                  "A button already held on the controller does not take control back from the keyboard", "\(r)")
+            check((r["stickX"] as? Double) == 0.8, "Pushing a controller stick hands control back", "\(r)")
+            check((r["steerApplied"] as? Double) == 0.1 && (r["steerIgnoredWhileTyping"] as? Double) == 0,
+                  "Gyro steering drives the game only while the controller is in control", "\(r)")
+            check((r["turnStaysKeyboard"] as? Double) == 0 && (r["throttleTakesBack"] as? Double) == 0.5,
+                  "Motion alone never takes control back; pressing a trigger does", "\(r)")
+            check((r["moveStaysController"] as? Double) == 0.4, "Moving the mouse alone does not take over from the controller", "\(r)")
+            check((r["menuA"] as? Double) == 1, "Outside a game the controller always works", "\(r)")
+
+            // Saved layouts survive a relaunch, and one damaged entry costs nothing else.
+            let suite = "KeyboardLayerContracts." + UUID().uuidString
+            let defaults = UserDefaults(suiteName: suite)!
+            var store = KeyboardMouseStore(defaults: defaults)
+            let created = store.createLayout(from: BuiltInKeyboardLayouts.standard, named: "Racing")
+            var edited = created
+            let movedFrom = edited.bind("Space", to: .x, slot: 1)
+            edited.bind("KeyP", to: .a, slot: 0)
+            edited.bind("Mouse4", to: .rightBumper, slot: 1)
+            edited.mouseLook = .left
+            store.update(edited)
+            store.rename(created.id, to: "  My Racing  Keys ")
+            store.mouseSensitivity = 1.7
+            store = KeyboardMouseStore(defaults: defaults)
+            let restored = store.customLayouts.first { $0.id == created.id }
+            check(movedFrom == .a && restored?.inputs(for: .x) == ["KeyR", "Space"] && restored?.inputs(for: .a).first == "KeyP",
+                  "A key moves to its new control and the change is saved", "\(String(describing: restored))")
+            check(restored?.name == "My Racing  Keys" && restored?.inputs(for: .rightBumper) == ["KeyF", "Mouse4"]
+                  && restored?.mouseLook == .left && store.selectedLayoutID == created.id && store.mouseSensitivity == 1.7,
+                  "A custom layout, its name, mouse settings and the selection come back after a relaunch", "\(String(describing: restored))")
+            check((store.pageConfiguration["mapping"] as? [String: Int])?["KeyP"] == 0, "The saved layout is what the game receives")
+            let saved = defaults.data(forKey: "kbm.layouts.v1")!
+            var entries = try! JSONSerialization.jsonObject(with: saved) as! [Any]
+            entries.append(["id": "not-a-uuid"])
+            entries.append(["id": UUID().uuidString, "name": "Older", "bindings": ["a": ["KeyQ"]]])
+            defaults.set(try! JSONSerialization.data(withJSONObject: entries), forKey: "kbm.layouts.v1")
+            store = KeyboardMouseStore(defaults: defaults)
+            check(store.customLayouts.count == 2 && store.customLayouts.contains { $0.name == "Older" && $0.mouseLook == .right },
+                  "A damaged layout is skipped and one missing newer fields still loads", "\(store.customLayouts.map(\.name))")
+            store.delete(created.id)
+            store = KeyboardMouseStore(defaults: defaults)
+            check(!store.customLayouts.contains { $0.id == created.id } && store.selectedLayoutID == BuiltInKeyboardLayouts.standardID,
+                  "Deleting a layout is saved and the selection falls back to Standard")
+            defaults.removePersistentDomain(forName: suite)
+
             let reported = messages.values.flatMap { $0 }
-            check(reported.contains("keys"), "The page tells the app when keyboard controls are in use", "\(messages)")
+            check(reported.contains("keyboard") && reported.contains("controller") && reported.contains("native"),
+                  "The page tells the app when the keyboard, the game's own keyboard & mouse or the controller takes over", "\(messages)")
 
             print(failures == 0 ? "\(passes) keyboard layer contract checks passed." : "\(failures) keyboard layer checks FAILED.")
             exit(failures == 0 ? 0 : 1)

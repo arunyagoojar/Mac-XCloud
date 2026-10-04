@@ -293,6 +293,7 @@ final class InputPresetStore: ObservableObject {
 
     private weak var browser: BrowserModel?
     private let fileManager: FileManager
+    private let directory: URL?
     private let defaults: UserDefaults
     private var rootURL: URL?
     private var cancellables = Set<AnyCancellable>()
@@ -321,10 +322,13 @@ final class InputPresetStore: ObservableObject {
     private var presetsURL: URL? { rootURL?.appendingPathComponent("presets", isDirectory: true) }
     private var tombstonesURL: URL? { rootURL?.appendingPathComponent("tombstones.json") }
 
-    init(browser: BrowserModel, fileManager: FileManager = .default, defaults: UserDefaults = .standard) {
+    /// `directory` replaces the usual place in Application Support (used by
+    /// unattended checks, which must not touch the player's profiles).
+    init(browser: BrowserModel, fileManager: FileManager = .default, defaults: UserDefaults = .standard, directory: URL? = nil) {
         self.browser = browser
         self.fileManager = fileManager
         self.defaults = defaults
+        self.directory = directory
         if let raw = defaults.string(forKey: "inputPresets.activeID"), let id = UUID(uuidString: raw) {
             activePresetID = id
         }
@@ -359,9 +363,9 @@ final class InputPresetStore: ObservableObject {
         invalidateAsyncOperations()
         storageStatus = .checking
         do {
-            let base = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            let base = try directory ?? fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                 .appendingPathComponent("Xbox Cloud data", isDirectory: true)
-            migrateFromSandboxContainer(to: base)
+            if directory == nil { migrateFromSandboxContainer(to: base) }
             rootURL = base
             try createLayout(at: base)
             storageStatus = .local(base)
@@ -442,7 +446,6 @@ final class InputPresetStore: ObservableObject {
             webSettingsReady = ready
             operationMessage = "Created and selected \(name)" + retainedWebNotice(web, source: source.name)
             updateIndexAfterSave()
-            browser.statusController?.refreshMenu()
         } catch { operationMessage = "Could not create profile: \(error.localizedDescription)" }
     }
 
@@ -641,7 +644,6 @@ final class InputPresetStore: ObservableObject {
         isBusy = false
         if !webSettingsReady { scheduleWebReadinessRetry(id: id) }
         operationMessage = "Selected \(preset.name)\(webMessage)"
-        browser.statusController?.refreshMenu()
     }
 
     func retryActiveWebSettings() {
@@ -912,11 +914,6 @@ final class InputPresetStore: ObservableObject {
 
     private func removeLocal(_ url: URL) throws {
         if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
-    }
-
-    private func writeIfChanged(_ data: Data, to url: URL) throws {
-        if fileManager.fileExists(atPath: url.path), (try? Data(contentsOf: url)) == data { return }
-        try writeData(data, to: url)
     }
 
     private func loadTombstones(at root: URL) -> [PresetTombstone] {

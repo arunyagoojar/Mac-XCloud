@@ -290,14 +290,6 @@ final class ProfileEditorModel: ObservableObject {
 struct ProfileEditorView: View {
     @ObservedObject var model: ProfileEditorModel
 
-    private let gamepadInputs: [(String, String)] = [
-        ("0","A"),("1","B"),("2","X"),("3","Y"),("4","LB"),("5","RB"),("6","LT"),("7","RT"),
-        ("8","View"),("9","Menu"),("10","L3"),("11","R3"),("12","D-pad Up"),("13","D-pad Down"),
-        ("14","D-pad Left"),("15","D-pad Right"),("16","Home/PS"),("100","Left Stick Up"),
-        ("101","Left Stick Down"),("102","Left Stick Left"),("103","Left Stick Right"),
-        ("200","Right Stick Up"),("201","Right Stick Down"),("202","Right Stick Left"),("203","Right Stick Right")
-    ]
-
     private let shortcutActions: [(String, String)] = [
         ("bx.settings.show", "Show Settings"),
         ("stream.screenshot.capture", "Take Screenshot"),("stream.video.toggle", "Toggle Video"),
@@ -461,7 +453,7 @@ struct ProfileEditorView: View {
     private func customizationSlider(_ label: String, key: String, fallback: Double) -> some View {
         HStack {
             Text(label)
-            Slider(value: Binding(get: { model.customizationNumber(key, default: fallback) }, set: { model.setCustomizationNumber(key, value: $0) }), in: 0...100, step: 10)
+            Slider(value: Binding(get: { model.customizationNumber(key, default: fallback) }, set: { model.setCustomizationNumber(key, value: $0) }).deferredWrites(), in: 0...100, step: 10)
                 .disabled(!model.canEdit)
             Text("\(Int(model.customizationNumber(key, default: fallback)))%").frame(width: 44)
         }
@@ -475,14 +467,14 @@ struct ProfileEditorView: View {
             Slider(value: Binding(
                 get: { model.customizationRange(key)[0] },
                 set: { model.setCustomizationRange(key, lower: $0) }
-            ), in: 0...100, step: 1)
+            ).deferredWrites(), in: 0...100, step: 1)
             .disabled(!model.canEdit)
             Text("\(Int(range[0]))").frame(width: 30)
             Text("Max")
             Slider(value: Binding(
                 get: { model.customizationRange(key)[1] },
                 set: { model.setCustomizationRange(key, upper: $0) }
-            ), in: 0...100, step: 1)
+            ).deferredWrites(), in: 0...100, step: 1)
             .disabled(!model.canEdit)
             Text("\(Int(range[1]))").frame(width: 30)
         }

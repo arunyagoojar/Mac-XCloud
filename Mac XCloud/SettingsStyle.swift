@@ -10,7 +10,6 @@ enum SettingsMetrics {
     static let pageMaxWidth: CGFloat = 620
     static let controlWidth: CGFloat = 200
     static let sliderWidth: CGFloat = 200
-    static let sliderValueWidth: CGFloat = 52
     static let rowMinHeight: CGFloat = 38
     static let groupCorner: CGFloat = 10
 }
@@ -84,17 +83,6 @@ struct SettingsPage<Content: View>: View {
         }
         .coordinateSpace(name: "settings-scroll")
         .background(SettingsPalette.page)
-    }
-}
-
-/// Secondary lead-in line between a page title and its first section.
-struct SettingsPageIntro: View {
-    let text: String
-    var body: some View {
-        Text(text)
-            .font(.system(size: 13))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -214,6 +202,19 @@ struct SettingsRow<Control: View>: View {
     }
 }
 
+extension Binding {
+    /// Passes a control's change on once SwiftUI has finished the view
+    /// update it arrived in. Since macOS 26 SwiftUI draws sliders and
+    /// switches itself and can set their value mid-update, and changing an
+    /// observed object then is undefined behavior ("Publishing changes from
+    /// within view updates is not allowed").
+    func deferredWrites() -> Binding {
+        Binding(get: { wrappedValue }, set: { newValue in
+            DispatchQueue.main.async { wrappedValue = newValue }
+        })
+    }
+}
+
 /// A switch row — the most common setting.
 struct SettingsToggleRow: View {
     let label: String
@@ -222,7 +223,7 @@ struct SettingsToggleRow: View {
 
     var body: some View {
         SettingsRow(label, note: note) {
-            Toggle(label, isOn: $isOn)
+            Toggle(label, isOn: $isOn.deferredWrites())
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
@@ -266,47 +267,11 @@ struct SettingsSliderRow: View {
 
     @ViewBuilder private var slider: some View {
         if let step {
-            Slider(value: $value, in: range, step: step).controlSize(.small).accessibilityLabel(label)
+            Slider(value: $value.deferredWrites(), in: range, step: step).controlSize(.small).accessibilityLabel(label)
                 .accessibilityValue(valueText?(value) ?? "")
         } else {
-            Slider(value: $value, in: range).controlSize(.small).accessibilityLabel(label)
+            Slider(value: $value.deferredWrites(), in: range).controlSize(.small).accessibilityLabel(label)
                 .accessibilityValue(valueText?(value) ?? "")
-        }
-    }
-}
-
-/// Slider plus monospaced value, for pages that still show exact numbers.
-struct SettingsSliderControl: View {
-    let label: String
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let display: (Double) -> String
-
-    init(label: String, value: Binding<Double>, range: ClosedRange<Double>, display: @escaping (Double) -> String) {
-        self.label = label
-        _value = value
-        self.range = range
-        self.display = display
-    }
-
-    init(label: String, value: Binding<Float>, range: ClosedRange<Float>, display: @escaping (Float) -> String) {
-        self.label = label
-        _value = Binding<Double>(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Float($0) })
-        self.range = Double(range.lowerBound)...Double(range.upperBound)
-        self.display = { display(Float($0)) }
-    }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Slider(value: $value, in: range)
-                .controlSize(.small)
-                .frame(width: SettingsMetrics.sliderWidth - 50)
-                .accessibilityLabel(label)
-                .accessibilityValue(display(value))
-            Text(display(value))
-                .font(.system(size: 12).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: SettingsMetrics.sliderValueWidth, alignment: .trailing)
         }
     }
 }

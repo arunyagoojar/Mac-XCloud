@@ -166,18 +166,6 @@ private struct MacroEditorDraft: Identifiable {
         steps = macro.steps.map { MacroStepDraft($0) }
     }
 
-    static var doubleA: Self {
-        var draft = Self()
-        draft.name = "Double A"
-        draft.steps = [
-            MacroStepDraft(ControllerMacroStep(delayMilliseconds: 0, action: .button(control: .buttonA, isPressed: true))),
-            MacroStepDraft(ControllerMacroStep(delayMilliseconds: 70, action: .button(control: .buttonA, isPressed: false))),
-            MacroStepDraft(ControllerMacroStep(delayMilliseconds: 110, action: .button(control: .buttonA, isPressed: true))),
-            MacroStepDraft(ControllerMacroStep(delayMilliseconds: 70, action: .button(control: .buttonA, isPressed: false)))
-        ]
-        return draft
-    }
-
     func validated() throws -> ControllerMacro {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw EditorValidationError.message("Enter a macro name.") }

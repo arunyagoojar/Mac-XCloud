@@ -124,11 +124,13 @@ struct ContentView: View {
     private var stateHint: GameHint? {
         guard browser.isStreaming || browser.pointerCaptured else { return nil }
         switch browser.keyboardEmulationState {
-        case "active": return GameHint(key: "kbm-active", text: "Mouse captured · Hold Esc to release it", symbol: "computermouse")
-        case "keys":
+        case "keyboard":
             let usesMouse = browser.keyboardMouse.selectedLayout.mouseLook != .off
-            return GameHint(key: "kbm-keys", text: usesMouse ? "Keyboard controls on · Click the game to use the mouse" : "Keyboard controls on",
+            return GameHint(key: "kbm-keyboard", text: usesMouse ? "Keyboard & mouse · Click the game to use the mouse" : "Keyboard",
                             symbol: "keyboard")
+        case "mouse": return GameHint(key: "kbm-mouse", text: "Keyboard & mouse · Hold Esc to release the mouse", symbol: "computermouse")
+        case "native": return GameHint(key: "kbm-native", text: "Keyboard & mouse · The game's own controls", symbol: "keyboard")
+        case "controller": return GameHint(key: "kbm-controller", text: "Controller", symbol: "gamecontroller")
         default: return browser.pointerCaptured ? GameHint(key: "pointer", text: "Hold Esc to release the mouse", symbol: nil) : nil
         }
     }

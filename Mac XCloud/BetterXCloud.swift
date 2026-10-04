@@ -401,21 +401,24 @@ enum BetterXCloud {
 
     /* Keyboard & mouse as an Xbox controller, for games without keyboard &
        mouse support. Keys and mouse buttons press controller inputs and
-       mouse movement becomes stick velocity. The result is added to the
-       controller Xbox already polls (or stands in for one when none is
-       connected), so every press travels exactly the way a physical
-       controller's does. Games with native keyboard & mouse support are
-       left to Xbox. */
+       mouse movement becomes stick velocity, delivered through the
+       controller Xbox already polls (or a stand-in when none is connected),
+       so every press travels exactly the way a physical controller's does.
+       The controller and the keyboard never play at once: whichever was
+       used last is in control and the other is ignored. A key, a click or
+       the wheel takes over; using a button, trigger or stick gives control
+       back. Games with their own keyboard & mouse support are left to Xbox,
+       and while it is in use the controller's motion output pauses. */
     const __xcgKeyboard = (function () {
       const config = {enabled:true, mapping:{}, mouseLook:2, invertY:false, sensitivity:1, compensation:0.2};
       Object.assign(config, window.__xcgKeyboardConfig || {});
       const held = new Map(), directionCounts = new Map(), order = {100:[], 200:[]}, wheelTimers = {};
       const mouse = {dx:0, dy:0, vx:0, vy:0, x:0, y:0, last:0, lastEvent:0, timer:0};
-      const state = {buttons:new Array(17).fill(0), axes:[0,0,0,0], version:0, key:"", engaged:false};
+      const state = {buttons:new Array(17).fill(0), axes:[0,0,0,0], version:0, key:"", engaged:false, input:"controller"};
       const pad = {id:"Mac Xcloud Keyboard Controller (STANDARD GAMEPAD)", index:0, connected:true, mapping:"standard",
         axes:[0,0,0,0], buttons:Array.from({length:17}, () => ({pressed:false, touched:false, value:0})),
         timestamp:performance.now(), vibrationActuator:null, hapticActuators:[]};
-      let padShown = false, padVersion = -1, reported = "", nativeMouse = false;
+      let padShown = false, padVersion = -1, reported = "", nativeUsed = false;
 
       function stream() {
         try {
@@ -428,15 +431,45 @@ enum BetterXCloud {
         const s = config.enabled ? stream() : null;
         return !!(s && s.playing && !s.native);
       }
+      // A game playing with its own keyboard & mouse support.
+      function nativeGame() {
+        const s = stream();
+        return !!(s && s.playing && s.native);
+      }
+      function useNative() {
+        if (nativeUsed || !nativeGame()) return;
+        nativeUsed = true;
+        report();
+      }
       function locked() { return document.pointerLockElement === document.body; }
       function editable(node) {
         return !!(node && (node.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName || "")));
       }
+      // "off" (no game), "ready" (nothing used yet), "keyboard", "mouse"
+      // (keyboard with the mouse captured), "native" (the game's own
+      // keyboard & mouse) or "controller" (back on the controller).
       function report() {
-        const next = !eligible() ? "off" : locked() ? "active" : state.engaged ? "keys" : "ready";
+        const next = nativeGame() ? (nativeUsed ? "native" : state.engaged ? "controller" : "off")
+          : !eligible() ? "off" : state.input === "keyboard" ? (locked() ? "mouse" : "keyboard")
+          : state.engaged ? "controller" : "ready";
         if (next === reported) return;
         reported = next;
         try { window.webkit.messageHandlers.spikeHandler.postMessage({type:"mkb-emulation", state:next}); } catch (e) {}
+      }
+      function useKeyboard() {
+        if (state.input === "keyboard") return;
+        state.input = "keyboard";
+        state.engaged = true;
+        state.version++;
+        report();
+      }
+      function useController() {
+        if (nativeUsed) { nativeUsed = false; state.engaged = true; report(); }
+        if (state.input === "controller") return;
+        state.input = "controller";
+        releaseAll();
+        state.version++;
+        report();
       }
       // Keys held on opposite sides of a stick: the newest wins.
       function stick(base) {
@@ -467,6 +500,7 @@ enum BetterXCloud {
         state.key = key; state.buttons = buttons; state.axes = axes; state.version++;
       }
       function press(code, index) {
+        useKeyboard();
         if (held.get(code) === index) return;
         if (held.has(code)) release(code);
         held.set(code, index);
@@ -553,6 +587,7 @@ enum BetterXCloud {
       function onKey(event) {
         const code = event.code;
         if (!code) return;
+        if (event.type === "keydown" && !event.metaKey && code !== "Escape" && !editable(event.target)) useNative();
         if (code === "Escape") { onEscape(event); return; }
         if (event.type === "keyup") {
           if (held.has(code)) { release(code); event.preventDefault(); event.stopImmediatePropagation(); }
@@ -567,6 +602,8 @@ enum BetterXCloud {
         if (!event.repeat) press(code, index);
       }
       function onMouseButton(event) {
+        // The game's own keyboard & mouse captures the mouse on another element.
+        if (event.type === "mousedown" && document.pointerLockElement) useNative();
         if (!locked()) return;
         const code = "Mouse" + event.button;
         if (event.type === "mouseup") { release(code); return; }
@@ -574,6 +611,7 @@ enum BetterXCloud {
         if (typeof index === "number" && eligible()) { event.preventDefault(); press(code, index); }
       }
       function onWheel(event) {
+        if (document.pointerLockElement) useNative();
         if (!locked() || !eligible()) return;
         const code = event.deltaY < 0 ? "ScrollUp" : event.deltaY > 0 ? "ScrollDown"
           : event.deltaX < 0 ? "ScrollLeft" : event.deltaX > 0 ? "ScrollRight" : "";
@@ -586,10 +624,15 @@ enum BetterXCloud {
         wheelTimers[code] = setTimeout(() => release(code), 80);
       }
       function onMove(event) {
-        if (!config.mouseLook || !locked()) return;
-        mouse.dx += Number(event.movementX) || 0;
-        mouse.dy += Number(event.movementY) || 0;
-        mouse.lastEvent = performance.now();
+        const dx = Number(event.movementX) || 0, dy = Number(event.movementY) || 0;
+        if (document.pointerLockElement && Math.abs(dx) + Math.abs(dy) >= 4) useNative();
+        // Movement alone never takes over from the controller (a brushed
+        // trackpad would); once the keyboard is in control it looks around.
+        if (!config.mouseLook || !locked() || !eligible() || state.input !== "keyboard") return;
+        const now = performance.now();
+        mouse.dx += dx;
+        mouse.dy += dy;
+        mouse.lastEvent = now;
         if (!mouse.timer) { mouse.last = mouse.lastEvent; mouse.timer = setInterval(stepMouse, 8); }
       }
       // A click on the game captures the mouse for looking around.
@@ -612,21 +655,18 @@ enum BetterXCloud {
         document.addEventListener("mousemove", onMove, true);
         document.addEventListener("click", onClick, true);
         document.addEventListener("pointerlockchange", () => {
-          if (locked()) state.engaged = true; else releaseMouse();
+          if (!locked()) releaseMouse();
           report();
         });
         // Keys released while another window had focus never send keyup.
         window.addEventListener("blur", releaseAll);
         document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
         setInterval(() => {
-          if (!eligible() && (state.engaged || held.size)) { releaseAll(); state.engaged = false; }
-          report();
-          // Tell the app whether this game takes a mouse (gyro can aim with it).
-          const s = stream(), mouse = !!(s && s.playing && s.native);
-          if (mouse !== nativeMouse) {
-            nativeMouse = mouse;
-            try { window.webkit.messageHandlers.spikeHandler.postMessage({type:"title-input", nativeMouse:mouse}); } catch (e) {}
+          if (!eligible() && (held.size || state.input !== "controller")) {
+            releaseAll(); state.input = "controller";
           }
+          if (!eligible() && !nativeGame()) { state.engaged = false; nativeUsed = false; }
+          report();
         }, 1000);
       } catch (e) {}
 
@@ -640,6 +680,11 @@ enum BetterXCloud {
           report();
         },
         releaseMouse() { releaseMouse(); report(); },
+        useController() { useController(); },
+        /* The keyboard is in control (and the game uses the layout). */
+        typing() { return state.input === "keyboard" && eligible(); },
+        /* The game's own keyboard & mouse support is in use. */
+        nativeInUse() { return nativeUsed && nativeGame(); },
         /* With no controller connected the keyboard stands in for one, at
            the first free slot, announced the way a connected pad is. */
         standIn(pads) {
@@ -669,7 +714,7 @@ enum BetterXCloud {
           }, 0);
         },
         diagnostics() {
-          return {enabled:config.enabled, eligible:eligible(), engaged:state.engaged, locked:locked(),
+          return {enabled:config.enabled, eligible:eligible(), engaged:state.engaged, input:state.input, locked:locked(), nativeInUse:nativeUsed,
             held:Array.from(held.keys()), axes:state.axes.slice(), version:state.version,
             standIn:padShown ? pad.index : null, mapped:Object.keys(config.mapping).length};
         }
@@ -677,35 +722,25 @@ enum BetterXCloud {
     })();
     window.__xcgKeyboard = __xcgKeyboard;
 
-    /* Gyro as a mouse, in games with keyboard & mouse support: each native
-       delta is queued as relative mouse movement on Xbox's input channel
-       (exposed by Better xCloud), exactly once: the sequence number guards
-       against a repeated update. The real mouse's held buttons are carried
-       so a delta never releases them. */
-    window.__xcgGyroMouse = (function () {
-      let sequence = -1, buttons = 0, sent = 0, error = "";
-      try {
-        ["pointerdown", "pointerup"].forEach(name => window.addEventListener(name, event => {
-          if (event.pointerType === "mouse") buttons = event.buttons || 0;
-        }, true));
-      } catch (e) {}
-      return {
-        apply(values) {
-          if (!values || !Number.isFinite(values.mouseSeq) || values.mouseSeq === sequence) return false;
-          sequence = values.mouseSeq;
-          const x = Math.round(Number(values.mouseX) || 0), y = Math.round(Number(values.mouseY) || 0);
-          if (x === 0 && y === 0) return false;
-          try {
-            const channel = window.BX_EXPOSED && window.BX_EXPOSED.inputChannel;
-            if (!channel || typeof channel.queueMouseInput !== "function") return false;
-            channel.queueMouseInput({X:x, Y:y, Buttons:buttons, WheelX:0, WheelY:0, Type:0});
-            sent++;
-            return true;
-          } catch (e) { error = String(e); return false; }
-        },
-        diagnostics() { return {sent, error, lastSequence:sequence}; }
-      };
-    })();
+    /* Whether the controller was just used: a button or trigger newly
+       pressed, or a stick newly pushed out. Edges only, so a held trigger
+       or a drifting stick cannot keep taking control back, and motion (a
+       controller bumped on the desk) never does. */
+    const __xcgControllerUse = {pressed:0, sticks:[false, false]};
+    function __xcgControllerUsed(p) {
+      let pressed = 0;
+      Array.from(p.buttons).forEach((b, i) => {
+        const value = b && typeof b === "object" ? Number(b.value) || 0 : Number(b) || 0;
+        if (i < 17 && value > (i === 6 || i === 7 ? 0.3 : 0.5)) pressed |= (1 << i);
+      });
+      const sticks = [Math.hypot(p.axes[0], p.axes[1]) > 0.45, Math.hypot(p.axes[2], p.axes[3]) > 0.45];
+      const last = __xcgControllerUse;
+      // Tracked on every poll, so a button already held when the keyboard
+      // took over is not mistaken for a new press.
+      const used = (pressed & ~last.pressed) !== 0 || (sticks[0] && !last.sticks[0]) || (sticks[1] && !last.sticks[1]);
+      last.pressed = pressed; last.sticks = sticks;
+      return used;
+    }
 
     const __xcgPollGamepads = function() {
       const pads = Array.from(__xcgReadPhysicalPads());
@@ -715,7 +750,7 @@ enum BetterXCloud {
       // Native motion and the keyboard ride on one standard controller.
       const p = connected.find(pad => pad.mapping === "standard" && pad.axes.length >= 4 && !/virtual/i.test(pad.id));
       if (!p) {
-        if (keyboard.engaged) {
+        if (keyboard.engaged && __xcgKeyboard.typing()) {
           const standIn = __xcgKeyboard.standIn(pads);
           pads[standIn.index] = standIn;
         } else {
@@ -725,18 +760,23 @@ enum BetterXCloud {
       }
       __xcgKeyboard.hideStandIn();
       const now = performance.now(), n = __xcgPollInput.values;
+      // Using the controller takes over from the keyboard (or from the
+      // game's own keyboard & mouse): a new press or a stick pushed out.
+      if (__xcgControllerUsed(p)) __xcgKeyboard.useController();
+      const typing = __xcgKeyboard.typing();
       // With several controllers it is ambiguous which one the native
-      // motion belongs to (local co-op): leave native input out.
+      // motion belongs to (local co-op): leave native input out. While the
+      // game's own keyboard & mouse is in use, motion pauses too.
       const active = connected.length === 1 && now - __xcgPollInput.at < 200 && n.nativeControllerCount >= 1 &&
-        !document.hidden && !window.BX_EXPOSED?.disableGamepadPolling;
+        !document.hidden && !window.BX_EXPOSED?.disableGamepadPolling && !__xcgKeyboard.nativeInUse();
       const keyboardChanged = keyboard.version !== __xcgPollInput.keyboardVersion;
       // Once a controller has been adjusted its timestamps are ours: Xbox
       // ignores any older one, so it is never handed back raw.
-      if (!__xcgPollInput.proxied && !active && !keyboard.engaged && !keyboardChanged) return pads;
+      if (!__xcgPollInput.proxied && !active && !typing && !keyboardChanged) return pads;
       __xcgPollInput.proxied = true;
-      const axes = Array.from(p.axes), buttons = Array.from(p.buttons);
+      let axes = Array.from(p.axes), buttons = Array.from(p.buttons);
       const clamp = v => Math.max(-1, Math.min(1, v));
-      if (active) {
+      if (active && !typing) {
         ["LeftThumbXAxis","LeftThumbYAxis","RightThumbXAxis","RightThumbYAxis"].forEach((k,i) => {
           if (Number.isFinite(n[k])) axes[i] = clamp(n[k] * (i % 2 ? -1 : 1));
         });
@@ -772,16 +812,14 @@ enum BetterXCloud {
         }
         __xcgPollInput.applied++;
       }
-      if (keyboard.engaged) {
-        keyboard.buttons.forEach((value, i) => {
-          if (value > 0 && i < buttons.length) buttons[i] = {value, pressed:true, touched:true};
+      if (typing) {
+        // The keyboard plays alone: the controller's own buttons, sticks and
+        // motion are set aside until it is used again.
+        buttons = buttons.map((_, i) => {
+          const value = i < 17 ? keyboard.buttons[i] : 0;
+          return {value, pressed:value > 0.5, touched:value > 0};
         });
-        // A stick the keyboard or mouse is moving follows them.
-        [0, 2].forEach(base => {
-          if (keyboard.axes[base] !== 0 || keyboard.axes[base+1] !== 0) {
-            axes[base] = keyboard.axes[base]; axes[base+1] = keyboard.axes[base+1];
-          }
-        });
+        axes = axes.map((_, i) => i < 4 ? keyboard.axes[i] : 0);
       }
       __xcgPollInput.lastAxes = axes.slice(2,4); // Legacy right-stick diagnostics.
       __xcgPollInput.lastLeftAxes = axes.slice(0,2);
@@ -869,69 +907,6 @@ enum BetterXCloud {
             __xcgPostMkbState();
           });
         } catch (e) {}
-
-        /* Sound-driven vibration: the game's own audio track, low-passed and
-           measured ~50 times a second for the app to turn into rumble. The
-           analysis graph ends in silence, so nothing is played twice. */
-        const __xcgAudioHaptics = (function () {
-          let enabled = false, timer = 0, context = null, analyser = null, buffer = null, track = null;
-          let lastSent = -1, lastSentAt = 0;
-          function liveTrack() {
-            try {
-              const peer = STATES.currentStream && STATES.currentStream.peerConnection;
-              if (!peer || typeof peer.getReceivers !== "function") return null;
-              const receiver = peer.getReceivers().find(r => r.track && r.track.kind === "audio" && r.track.readyState === "live");
-              return receiver ? receiver.track : null;
-            } catch (e) { return null; }
-          }
-          function detach() {
-            try { if (context) context.close(); } catch (e) {}
-            context = null; analyser = null; track = null;
-          }
-          function attach(next) {
-            detach();
-            try {
-              context = new AudioContext({ latencyHint: "interactive" });
-              context.resume().catch(() => {});
-              const source = context.createMediaStreamSource(new MediaStream([next]));
-              const low = context.createBiquadFilter();
-              low.type = "lowpass"; low.frequency.value = 140; low.Q.value = 0.7;
-              analyser = context.createAnalyser();
-              analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0;
-              const silent = context.createGain();
-              silent.gain.value = 0;
-              source.connect(low).connect(analyser).connect(silent).connect(context.destination);
-              buffer = new Float32Array(analyser.fftSize);
-              track = next;
-            } catch (e) { detach(); }
-          }
-          function send(level) {
-            const now = performance.now();
-            if (Math.abs(level - lastSent) < 0.004 && now - lastSentAt < 250) return;
-            lastSent = level; lastSentAt = now;
-            try { window.webkit.messageHandlers.spikeHandler.postMessage({ type: "audio-level", level: level }); } catch (e) {}
-          }
-          function tick() {
-            const next = STATES.isPlaying && !document.hidden ? liveTrack() : null;
-            if (!next) { if (track) detach(); send(0); return; }
-            if (next !== track || !analyser) attach(next);
-            if (!analyser) return;
-            analyser.getFloatTimeDomainData(buffer);
-            let sum = 0;
-            for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
-            send(Math.round(Math.sqrt(sum / buffer.length) * 1000) / 1000);
-          }
-          return {
-            set(on) {
-              on = on === true;
-              if (on === enabled) return;
-              enabled = on;
-              clearInterval(timer); timer = 0;
-              if (on) timer = setInterval(tick, 20); else { detach(); send(0); }
-            },
-            diagnostics() { return { enabled: enabled, listening: !!analyser, contextState: context ? context.state : "none" }; }
-          };
-        })();
 
         let __xcgChannel = null, __xcgOriginalSend = null, __xcgBase = [], __xcgLastNative = false;
         let __xcgLastSendAt = 0, __xcgInputError = "", __xcgFlushTimer = null;
@@ -1109,11 +1084,6 @@ enum BetterXCloud {
               return true;
             } catch (e) { return false; }
           },
-          /* Starts or stops listening to the game's sound for vibration. */
-          setAudioHaptics: function (on) {
-            __xcgAudioHaptics.set(on === true);
-            return __xcgAudioHaptics.diagnostics();
-          },
           releasePointer: function () {
             try {
               if (window.__xcgKeyboard) window.__xcgKeyboard.releaseMouse();
@@ -1152,7 +1122,6 @@ enum BetterXCloud {
           updateNativeInput: function(values) {
             __xcgNativeInput = values || {};
             __xcgNativeInputAt = performance.now();
-            if (window.__xcgGyroMouse) window.__xcgGyroMouse.apply(__xcgNativeInput);
             if (window.__xcgPollInput) {
               window.__xcgPollInput.values = __xcgNativeInput;
               window.__xcgPollInput.at = __xcgNativeInputAt;
@@ -1618,30 +1587,4 @@ enum BetterXCloud {
 
     })();
     """#
-
-    /// Reads all overlay-relevant settings in one call.
-    static let readStateJS = """
-    (function () {
-      try {
-        if (typeof BxCBridge === 'undefined') return JSON.stringify({ bridge: false });
-        var g = function (k) { try { return BxCBridge.getGlobal(k); } catch (e) { return null; } };
-        var s = function (k) { try { return BxCBridge.getStream(k); } catch (e) { return null; } };
-        return JSON.stringify({
-          bridge: true,
-          regions: BxCBridge.regions(),
-          region: g('server.region'),
-          resolution: g('stream.video.resolution'),
-          rawBitrate: (JSON.parse(localStorage.getItem('BetterXcloud') || '{}'))['stream.video.maxBitrate'] || 0,
-          preventDrops: g('stream.video.preventResolutionDrops'),
-          splashSkip: g('ui.splashVideo.skip'),
-          feedbackDisabled: g('ui.feedbackDialog.disabled'),
-          statsShow: s('stats.showWhenPlaying'),
-          statsPosition: s('stats.position'),
-          statsItems: s('stats.items'),
-          vibrationMode: s('deviceVibration.mode'),
-          vibrationIntensity: s('deviceVibration.intensity')
-        });
-      } catch (e) { return JSON.stringify({ bridge: false, error: String(e) }); }
-    })();
-    """
 }
