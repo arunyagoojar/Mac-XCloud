@@ -36,7 +36,9 @@ enum SettingsBackupManager {
         "inputPresets.activeID", "inputPresets.autoGameProfiles", "inputPresets.gameBaseID",
         "inputPresets.games.v1",
         BrowserModel.windowFramesDefaultsKey,
-    ]
+        "motion.steeringCenterBank.v2",
+    ] + KeyboardMouseStore.persistedKeys + GameSetupPreferences.persistedKeys
+      + StreamHealthMonitor.persistedKeys + BrowserModel.fullscreenPersistedKeys
 
     private static let migrationKeys: Set<String> = [
         "nativeController.settingsVersion", "nativeRendererRecoveryVersion",
@@ -205,6 +207,9 @@ enum SettingsBackupManager {
             }
         }
         // Reload every affected subsystem so the UI reflects the import.
+        browser.keyboardMouse.reloadFromDefaults()
+        browser.streamHealth.noticesEnabled = defaults.object(forKey: StreamHealthMonitor.persistedKeys[0]) as? Bool ?? true
+        browser.fullscreenForGames = defaults.bool(forKey: BrowserModel.fullscreenPersistedKeys[0])
         browser.controllerFeatures.reloadSettings()
         browser.inputPresets.reloadFromDisk()
         browser.settingsModel.load()

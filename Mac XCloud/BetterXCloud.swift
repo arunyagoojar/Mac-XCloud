@@ -125,7 +125,9 @@ enum BetterXCloud {
     """#
 
     /// WKUserScripts for the main web view, in execution order.
-    static func userScripts() -> [WKUserScript] {
+    /// `keyboardConfiguration` is the controller layout's JSON
+    /// (`KeyboardMouseStore.pageConfigurationJSON`).
+    static func userScripts(keyboardConfiguration: String = "{}") -> [WKUserScript] {
         NativeSettingsMirror.applySafeRendererRecoveryIfNeeded()
         var scripts: [WKUserScript] = []
 
@@ -204,20 +206,17 @@ enum BetterXCloud {
               for (var k in optimizedGlobal) if (!(k in global)) global[k] = optimizedGlobal[k];
               for (var s in optimizedStream) if (!(s in stream)) stream[s] = optimizedStream[s];
             }
-            /* Keyboard & mouse. The native app owns both switches:
-                 nativeMkb.mode "default" lets games with keyboard & mouse
-                 support use it natively; "off" disables that.
-                 mkb.enabled turns on the virtual-controller emulation for
-                 games without native support.
-               Builds up to 1.3.8 forced both off on every launch and left
-               those values in storage; migrate once to the new defaults
-               unless the user has chosen otherwise since. */
+            /* Keyboard & mouse. nativeMkb.mode "default" lets games with
+               keyboard & mouse support use it natively; "off" disables that.
+               Every other game plays through the app's own controller layout
+               (keyboardLayer), so Better xCloud's virtual controller stays off.
+               Builds up to 1.3.8 forced native support off on every launch
+               and left that value in storage; migrate once. */
             if (localStorage.getItem("XCG.MkbMigrated.v1") !== "1") {
               global["nativeMkb.mode"] = "default";
-              global["mkb.enabled"] = false;
               localStorage.setItem("XCG.MkbMigrated.v1", "1");
             }
-            if (typeof mirrorGlobal["mkb.enabled"] === "boolean") global["mkb.enabled"] = mirrorGlobal["mkb.enabled"];
+            global["mkb.enabled"] = false;
             if (mirrorGlobal["nativeMkb.mode"] === "default" || mirrorGlobal["nativeMkb.mode"] === "off") {
               global["nativeMkb.mode"] = mirrorGlobal["nativeMkb.mode"];
             } else if (global["nativeMkb.mode"] !== "off") {
@@ -237,7 +236,6 @@ enum BetterXCloud {
 
         // 2. Flags the script reads at startup.
         let nativeMkbAllowed = (NativeSettingsMirror.values(for: .global)["nativeMkb.mode"] as? String) != "off"
-        let mouseSensitivity = KeyboardMouseSettings.mouseSensitivity
         let flags = """
         window.BX_FLAGS = Object.assign({}, window.BX_FLAGS || {}, {
           Debug: false,
@@ -246,7 +244,7 @@ enum BetterXCloud {
           EnableXcloudLogging: false,
           EnableWebGPURenderer: true\(nativeMkbAllowed ? ",\n  FeatureGates: { EnableMouseAndKeyboard: true }" : "")
         });
-        window.__xcgMkbMouse = { sensitivity: \(mouseSensitivity) };
+        window.__xcgKeyboardConfig = \(keyboardConfiguration);
         """
         scripts.append(WKUserScript(source: flags, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
@@ -390,6 +388,429 @@ enum BetterXCloud {
     })();
     """#
 
+    /// Wraps navigator.getGamepads before Better xCloud or Xbox captures it:
+    /// native motion values and the keyboard controller layout join the
+    /// controller Xbox polls. Runs inside the Better xCloud wrapper so it can
+    /// read `STATES`; also loaded on its own by the WebKit contract tests.
+    static let inputAdapterScript = #"""
+    // Install before Better xCloud or Xbox captures getGamepads.
+    // Keep the actual controller identity, buttons and actuator; change only input values.
+    const __xcgReadPhysicalPads = navigator.getGamepads.bind(navigator);
+    const __xcgPollInput = {values:{}, at:-Infinity, reads:0, applied:0, lastAxes:[], lastLeftAxes:[], lastAllAxes:[], clock:0, lastHardware:-Infinity, wasActive:false, proxied:false, keyboardVersion:0, error:""};
+    window.__xcgPollInput = __xcgPollInput;
+
+    /* Keyboard & mouse as an Xbox controller, for games without keyboard &
+       mouse support. Keys and mouse buttons press controller inputs and
+       mouse movement becomes stick velocity. The result is added to the
+       controller Xbox already polls (or stands in for one when none is
+       connected), so every press travels exactly the way a physical
+       controller's does. Games with native keyboard & mouse support are
+       left to Xbox. */
+    const __xcgKeyboard = (function () {
+      const config = {enabled:true, mapping:{}, mouseLook:2, invertY:false, sensitivity:1, compensation:0.2};
+      Object.assign(config, window.__xcgKeyboardConfig || {});
+      const held = new Map(), directionCounts = new Map(), order = {100:[], 200:[]}, wheelTimers = {};
+      const mouse = {dx:0, dy:0, vx:0, vy:0, x:0, y:0, last:0, lastEvent:0, timer:0};
+      const state = {buttons:new Array(17).fill(0), axes:[0,0,0,0], version:0, key:"", engaged:false};
+      const pad = {id:"Mac Xcloud Keyboard Controller (STANDARD GAMEPAD)", index:0, connected:true, mapping:"standard",
+        axes:[0,0,0,0], buttons:Array.from({length:17}, () => ({pressed:false, touched:false, value:0})),
+        timestamp:performance.now(), vibrationActuator:null, hapticActuators:[]};
+      let padShown = false, padVersion = -1, reported = "", nativeMouse = false;
+
+      function stream() {
+        try {
+          if (typeof STATES === "undefined" || !STATES) return null;
+          const details = STATES.currentStream && STATES.currentStream.titleInfo && STATES.currentStream.titleInfo.details;
+          return {playing:!!STATES.isPlaying, native:!!(details && details.hasMkbSupport)};
+        } catch (e) { return null; }
+      }
+      function eligible() {
+        const s = config.enabled ? stream() : null;
+        return !!(s && s.playing && !s.native);
+      }
+      function locked() { return document.pointerLockElement === document.body; }
+      function editable(node) {
+        return !!(node && (node.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName || "")));
+      }
+      function report() {
+        const next = !eligible() ? "off" : locked() ? "active" : state.engaged ? "keys" : "ready";
+        if (next === reported) return;
+        reported = next;
+        try { window.webkit.messageHandlers.spikeHandler.postMessage({type:"mkb-emulation", state:next}); } catch (e) {}
+      }
+      // Keys held on opposite sides of a stick: the newest wins.
+      function stick(base) {
+        let x = 0, y = 0;
+        const list = order[base];
+        for (let i = list.length - 1; i >= 0 && (x === 0 || y === 0); i--) {
+          const direction = list[i] - base;
+          if (x === 0 && direction >= 2) x = direction === 2 ? -1 : 1;
+          if (y === 0 && direction < 2) y = direction === 0 ? -1 : 1;
+        }
+        if (x !== 0 && y !== 0) { x *= Math.SQRT1_2; y *= Math.SQRT1_2; }
+        return [x, y];
+      }
+      function recompute() {
+        const buttons = new Array(17).fill(0);
+        held.forEach(index => { if (index >= 0 && index < 17) buttons[index] = 1; });
+        const left = stick(100), right = stick(200);
+        const axes = [left[0], left[1], right[0], right[1]];
+        if (config.mouseLook && (mouse.x !== 0 || mouse.y !== 0)) {
+          const base = config.mouseLook === 1 ? 0 : 2;
+          let x = axes[base] + mouse.x, y = axes[base + 1] + mouse.y;
+          const length = Math.hypot(x, y);
+          if (length > 1) { x /= length; y /= length; }
+          axes[base] = x; axes[base + 1] = y;
+        }
+        const key = buttons.join("") + "|" + axes.map(v => v.toFixed(3)).join(",");
+        if (key === state.key) return;
+        state.key = key; state.buttons = buttons; state.axes = axes; state.version++;
+      }
+      function press(code, index) {
+        if (held.get(code) === index) return;
+        if (held.has(code)) release(code);
+        held.set(code, index);
+        if (index >= 100) {
+          const base = index >= 200 ? 200 : 100, list = order[base], at = list.indexOf(index);
+          directionCounts.set(index, (directionCounts.get(index) || 0) + 1);
+          if (at !== -1) list.splice(at, 1);
+          list.push(index);
+        }
+        state.engaged = true;
+        recompute();
+        report();
+      }
+      function release(code) {
+        if (!held.has(code)) return;
+        const index = held.get(code);
+        held.delete(code);
+        if (index >= 100) {
+          const count = (directionCounts.get(index) || 1) - 1;
+          if (count > 0) directionCounts.set(index, count);
+          else {
+            directionCounts.delete(index);
+            const list = order[index >= 200 ? 200 : 100], at = list.indexOf(index);
+            if (at !== -1) list.splice(at, 1);
+          }
+        }
+        recompute();
+      }
+      function stopMouse() {
+        if (mouse.timer) { clearInterval(mouse.timer); mouse.timer = 0; }
+        mouse.dx = 0; mouse.dy = 0; mouse.vx = 0; mouse.vy = 0;
+        if (mouse.x !== 0 || mouse.y !== 0) { mouse.x = 0; mouse.y = 0; recompute(); }
+      }
+      function releaseMouse() {
+        Array.from(held.keys()).forEach(code => { if (/^(Mouse|Scroll)/.test(code)) release(code); });
+        stopMouse();
+      }
+      function releaseAll() {
+        held.clear(); directionCounts.clear(); order[100].length = 0; order[200].length = 0;
+        stopMouse();
+        recompute();
+      }
+      /* Mouse movement is accumulated and turned into stick velocity on a
+         steady clock (one stick value per mouse event would flicker with
+         event timing), smoothed lightly and released smoothly when the
+         mouse stops. 600 px/s reaches full stick at sensitivity 1. */
+      function stepMouse() {
+        const now = performance.now();
+        const dt = Math.max((now - mouse.last) / 1000, 0.001);
+        mouse.last = now;
+        const idle = now - mouse.lastEvent > 40;
+        const rawX = mouse.dx / dt, rawY = mouse.dy / dt;
+        mouse.dx = 0; mouse.dy = 0;
+        const a = 1 - Math.exp(-dt / (idle ? 0.012 : 0.018));
+        mouse.vx += (rawX - mouse.vx) * a; mouse.vy += (rawY - mouse.vy) * a;
+        const speed = Math.hypot(mouse.vx, mouse.vy);
+        let x = 0, y = 0;
+        if (speed >= 15) {
+          const scale = (Number(config.sensitivity) || 1) / 600;
+          x = mouse.vx * scale; y = mouse.vy * scale * (config.invertY ? -1 : 1);
+          const length = Math.hypot(x, y);
+          // Lift the slowest movement past the game's stick dead zone.
+          const weight = Math.min(Math.max(Number(config.compensation) || 0, 0), 0.5);
+          const onset = Math.min(Math.max((speed - 15) / 40, 0), 1);
+          const magnitude = Math.min(weight * onset + (1 - weight * onset) * Math.min(length, 1), 1);
+          if (length > 0) { x *= magnitude / length; y *= magnitude / length; }
+        }
+        x = Math.round(x * 1000) / 1000; y = Math.round(y * 1000) / 1000;
+        if (x !== mouse.x || y !== mouse.y) { mouse.x = x; mouse.y = y; recompute(); }
+        if (idle && x === 0 && y === 0) { clearInterval(mouse.timer); mouse.timer = 0; mouse.vx = 0; mouse.vy = 0; }
+      }
+      // While the mouse is captured, a tap of Escape presses Menu (pause, as
+      // on PC); holding it releases the mouse, and then presses nothing.
+      let escapeDownAt = 0;
+      function onEscape(event) {
+        if (!locked() || !eligible()) { escapeDownAt = 0; return; }
+        if (event.type === "keydown") { if (!event.repeat) escapeDownAt = performance.now(); return; }
+        const tapped = escapeDownAt > 0 && performance.now() - escapeDownAt < 450;
+        escapeDownAt = 0;
+        if (!tapped) return;
+        press("Escape", 9);
+        setTimeout(() => release("Escape"), 90);
+      }
+      function onKey(event) {
+        const code = event.code;
+        if (!code) return;
+        if (code === "Escape") { onEscape(event); return; }
+        if (event.type === "keyup") {
+          if (held.has(code)) { release(code); event.preventDefault(); event.stopImmediatePropagation(); }
+          return;
+        }
+        // Command shortcuts belong to the Mac.
+        if (event.metaKey) return;
+        const index = config.mapping[code];
+        if (typeof index !== "number" || editable(event.target) || !eligible()) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!event.repeat) press(code, index);
+      }
+      function onMouseButton(event) {
+        if (!locked()) return;
+        const code = "Mouse" + event.button;
+        if (event.type === "mouseup") { release(code); return; }
+        const index = config.mapping[code];
+        if (typeof index === "number" && eligible()) { event.preventDefault(); press(code, index); }
+      }
+      function onWheel(event) {
+        if (!locked() || !eligible()) return;
+        const code = event.deltaY < 0 ? "ScrollUp" : event.deltaY > 0 ? "ScrollDown"
+          : event.deltaX < 0 ? "ScrollLeft" : event.deltaX > 0 ? "ScrollRight" : "";
+        const index = config.mapping[code];
+        if (typeof index !== "number") return;
+        event.preventDefault();
+        press(code, index);
+        clearTimeout(wheelTimers[code]);
+        // Long enough for the game to see one press per notch.
+        wheelTimers[code] = setTimeout(() => release(code), 80);
+      }
+      function onMove(event) {
+        if (!config.mouseLook || !locked()) return;
+        mouse.dx += Number(event.movementX) || 0;
+        mouse.dy += Number(event.movementY) || 0;
+        mouse.lastEvent = performance.now();
+        if (!mouse.timer) { mouse.last = mouse.lastEvent; mouse.timer = setInterval(stepMouse, 8); }
+      }
+      // A click on the game captures the mouse for looking around.
+      function onClick(event) {
+        if (document.pointerLockElement || !eligible()) return;
+        const target = event.target;
+        if (!target || !target.closest || !target.closest("#game-stream")) return;
+        if (!config.mouseLook && !Object.keys(config.mapping).some(k => /^(Mouse|Scroll)/.test(k))) return;
+        try {
+          const request = document.body.requestPointerLock();
+          if (request && typeof request.catch === "function") request.catch(() => {});
+        } catch (e) {}
+      }
+      try {
+        window.addEventListener("keydown", onKey, true);
+        window.addEventListener("keyup", onKey, true);
+        document.addEventListener("mousedown", onMouseButton, true);
+        document.addEventListener("mouseup", onMouseButton, true);
+        document.addEventListener("wheel", onWheel, {capture:true, passive:false});
+        document.addEventListener("mousemove", onMove, true);
+        document.addEventListener("click", onClick, true);
+        document.addEventListener("pointerlockchange", () => {
+          if (locked()) state.engaged = true; else releaseMouse();
+          report();
+        });
+        // Keys released while another window had focus never send keyup.
+        window.addEventListener("blur", releaseAll);
+        document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
+        setInterval(() => {
+          if (!eligible() && (state.engaged || held.size)) { releaseAll(); state.engaged = false; }
+          report();
+          // Tell the app whether this game takes a mouse (gyro can aim with it).
+          const s = stream(), mouse = !!(s && s.playing && s.native);
+          if (mouse !== nativeMouse) {
+            nativeMouse = mouse;
+            try { window.webkit.messageHandlers.spikeHandler.postMessage({type:"title-input", nativeMouse:mouse}); } catch (e) {}
+          }
+        }, 1000);
+      } catch (e) {}
+
+      return {
+        state,
+        configure(next) {
+          Object.assign(config, next || {});
+          if (!config.mouseLook) stopMouse();
+          if (!config.enabled) { releaseAll(); state.engaged = false; }
+          recompute();
+          report();
+        },
+        releaseMouse() { releaseMouse(); report(); },
+        /* With no controller connected the keyboard stands in for one, at
+           the first free slot, announced the way a connected pad is. */
+        standIn(pads) {
+          if (!padShown) {
+            let slot = 0;
+            while (slot < pads.length && pads[slot] && pads[slot].connected !== false) slot++;
+            pad.index = slot; padShown = true; padVersion = -1;
+            setTimeout(() => {
+              try { const event = new Event("gamepadconnected"); event.gamepad = pad; window.dispatchEvent(event); } catch (e) {}
+            }, 0);
+          }
+          if (padVersion !== state.version) {
+            padVersion = state.version;
+            pad.axes = state.axes.slice();
+            pad.buttons = state.buttons.map(v => ({pressed:v > 0.5, touched:v > 0, value:v}));
+            pad.timestamp = performance.now();
+          }
+          return pad;
+        },
+        hideStandIn() {
+          if (!padShown) return;
+          padShown = false;
+          pad.connected = false;
+          setTimeout(() => {
+            try { const event = new Event("gamepaddisconnected"); event.gamepad = pad; window.dispatchEvent(event); } catch (e) {}
+            pad.connected = true;
+          }, 0);
+        },
+        diagnostics() {
+          return {enabled:config.enabled, eligible:eligible(), engaged:state.engaged, locked:locked(),
+            held:Array.from(held.keys()), axes:state.axes.slice(), version:state.version,
+            standIn:padShown ? pad.index : null, mapped:Object.keys(config.mapping).length};
+        }
+      };
+    })();
+    window.__xcgKeyboard = __xcgKeyboard;
+
+    /* Gyro as a mouse, in games with keyboard & mouse support: each native
+       delta is queued as relative mouse movement on Xbox's input channel
+       (exposed by Better xCloud), exactly once: the sequence number guards
+       against a repeated update. The real mouse's held buttons are carried
+       so a delta never releases them. */
+    window.__xcgGyroMouse = (function () {
+      let sequence = -1, buttons = 0, sent = 0, error = "";
+      try {
+        ["pointerdown", "pointerup"].forEach(name => window.addEventListener(name, event => {
+          if (event.pointerType === "mouse") buttons = event.buttons || 0;
+        }, true));
+      } catch (e) {}
+      return {
+        apply(values) {
+          if (!values || !Number.isFinite(values.mouseSeq) || values.mouseSeq === sequence) return false;
+          sequence = values.mouseSeq;
+          const x = Math.round(Number(values.mouseX) || 0), y = Math.round(Number(values.mouseY) || 0);
+          if (x === 0 && y === 0) return false;
+          try {
+            const channel = window.BX_EXPOSED && window.BX_EXPOSED.inputChannel;
+            if (!channel || typeof channel.queueMouseInput !== "function") return false;
+            channel.queueMouseInput({X:x, Y:y, Buttons:buttons, WheelX:0, WheelY:0, Type:0});
+            sent++;
+            return true;
+          } catch (e) { error = String(e); return false; }
+        },
+        diagnostics() { return {sent, error, lastSequence:sequence}; }
+      };
+    })();
+
+    const __xcgPollGamepads = function() {
+      const pads = Array.from(__xcgReadPhysicalPads());
+      __xcgPollInput.reads++;
+      const connected = pads.filter(p => p && p.connected !== false);
+      const keyboard = __xcgKeyboard.state;
+      // Native motion and the keyboard ride on one standard controller.
+      const p = connected.find(pad => pad.mapping === "standard" && pad.axes.length >= 4 && !/virtual/i.test(pad.id));
+      if (!p) {
+        if (keyboard.engaged) {
+          const standIn = __xcgKeyboard.standIn(pads);
+          pads[standIn.index] = standIn;
+        } else {
+          __xcgKeyboard.hideStandIn();
+        }
+        return pads;
+      }
+      __xcgKeyboard.hideStandIn();
+      const now = performance.now(), n = __xcgPollInput.values;
+      // With several controllers it is ambiguous which one the native
+      // motion belongs to (local co-op): leave native input out.
+      const active = connected.length === 1 && now - __xcgPollInput.at < 200 && n.nativeControllerCount >= 1 &&
+        !document.hidden && !window.BX_EXPOSED?.disableGamepadPolling;
+      const keyboardChanged = keyboard.version !== __xcgPollInput.keyboardVersion;
+      // Once a controller has been adjusted its timestamps are ours: Xbox
+      // ignores any older one, so it is never handed back raw.
+      if (!__xcgPollInput.proxied && !active && !keyboard.engaged && !keyboardChanged) return pads;
+      __xcgPollInput.proxied = true;
+      const axes = Array.from(p.axes), buttons = Array.from(p.buttons);
+      const clamp = v => Math.max(-1, Math.min(1, v));
+      if (active) {
+        ["LeftThumbXAxis","LeftThumbYAxis","RightThumbXAxis","RightThumbYAxis"].forEach((k,i) => {
+          if (Number.isFinite(n[k])) axes[i] = clamp(n[k] * (i % 2 ? -1 : 1));
+        });
+        // Native GameController has positive Y up; the browser has positive Y down.
+        const gyroBase = n.gyroAxisBase === 0 ? 0 : 2;
+        const touchBase = n.touchAxisBase === 0 ? 0 : 2;
+        const physicalMagnitude = base => Math.hypot(p.axes[base], p.axes[base+1]);
+        if (n.touchpadAim === 1 && physicalMagnitude(touchBase) <= 0.12) {
+          axes[touchBase] = Number.isFinite(n.touchX) ? clamp(n.touchX) : 0;
+          axes[touchBase+1] = Number.isFinite(n.touchY) ? clamp(-n.touchY) : 0;
+        }
+        const touchOwnsGyroStick = n.touchActive === 1 &&
+          n.touchpadAim === 1 && touchBase === gyroBase;
+        if (!touchOwnsGyroStick && (Number.isFinite(n.gyroX) || Number.isFinite(n.gyroY))) {
+          const magnitude = physicalMagnitude(gyroBase);
+          if (magnitude <= 0.05) { axes[gyroBase] = 0; axes[gyroBase+1] = 0; }
+          // Fade out game-dead-zone compensation continuously as physical input increases.
+          const blend = Math.max(0,Math.min(1,(magnitude - 0.05) / 0.25));
+          const combine = (coarse,fine) => Number.isFinite(fine) ? coarse + (fine - coarse) * blend : coarse;
+          const x = combine(n.gyroX,n.gyroFineX);
+          const y = combine(n.gyroY,n.gyroFineY);
+          if (Number.isFinite(x)) axes[gyroBase] = clamp(axes[gyroBase] + x);
+          if (Number.isFinite(y)) axes[gyroBase+1] = clamp(axes[gyroBase+1] - y);
+        }
+        ["LeftTrigger","RightTrigger"].forEach((k,i) => {
+          if (!Number.isFinite(n[k]) || !buttons[i+6]) return;
+          const value = Math.max(0, Math.min(1,n[k]));
+          buttons[i+6] = {value, pressed:value > 0.5, touched:value > 0};
+        });
+        // A gyro pause button can be kept from the game.
+        if (Number.isInteger(n.suppressButton) && buttons[n.suppressButton]) {
+          buttons[n.suppressButton] = {value:0, pressed:false, touched:false};
+        }
+        __xcgPollInput.applied++;
+      }
+      if (keyboard.engaged) {
+        keyboard.buttons.forEach((value, i) => {
+          if (value > 0 && i < buttons.length) buttons[i] = {value, pressed:true, touched:true};
+        });
+        // A stick the keyboard or mouse is moving follows them.
+        [0, 2].forEach(base => {
+          if (keyboard.axes[base] !== 0 || keyboard.axes[base+1] !== 0) {
+            axes[base] = keyboard.axes[base]; axes[base+1] = keyboard.axes[base+1];
+          }
+        });
+      }
+      __xcgPollInput.lastAxes = axes.slice(2,4); // Legacy right-stick diagnostics.
+      __xcgPollInput.lastLeftAxes = axes.slice(0,2);
+      __xcgPollInput.lastAllAxes = axes.slice(0,4);
+      // Motion alone must invalidate Xbox's timestamp-based unchanged-input skip.
+      // At expiry, publish a newer timestamp with physical values to release aiming.
+      // WebKit hardware timestamps can use a different origin from performance.now().
+      // Never let a large hardware timestamp freeze motion-only updates.
+      if (active || __xcgPollInput.wasActive || keyboardChanged || p.timestamp !== __xcgPollInput.lastHardware) {
+        __xcgPollInput.clock = Math.max(__xcgPollInput.clock, p.timestamp || 0, now) + 0.01;
+      }
+      __xcgPollInput.wasActive = active;
+      __xcgPollInput.keyboardVersion = keyboard.version;
+      __xcgPollInput.lastHardware = p.timestamp;
+      const timestamp = __xcgPollInput.clock;
+      const proxy = new Proxy(p, {get(target,key) {
+        if (key === "axes") return axes;
+        if (key === "buttons") return buttons;
+        if (key === "timestamp") return timestamp;
+        const value = Reflect.get(target,key,target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }});
+      return pads.map(pad => pad === p ? proxy : pad);
+    };
+    try { navigator.getGamepads = __xcgPollGamepads; }
+    catch(error) { __xcgPollInput.error = String(error); }
+    __xcgPollInput.installed = navigator.getGamepads === __xcgPollGamepads;
+    """#
+
     private static func wrappedScript(source: String) -> String {
         // Strip source-map comments; keep everything else intact.
         let stripped = source
@@ -398,86 +819,6 @@ enum BetterXCloud {
             .joined(separator: "\n")
         // The final send path handles both physical and native-only changes.
         let cleaned = stripped
-        let inputAdapter = #"""
-        // Install before Better xCloud or Xbox captures getGamepads.
-        // Keep the actual controller identity, buttons and actuator; change only input values.
-        const __xcgReadPhysicalPads = navigator.getGamepads.bind(navigator);
-        const __xcgPollInput = {values:{}, at:-Infinity, reads:0, applied:0, lastAxes:[], lastLeftAxes:[], lastAllAxes:[], clock:0, lastHardware:-Infinity, wasActive:false, error:""};
-        window.__xcgPollInput = __xcgPollInput;
-        const __xcgPollGamepads = function() {
-          const pads = Array.from(__xcgReadPhysicalPads());
-          __xcgPollInput.reads++;
-          const connected = pads.filter(p => p && p.connected !== false);
-          const now = performance.now(), n = __xcgPollInput.values;
-          const active = now - __xcgPollInput.at < 200 && n.nativeControllerCount >= 1 &&
-            !document.hidden && !window.BX_EXPOSED?.disableGamepadPolling;
-          // With several controllers it is ambiguous which one the native
-          // motion belongs to (local co-op): leave every pad untouched.
-          if (connected.length !== 1 || !Number.isFinite(__xcgPollInput.at)) return pads;
-          const p = connected[0];
-          // A standard four-axis controller is required; leave virtual MKB alone.
-          if (p.mapping !== "standard" || p.axes.length < 4 || /virtual/i.test(p.id)) return pads;
-          const axes = Array.from(p.axes), buttons = Array.from(p.buttons);
-          const clamp = v => Math.max(-1, Math.min(1, v));
-          if (active) {
-            ["LeftThumbXAxis","LeftThumbYAxis","RightThumbXAxis","RightThumbYAxis"].forEach((k,i) => {
-              if (Number.isFinite(n[k])) axes[i] = clamp(n[k] * (i % 2 ? -1 : 1));
-            });
-            // Native GameController has positive Y up; the browser has positive Y down.
-            const gyroBase = n.gyroAxisBase === 0 ? 0 : 2;
-            const touchBase = n.touchAxisBase === 0 ? 0 : 2;
-            const physicalMagnitude = base => Math.hypot(p.axes[base], p.axes[base+1]);
-            if (n.touchpadAim === 1 && physicalMagnitude(touchBase) <= 0.12) {
-              axes[touchBase] = Number.isFinite(n.touchX) ? clamp(n.touchX) : 0;
-              axes[touchBase+1] = Number.isFinite(n.touchY) ? clamp(-n.touchY) : 0;
-            }
-            const touchOwnsGyroStick = n.touchActive === 1 &&
-              n.touchpadAim === 1 && touchBase === gyroBase;
-            if (!touchOwnsGyroStick && (Number.isFinite(n.gyroX) || Number.isFinite(n.gyroY))) {
-              const magnitude = physicalMagnitude(gyroBase);
-              if (magnitude <= 0.05) { axes[gyroBase] = 0; axes[gyroBase+1] = 0; }
-              // Fade out game-dead-zone compensation continuously as physical input increases.
-              const blend = Math.max(0,Math.min(1,(magnitude - 0.05) / 0.25));
-              const combine = (coarse,fine) => Number.isFinite(fine) ? coarse + (fine - coarse) * blend : coarse;
-              const x = combine(n.gyroX,n.gyroFineX);
-              const y = combine(n.gyroY,n.gyroFineY);
-              if (Number.isFinite(x)) axes[gyroBase] = clamp(axes[gyroBase] + x);
-              if (Number.isFinite(y)) axes[gyroBase+1] = clamp(axes[gyroBase+1] - y);
-            }
-            ["LeftTrigger","RightTrigger"].forEach((k,i) => {
-              if (!Number.isFinite(n[k]) || !buttons[i+6]) return;
-              const value = Math.max(0, Math.min(1,n[k]));
-              buttons[i+6] = {value, pressed:value > 0.5, touched:value > 0};
-            });
-            __xcgPollInput.applied++;
-          }
-          __xcgPollInput.lastAxes = axes.slice(2,4); // Legacy right-stick diagnostics.
-          __xcgPollInput.lastLeftAxes = axes.slice(0,2);
-          __xcgPollInput.lastAllAxes = axes.slice(0,4);
-          // Motion alone must invalidate Xbox's timestamp-based unchanged-input skip.
-          // At expiry, publish a newer timestamp with physical values to release aiming.
-          // WebKit hardware timestamps can use a different origin from performance.now().
-          // Never let a large hardware timestamp freeze motion-only updates.
-          if (active || __xcgPollInput.wasActive || p.timestamp !== __xcgPollInput.lastHardware) {
-            __xcgPollInput.clock = Math.max(__xcgPollInput.clock, p.timestamp || 0, now) + 0.01;
-          }
-          __xcgPollInput.wasActive = active;
-          __xcgPollInput.lastHardware = p.timestamp;
-          const timestamp = __xcgPollInput.clock;
-          const proxy = new Proxy(p, {get(target,key) {
-            if (key === "axes") return axes;
-            if (key === "buttons") return buttons;
-            if (key === "timestamp") return timestamp;
-            const value = Reflect.get(target,key,target);
-            return typeof value === "function" ? value.bind(target) : value;
-          }});
-          return pads.map(pad => pad === p ? proxy : pad);
-        };
-        try { navigator.getGamepads = __xcgPollGamepads; }
-        catch(error) { __xcgPollInput.error = String(error); }
-        __xcgPollInput.installed = navigator.getGamepads === __xcgPollGamepads;
-        """#
-
         let bridge = #"""
         const __xcgMacroButtonFields = Object.freeze({
           A:true, B:true, X:true, Y:true, LeftShoulder:true, RightShoulder:true,
@@ -492,25 +833,21 @@ enum BetterXCloud {
           macroOverlay: true,
           nativeRumble: false
         };
-        // Keyboard/mouse (MKB) diagnostics + ownership. Passive counters prove
-        // whether WKWebView actually delivers key and mouse events to the
-        // page; the virtual-controller and pointer-lock watchers tell the
-        // native side when an MKB path owns the stream so it can release
-        // native motion output instead of fighting over the same axes, and
-        // route the Escape key while the mouse is captured.
+        // Keyboard & mouse diagnostics. Passive counters prove whether
+        // WKWebView delivers key and mouse events to the page; the pointer-lock
+        // watcher tells the native side when the mouse is captured, so it can
+        // route the Escape key.
         const __xcgMkbStats = { keyDowns: 0, lastKey: "", mouseMoves: 0,
-          lastMovementX: 0, lastMovementY: 0, lastPointerLockError: "",
-          virtualController: false, pointerLocked: false,
+          lastMovementX: 0, lastMovementY: 0, lastPointerLockError: "", pointerLocked: false,
           pointerLockSupported:
           (typeof HTMLElement === "function" && typeof HTMLElement.prototype.requestPointerLock === "function") };
         let __xcgLastMkbState = "";
         function __xcgPostMkbState() {
-          const state = JSON.stringify([__xcgMkbStats.virtualController, __xcgMkbStats.pointerLocked]);
+          const state = String(__xcgMkbStats.pointerLocked);
           if (state === __xcgLastMkbState) return;
           __xcgLastMkbState = state;
           try { window.webkit.messageHandlers.spikeHandler.postMessage({ type: "mkb-state",
-            active: __xcgMkbStats.virtualController || __xcgMkbStats.pointerLocked,
-            emulated: __xcgMkbStats.virtualController, pointerLocked: __xcgMkbStats.pointerLocked }); } catch (e) {}
+            pointerLocked: __xcgMkbStats.pointerLocked }); } catch (e) {}
         }
         try {
           window.addEventListener("keydown", function (e) {
@@ -531,133 +868,70 @@ enum BetterXCloud {
             __xcgMkbStats.pointerLocked = !!document.pointerLockElement;
             __xcgPostMkbState();
           });
-          window.addEventListener("gamepadconnected", function (e) {
-            if (e.gamepad && /virtual/i.test(e.gamepad.id || "")) { __xcgMkbStats.virtualController = true; __xcgPostMkbState(); }
-          });
-          window.addEventListener("gamepaddisconnected", function (e) {
-            if (e.gamepad && /virtual/i.test(e.gamepad.id || "")) { __xcgMkbStats.virtualController = false; __xcgPostMkbState(); }
-          });
         } catch (e) {}
 
-        /* Emulated keyboard & mouse (Better xCloud's virtual controller).
-           Better xCloud turns each mouse event's movement directly into a
-           stick position, so the stick flickers with event timing and
-           snaps to zero 50 ms after the last event. Mouse movement is
-           instead accumulated and converted to a velocity on a steady
-           clock, smoothed lightly, and released smoothly when the mouse
-           stops; the preset's sensitivity and dead-zone counterweight keep
-           their meaning (sensitivity per 60 Hz frame). */
-        function __xcgPatchEmulatedMouse() {
-          if (typeof EmulatedMkbHandler !== "function" || EmulatedMkbHandler.prototype.__xcgMouse) return;
-          EmulatedMkbHandler.prototype.__xcgMouse = true;
-          const states = new WeakMap();
-          function step(handler, s) {
-            const now = performance.now();
-            const dt = Math.max((now - s.last) / 1000, 0.001);
-            s.last = now;
-            const preset = handler.PRESET;
-            if (!preset || !handler.enabled) {
-              if (s.sent) handler.updateStick(s.analog, 0, 0);
-              clearInterval(s.timer); states.delete(handler);
-              return;
-            }
-            const idle = now - s.lastEvent > 40;
-            const rawX = s.dx / dt, rawY = s.dy / dt;
-            s.dx = 0; s.dy = 0;
-            const tau = idle ? 0.012 : 0.018;
-            const a = 1 - Math.exp(-dt / tau);
-            s.vx += (rawX - s.vx) * a; s.vy += (rawY - s.vy) * a;
-            const multiplier = (window.__xcgMkbMouse && Number(window.__xcgMkbMouse.sensitivity)) || 1;
-            let x = s.vx / 60 * preset.mouse["sensitivityX"] * multiplier;
-            let y = s.vy / 60 * preset.mouse["sensitivityY"] * multiplier;
-            let length = Math.hypot(x, y);
-            const speed = Math.hypot(s.vx, s.vy);
-            if (speed < 15) { x = 0; y = 0; length = 0; }
-            if (length > 0) {
-              const counterweight = preset.mouse["deadzoneCounterweight"] || 0;
-              const onset = Math.min(Math.max((speed - 15) / 40, 0), 1);
-              const magnitude = Math.min(counterweight * onset + (1 - counterweight * onset) * Math.min(length, 1), 1);
-              x *= magnitude / length; y *= magnitude / length;
-            }
-            const key = x.toFixed(3) + "," + y.toFixed(3);
-            if (key !== s.key) { s.key = key; handler.updateStick(s.analog, x, y); s.sent = true; }
-            if (idle && length === 0) { clearInterval(s.timer); states.delete(handler); }
+        /* Sound-driven vibration: the game's own audio track, low-passed and
+           measured ~50 times a second for the app to turn into rumble. The
+           analysis graph ends in silence, so nothing is played twice. */
+        const __xcgAudioHaptics = (function () {
+          let enabled = false, timer = 0, context = null, analyser = null, buffer = null, track = null;
+          let lastSent = -1, lastSentAt = 0;
+          function liveTrack() {
+            try {
+              const peer = STATES.currentStream && STATES.currentStream.peerConnection;
+              if (!peer || typeof peer.getReceivers !== "function") return null;
+              const receiver = peer.getReceivers().find(r => r.track && r.track.kind === "audio" && r.track.readyState === "live");
+              return receiver ? receiver.track : null;
+            } catch (e) { return null; }
           }
-          EmulatedMkbHandler.prototype.handleMouseMove = function (data) {
-            const preset = this.PRESET;
-            if (!preset || preset.mouse["mapTo"] === 0) return;
-            let s = states.get(this);
-            if (!s) {
-              s = { dx: 0, dy: 0, vx: 0, vy: 0, last: performance.now(), lastEvent: 0, key: "", sent: false,
-                analog: preset.mouse["mapTo"] === 1 ? 0 : 1, timer: 0 };
-              states.set(this, s);
-              const handler = this;
-              s.timer = setInterval(function () { step(handler, s); }, 8);
-            }
-            s.dx += Number(data.movementX) || 0;
-            s.dy += Number(data.movementY) || 0;
-            s.lastEvent = performance.now();
-          };
-        }
-        /* The virtual controller starts the moment the player uses the
-           keyboard or mouse in a game that needs it: a click on the stream,
-           or any key the layout maps (the key itself counts, so the first
-           press of Space already presses A). Hold Escape to hand control back
-           to the physical controller. */
-        let __xcgPendingKey = "";
-        function __xcgEmulationHandler() {
-          if (typeof EmulatedMkbHandler !== "function") return null;
-          const handler = EmulatedMkbHandler.instance;
-          return handler && handler.initialized && !handler.enabled && !document.pointerLockElement ? handler : null;
-        }
-        function __xcgPostEmulation(state) {
-          try { window.webkit.messageHandlers.spikeHandler.postMessage({ type: "mkb-emulation", state: state }); } catch (e) {}
-        }
-        try {
-          document.addEventListener("click", function (event) {
+          function detach() {
+            try { if (context) context.close(); } catch (e) {}
+            context = null; analyser = null; track = null;
+          }
+          function attach(next) {
+            detach();
             try {
-              const handler = __xcgEmulationHandler();
-              if (handler && event.target && event.target.closest && event.target.closest("#game-stream")) handler.toggle(true);
-            } catch (e) {}
-          }, true);
-          window.addEventListener("keydown", function (event) {
-            try {
-              if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.code === "Escape") return;
-              const target = event.target;
-              if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) return;
-              const handler = __xcgEmulationHandler();
-              if (!handler || !handler.PRESET || typeof handler.PRESET.mapping[event.code] === "undefined") return;
-              __xcgPendingKey = event.code;
-              handler.toggle(true);
-            } catch (e) {}
-          }, true);
-          window.addEventListener("keyup", function (event) {
-            if (event.code === __xcgPendingKey) __xcgPendingKey = "";
-          }, true);
-          document.addEventListener("pointerlockchange", function () {
-            try {
-              const handler = typeof EmulatedMkbHandler === "function" ? EmulatedMkbHandler.instance : null;
-              const code = __xcgPendingKey;
-              __xcgPendingKey = "";
-              if (!code || !handler || !document.pointerLockElement || !handler.PRESET) return;
-              const button = handler.PRESET.mapping[code];
-              if (typeof button !== "undefined") setTimeout(function () { try { handler.pressButton(button, true); } catch (e) {} }, 0);
-            } catch (e) {}
-          });
-        } catch (e) {}
-        /* Report the virtual controller's state to the app's native hint. */
-        if (typeof EmulatedMkbHandler === "function" && !EmulatedMkbHandler.prototype.__xcgReport) {
-          EmulatedMkbHandler.prototype.__xcgReport = true;
-          const originalWait = EmulatedMkbHandler.prototype.waitForMouseData;
-          EmulatedMkbHandler.prototype.waitForMouseData = function (showPopup) {
-            try { originalWait.call(this, showPopup); } catch (e) {}
-            __xcgPostEmulation(!this.initialized ? "off" : (showPopup ? "ready" : "active"));
+              context = new AudioContext({ latencyHint: "interactive" });
+              context.resume().catch(() => {});
+              const source = context.createMediaStreamSource(new MediaStream([next]));
+              const low = context.createBiquadFilter();
+              low.type = "lowpass"; low.frequency.value = 140; low.Q.value = 0.7;
+              analyser = context.createAnalyser();
+              analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0;
+              const silent = context.createGain();
+              silent.gain.value = 0;
+              source.connect(low).connect(analyser).connect(silent).connect(context.destination);
+              buffer = new Float32Array(analyser.fftSize);
+              track = next;
+            } catch (e) { detach(); }
+          }
+          function send(level) {
+            const now = performance.now();
+            if (Math.abs(level - lastSent) < 0.004 && now - lastSentAt < 250) return;
+            lastSent = level; lastSentAt = now;
+            try { window.webkit.messageHandlers.spikeHandler.postMessage({ type: "audio-level", level: level }); } catch (e) {}
+          }
+          function tick() {
+            const next = STATES.isPlaying && !document.hidden ? liveTrack() : null;
+            if (!next) { if (track) detach(); send(0); return; }
+            if (next !== track || !analyser) attach(next);
+            if (!analyser) return;
+            analyser.getFloatTimeDomainData(buffer);
+            let sum = 0;
+            for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+            send(Math.round(Math.sqrt(sum / buffer.length) * 1000) / 1000);
+          }
+          return {
+            set(on) {
+              on = on === true;
+              if (on === enabled) return;
+              enabled = on;
+              clearInterval(timer); timer = 0;
+              if (on) timer = setInterval(tick, 20); else { detach(); send(0); }
+            },
+            diagnostics() { return { enabled: enabled, listening: !!analyser, contextState: context ? context.state : "none" }; }
           };
-          const originalDestroy = EmulatedMkbHandler.prototype.destroy;
-          EmulatedMkbHandler.prototype.destroy = function () {
-            try { originalDestroy.call(this); } finally { __xcgPostEmulation("off"); }
-          };
-        }
+        })();
 
         let __xcgChannel = null, __xcgOriginalSend = null, __xcgBase = [], __xcgLastNative = false;
         let __xcgLastSendAt = 0, __xcgInputError = "", __xcgFlushTimer = null;
@@ -803,59 +1077,27 @@ enum BetterXCloud {
               supportedInputTypes: (details && details.supportedInputTypes) || [],
               hasMkbSupport: details ? (details.hasMkbSupport === true ? true : (details.hasMkbSupport === false ? false : null)) : null,
               nativeMkbMode: getGlobalPref("nativeMkb.mode"),
-              mkbEnabled: getGlobalPref("mkb.enabled") === true,
               inputChannelAvailable: !!(window.BX_EXPOSED && window.BX_EXPOSED.inputChannel),
               streamSessionAvailable: !!(window.BX_EXPOSED && window.BX_EXPOSED.streamSession),
               updateInputConfigurationAvailable: !!(window.BX_EXPOSED && window.BX_EXPOSED.streamSession &&
                 typeof window.BX_EXPOSED.streamSession.updateInputConfigurationAsync === "function"),
-              virtualControllerConnected: __xcgMkbStats.virtualController,
               keyboardLockShim: !!navigator.keyboard,
               pageFullscreen: !!document.fullscreenElement,
+              controllerLayout: window.__xcgKeyboard ? window.__xcgKeyboard.diagnostics() : null,
               route: (function () {
-                const enabled = getGlobalPref("mkb.enabled") === true;
-                const mode = getGlobalPref("nativeMkb.mode");
-                if (!enabled && mode === "off") return "Keyboard & mouse is turned off in Mac Xcloud settings";
-                if (details && details.hasMkbSupport) {
-                  return mode === "off" ? "Emulated controller path (native MKB forced off)"
-                    : "Native game keyboard/mouse path (title reports MKB support)";
-                }
-                return "Emulated controller path (title has no native MKB support)";
+                if (details && details.hasMkbSupport) return "Native keyboard & mouse (the game supports it)";
+                const layout = window.__xcgKeyboard ? window.__xcgKeyboard.diagnostics() : { enabled: false };
+                return layout.enabled ? "Controller layout (the game is made for controllers)"
+                  : "Controller layout is turned off in Mac Xcloud settings";
               })()
             };
           },
-          /* Turns the virtual controller on or off for the running page and
-             the current game, without a reload. */
-          setEmulatedMkb: function (on) {
-            setGlobalPref("mkb.enabled", on === true, "ui");
-            if (typeof EmulatedMkbHandler !== "function") return false;
-            const current = EmulatedMkbHandler.instance;
-            if (on !== true) {
-              if (current) { try { current.destroy(); } catch (e) {} }
-              EmulatedMkbHandler.instance = undefined;
-              __xcgPostEmulation("off");
-              return true;
-            }
-            if (current === null) EmulatedMkbHandler.instance = undefined;
-            const handler = EmulatedMkbHandler.getInstance();
-            const details = STATES.currentStream && STATES.currentStream.titleInfo && STATES.currentStream.titleInfo.details;
-            if (handler && STATES.isPlaying && details && !details.hasMkbSupport && !handler.initialized) handler.init();
-            return !!handler;
-          },
-          refreshMkbLayout: async function () {
-            try {
-              await StreamSettings.refreshMkbSettings();
-              const handler = typeof EmulatedMkbHandler === "function" ? EmulatedMkbHandler.instance : null;
-              if (handler) handler.refreshPresetData();
-              return true;
-            } catch (e) { return false; }
-          },
-          activateEmulatedMkb: function () {
-            try {
-              const handler = typeof EmulatedMkbHandler === "function" ? EmulatedMkbHandler.instance : null;
-              if (!handler || !handler.initialized) return false;
-              handler.toggle(true);
-              return true;
-            } catch (e) { return false; }
+          /* Applies the keyboard & mouse layout and settings to the running
+             page; takes effect at once. */
+          configureKeyboard: function (config) {
+            if (!window.__xcgKeyboard) return false;
+            window.__xcgKeyboard.configure(config);
+            return true;
           },
           /* Escape while the mouse is captured: the native app intercepts the
              key before WebKit (which would release the mouse) and forwards it
@@ -867,17 +1109,17 @@ enum BetterXCloud {
               return true;
             } catch (e) { return false; }
           },
+          /* Starts or stops listening to the game's sound for vibration. */
+          setAudioHaptics: function (on) {
+            __xcgAudioHaptics.set(on === true);
+            return __xcgAudioHaptics.diagnostics();
+          },
           releasePointer: function () {
             try {
-              const handler = typeof EmulatedMkbHandler === "function" ? EmulatedMkbHandler.instance : null;
-              if (handler && handler.enabled) handler.toggle(false);
+              if (window.__xcgKeyboard) window.__xcgKeyboard.releaseMouse();
               if (document.pointerLockElement) document.exitPointerLock();
               return true;
             } catch (e) { return false; }
-          },
-          setMouseSensitivity: function (value) {
-            window.__xcgMkbMouse = Object.assign({}, window.__xcgMkbMouse || {}, { sensitivity: Number(value) || 1 });
-            return true;
           },
           controllerDiagnostics: function() {
             const pads = Array.from(navigator.getGamepads()).filter(Boolean);
@@ -910,6 +1152,7 @@ enum BetterXCloud {
           updateNativeInput: function(values) {
             __xcgNativeInput = values || {};
             __xcgNativeInputAt = performance.now();
+            if (window.__xcgGyroMouse) window.__xcgGyroMouse.apply(__xcgNativeInput);
             if (window.__xcgPollInput) {
               window.__xcgPollInput.values = __xcgNativeInput;
               window.__xcgPollInput.at = __xcgNativeInputAt;
@@ -1102,7 +1345,6 @@ enum BetterXCloud {
             var shortcuts = Number(controller.shortcutPresetId ?? -1);
             var customization = Number(controller.customizationPresetId ?? 0);
             return {
-              mkbEnabled: getGlobalPref("mkb.enabled") === true,
               nativeMkbMode: String(getGlobalPref("nativeMkb.mode") || "default"),
               p1Slot: 1,
               p2Slot: 0,
@@ -1190,6 +1432,7 @@ enum BetterXCloud {
               bitrate: finite(stats.btr && stats.btr.current, 0),
               loss: {
                 packets: finite(pl.dropped, 0),
+                received: finite(pl.received, 0),
                 packetPercent: finite(pl.dropped, 0) * 100 / Math.max(1, finite(pl.received, 0) + finite(pl.dropped, 0)),
                 frames: finite(fl.dropped, 0),
                 framePercent: finite(fl.dropped, 0) * 100 / Math.max(1, finite(fl.received, 0) + finite(fl.dropped, 0))
@@ -1254,7 +1497,6 @@ enum BetterXCloud {
           return __xcgCollectTask;
         };
         __xcgPatchBundledSource();
-        __xcgPatchEmulatedMouse();
         // A fresh page starts with keyboard & mouse released; say so, so the
         // app never carries state over from the page it replaced.
         __xcgPostMkbState();
@@ -1271,7 +1513,7 @@ enum BetterXCloud {
             var __p = location.pathname || "";
             var __ok = location.hostname === "www.xbox.com" && (__p === "/play" || __p.indexOf("/play/") === 0 || __p.indexOf("/auth/msa") === 0 || /\\/play\\/?$/.test(__p));
             if (!__ok) return;
-            \(inputAdapter)
+            \(inputAdapterScript)
             \(cleaned)
             \(bridge)
           } catch (e) {

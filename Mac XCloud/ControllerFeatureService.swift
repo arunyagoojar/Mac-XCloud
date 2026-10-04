@@ -87,6 +87,14 @@ final class ControllerFeatureService: ObservableObject {
     private var lastAimRate = MotionVector.zero
     private var lastAimRateAt: TimeInterval = 0
     private var gyroAimWasActive = false
+    private var gyroPauseWasHeld = false
+    /// Gyro aiming switched off with a toggling pause button.
+    @Published private(set) var gyroAimToggledOff = false
+    var onGyroPauseToggled: ((Bool) -> Void)?
+    /// The game in the stream takes mouse input (native keyboard & mouse).
+    @Published var gyroMouseAvailable = false
+    private var mouseRemainder = (x: 0.0, y: 0.0)
+    private var mouseSequence = 0.0
     private var lastTickAt: TimeInterval = 0
     private var lastTouchReportAt: TimeInterval = 0
     private var touchReportsThisTick = 0
@@ -95,10 +103,23 @@ final class ControllerFeatureService: ObservableObject {
     private var lastSentAt: TimeInterval = 0
     private var biasSavedAt: TimeInterval = 0
     private var savedBias = MotionVector.zero
+    private var savedBiasSource = MotionFusion.BiasSource.none
+    /// How the gyro's resting offset is currently known, for Settings.
+    @Published private(set) var gyroBiasSource = MotionFusion.BiasSource.none
+    @Published private(set) var gyroBiasMeasuredAt: Date?
     /// While a vibration-mode adaptive trigger is buzzing, the controller
     /// shakes exactly like game rumble does.
     private var triggerVibrationActive = false
     private var localHapticEndsAt: TimeInterval = 0
+    /// Rumble targets from the game, per grip, and the level driven by the
+    /// game's sound; the stronger of the two plays.
+    private var gameRumble: [HapticLocality: (intensity: Float, sharpness: Float)] = [:]
+    private var audioRumble: Float = 0
+    private var audioRumbleAt: TimeInterval = 0
+    private var audioRumbleEndsAt: TimeInterval = 0
+    /// Tells the page to start or stop listening to the game's sound.
+    var onAudioHapticsWanted: ((Bool) -> Void)?
+    private(set) var audioHapticsWanted = false
 
     // Live values for the settings previews (published only while visible).
     @Published private(set) var liveSteeringAngle: Double = 0
@@ -110,32 +131,19 @@ final class ControllerFeatureService: ObservableObject {
     @Published private(set) var touchDiagnostics = "No finger on the touchpad"
     @Published private(set) var lastGesture = "No gesture yet"
     /// The single input owner: exactly one enhanced input system drives a
-    /// stick axis at any moment, and the browser-side keyboard/mouse takeover
-    /// suppresses all native motion output.
+    /// stick axis at any moment. (The keyboard layer in the page adds to the
+    /// controller instead of taking it over.)
     @Published private(set) var inputOwner = MotionInputOwner.none.rawValue
     @Published private(set) var outputRateHz: Double = 0
     @Published private(set) var motionReportRateHz: Double = 0
     private var outputSamplesThisSecond = 0
     private var outputRateWindowStart: TimeInterval = 0
-    /// Set from the browser bridge while a keyboard/mouse input path owns the
-    /// stream (pointer lock or a virtual controller). Native motion engines
-    /// release to neutral and stop producing stream output until it clears.
-    @Published private(set) var mkbStreamActive = false
-    private(set) var mkbStreamIsEmulated = false
-
-    func setMKBStreamActive(_ active: Bool, emulated: Bool) {
-        guard mkbStreamActive != active || mkbStreamIsEmulated != emulated else { return }
-        mkbStreamActive = active
-        mkbStreamIsEmulated = emulated
-        if active {
-            steering.release()
-            gyroAim.reset(); touchCamera.reset()
-        }
-    }
-
     private static let steeringCenterKey = "motion.steeringCenterBank.v2"
-    private func biasKey(for controller: GCController?) -> String {
+    private func legacyBiasKey(for controller: GCController?) -> String {
         "motion.gyroBias.v1." + (controller?.vendorName ?? "controller")
+    }
+    private func biasKey(for controller: GCController?) -> String {
+        "motion.gyroBias.v2." + (controller?.vendorName ?? "controller")
     }
 
     /// Makes the current physical bank the straight-ahead position and
@@ -194,30 +202,64 @@ final class ControllerFeatureService: ObservableObject {
         fusion.ingest(rotationRate: rate, acceleration: acceleration, dt: dt, vibrating: isVibrating(at: now))
         if case .measuring = gyroCalibration {
             if fusion.calibration != gyroCalibration { gyroCalibration = fusion.calibration }
-            if fusion.calibration == .succeeded { saveBias(force: true) }
+            if fusion.calibration == .succeeded {
+                gyroBiasMeasuredAt = Date()
+                saveBias(force: true)
+            }
         }
     }
 
     private func isVibrating(at now: TimeInterval) -> Bool {
         guard enhancements.effectiveSteeringRumbleGuard else { return false }
-        return now < streamRumbleEndsAt || now < triggerFeedbackEndsAt || now < localHapticEndsAt || triggerVibrationActive
+        return now < streamRumbleEndsAt || now < triggerFeedbackEndsAt || now < localHapticEndsAt || now < audioRumbleEndsAt
+            || triggerVibrationActive
     }
 
     private func loadBias(for controller: GCController) {
-        let values = defaults.array(forKey: biasKey(for: controller)) as? [Double] ?? []
-        let bias = values.count == 3 ? MotionVector(values[0], values[1], values[2]) : .zero
-        fusion = MotionFusion(bias: bias)
+        var bias = MotionVector.zero
+        var source = MotionFusion.BiasSource.none
+        var measuredAt: Date?
+        if let saved = defaults.dictionary(forKey: biasKey(for: controller)),
+           let values = saved["bias"] as? [Double], values.count == 3 {
+            bias = MotionVector(values[0], values[1], values[2])
+            source = MotionFusion.BiasSource(rawValue: saved["source"] as? Int ?? 1) ?? .held
+            measuredAt = (saved["measuredAt"] as? Double).map(Date.init(timeIntervalSince1970:))
+        } else if let values = defaults.array(forKey: legacyBiasKey(for: controller)) as? [Double], values.count == 3 {
+            // 1.3.9 saved only what it learned in the hands.
+            bias = MotionVector(values[0], values[1], values[2])
+            source = .held
+        }
+        fusion = MotionFusion(bias: bias, source: source)
         savedBias = fusion.bias
+        savedBiasSource = fusion.biasSource
+        gyroBiasSource = fusion.biasSource
+        gyroBiasMeasuredAt = measuredAt
         sampleClock.reset()
     }
 
-    /// Persists the learned bias occasionally (it changes slowly).
+    /// Persists the bias when it has changed meaningfully (it changes slowly)
+    /// or its source improved; a resting measurement is saved at once.
     private func saveBias(force: Bool = false) {
         let now = ProcessInfo.processInfo.systemUptime
-        guard force || (now - biasSavedAt > 20 && simd_length(fusion.bias - savedBias) > 0.002) else { return }
+        let improved = fusion.biasSource > savedBiasSource
+        let changed = simd_length(fusion.bias - savedBias) > 0.001
+        guard force || improved || (changed && now - biasSavedAt > 20) else { return }
+        guard fusion.biasSource != .none || fusion.bias != .zero else { return }
         biasSavedAt = now
         savedBias = fusion.bias
-        defaults.set([fusion.bias.x, fusion.bias.y, fusion.bias.z], forKey: biasKey(for: controller))
+        savedBiasSource = fusion.biasSource
+        if fusion.biasSource >= .rested && (improved || changed) { gyroBiasMeasuredAt = Date() }
+        var record: [String: Any] = ["bias": [fusion.bias.x, fusion.bias.y, fusion.bias.z],
+                                     "source": fusion.biasSource.rawValue]
+        if let measuredAt = gyroBiasMeasuredAt { record["measuredAt"] = measuredAt.timeIntervalSince1970 }
+        defaults.set(record, forKey: biasKey(for: controller))
+        if gyroBiasSource != fusion.biasSource { gyroBiasSource = fusion.biasSource }
+    }
+
+    /// Saves anything learned lazily (the gyro offset) right now; called
+    /// when the app quits.
+    func persistLearnedState() {
+        if controller != nil { saveBias(force: true) }
     }
 
     func resetRumbleDiagnostics() {
@@ -227,12 +269,26 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     func stopStreamRumble() {
+        gameRumble = [:]
+        audioRumble = 0
         stopRumblePlayers()
         streamRumbleEndsAt = 0
         triggerRestoreTask?.cancel(); triggerRestoreTask = nil
         if triggerFeedbackEndsAt > 0 { applyAdaptiveTriggerSettings() }
         triggerFeedbackEndsAt = 0
         lastGameTriggerLevels = ControllerVector2(x: -1, y: -1)
+    }
+
+    /// The game's rumble ran out on its own; sound-driven vibration, if
+    /// any, carries on without a gap.
+    private func endGameRumble() {
+        gameRumble = [:]
+        streamRumbleEndsAt = 0
+        triggerRestoreTask?.cancel(); triggerRestoreTask = nil
+        if triggerFeedbackEndsAt > 0 { applyAdaptiveTriggerSettings() }
+        triggerFeedbackEndsAt = 0
+        lastGameTriggerLevels = ControllerVector2(x: -1, y: -1)
+        applyRumbleMix()
     }
 
     func recordRumble(left: Float, right: Float, leftTrigger: Float, rightTrigger: Float) {
@@ -275,7 +331,8 @@ final class ControllerFeatureService: ObservableObject {
         } else {
             targets[locality] = (clampUnit(max(low, high) + 0.25 * min(low, high)), clampUnit(0.2 + 0.5 * highShare + texture))
         }
-        for (channel, level) in targets { setRumble(level, on: channel) }
+        gameRumble = targets
+        applyRumbleMix()
         if e.gameDrivenTriggers, let pad = controller?.extendedGamepad as? GCDualSenseGamepad {
             let levels = ControllerVector2(x: e.rumble(leftTrigger, global: globalRumbleGain), y: e.rumble(rightTrigger, global: globalRumbleGain))
             if levels != lastGameTriggerLevels {
@@ -424,6 +481,7 @@ final class ControllerFeatureService: ObservableObject {
         applyLEDPolicy()
         publishCurrentSnapshot()
         startPolling()
+        refreshAudioHapticsWanted()
     }
 
     func detach() {
@@ -473,6 +531,7 @@ final class ControllerFeatureService: ObservableObject {
         snapshot = .empty
         previousSnapshot = .empty
         shortcutRuntime.removeAll()
+        refreshAudioHapticsWanted()
     }
 
     func attachFirstAvailableController() {
@@ -594,6 +653,7 @@ final class ControllerFeatureService: ObservableObject {
             applyAdaptiveTriggerSettings()
         }
         if settings.led != previous.led { applyLEDPolicy() }
+        refreshAudioHapticsWanted()
     }
 
     // MARK: - Input snapshots
@@ -601,7 +661,7 @@ final class ControllerFeatureService: ObservableObject {
     func publishCurrentSnapshot() {
         guard let controller, let gamepad = controller.extendedGamepad else { return }
         let timestamp = ProcessInfo.processInfo.systemUptime
-        if streamRumbleEndsAt > 0 && timestamp >= streamRumbleEndsAt { stopStreamRumble() }
+        if streamRumbleEndsAt > 0 && timestamp >= streamRumbleEndsAt { endGameRumble() }
         let rawLeftStick = ControllerVector2(x: gamepad.leftThumbstick.xAxis.value, y: gamepad.leftThumbstick.yAxis.value)
         let rawRightStick = ControllerVector2(x: gamepad.rightThumbstick.xAxis.value, y: gamepad.rightThumbstick.yAxis.value)
         let rawLeftTrigger = gamepad.leftTrigger.value
@@ -674,13 +734,8 @@ final class ControllerFeatureService: ObservableObject {
             touchCamera.reset()
         }
 
-        var owner = e.gyroEnabled ? e.gyroMode.owner : MotionInputOwner.physical
-        if mkbStreamActive { owner = mkbStreamIsEmulated ? .mkbEmulated : .mkbNative }
-
-        // Keyboard/mouse owns the whole input path while active; native motion
-        // engines stay released to neutral so nothing fights over an axis.
-        let wantsStreamInput = !mkbStreamActive &&
-            (applyCalibrationToStream || e.gyroEnabled || e.touchpadAimEnabled || e.rapidFireEnabled)
+        let owner = e.gyroEnabled ? e.gyroMode.owner : MotionInputOwner.physical
+        let wantsStreamInput = applyCalibrationToStream || e.gyroEnabled || e.touchpadAimEnabled || e.rapidFireEnabled
         var output: [String: Double] = [:]
         if wantsStreamInput {
             if applyCalibrationToStream {
@@ -698,9 +753,11 @@ final class ControllerFeatureService: ObservableObject {
                 output["LeftThumbYAxis"] = Double(applyCalibrationToStream ? next.leftStick.y : rawLeftStick.y)
                 gyroAim.reset()
             case .aiming:
-                let active = e.effectiveGyroActivation == .always || next.leftTrigger > 0.3
+                let paused = gyroPaused(e, next)
+                let active = (e.effectiveGyroActivation == .always || next.leftTrigger > 0.3) && !paused
                 if active && !gyroAimWasActive { gyroAim.reset() }
                 gyroAimWasActive = active
+                let asMouse = e.effectiveGyroOutput == .mouse && gyroMouseAvailable
                 if active, motionFresh {
                     gyroAim.configure(e.gyroAimConfiguration)
                     // Sensors report slower than the tick (~65 Hz over
@@ -710,16 +767,26 @@ final class ControllerFeatureService: ObservableObject {
                     let hold = max(3 * sampleClock.nominalInterval, 0.05)
                     let rate = timestamp - lastAimRateAt < hold ? lastAimRate : .zero
                     let result = gyroAim.sample(rate: rate, gravity: fusion.gravity, dt: tickDT)
-                    output["gyroX"] = Double(result.coarse.x)
-                    output["gyroY"] = Double(result.coarse.y)
-                    output["gyroFineX"] = Double(result.fine.x)
-                    output["gyroFineY"] = Double(result.fine.y)
+                    if asMouse {
+                        addMouseTurn(gyroAim.turn, countsPerDegree: Double(e.effectiveGyroMouseSensitivity), to: &output)
+                        output["gyroX"] = 0; output["gyroY"] = 0
+                        output["gyroFineX"] = 0; output["gyroFineY"] = 0
+                    } else {
+                        output["gyroX"] = Double(result.coarse.x)
+                        output["gyroY"] = Double(result.coarse.y)
+                        output["gyroFineX"] = Double(result.fine.x)
+                        output["gyroFineY"] = Double(result.fine.y)
+                    }
                 } else {
                     gyroAim.reset()
+                    mouseRemainder = (0, 0)
                     output["gyroX"] = 0; output["gyroY"] = 0
                     output["gyroFineX"] = 0; output["gyroFineY"] = 0
                 }
                 output["gyroAxisBase"] = ControllerAimStick.right.axisBase
+                if e.gyroPauseExclusive == true, let index = e.gyroPauseButton?.gameButtonIndex {
+                    output["suppressButton"] = Double(index)
+                }
             case .off:
                 gyroAim.reset()
             }
@@ -770,9 +837,7 @@ final class ControllerFeatureService: ObservableObject {
         if shouldPublishToUI {
             if inputOwner != owner.rawValue { inputOwner = owner.rawValue }
             let status: String
-            if mkbStreamActive {
-                status = mkbStreamIsEmulated ? "Keyboard & mouse is in control (virtual controller)" : "Keyboard & mouse is in control"
-            } else if !e.gyroEnabled {
+            if !e.gyroEnabled {
                 status = "Motion controls are off"
             } else if controller.motion == nil {
                 status = "This controller has no motion sensors"
@@ -817,6 +882,43 @@ final class ControllerFeatureService: ObservableObject {
     }
 
     private var lastLEDCheckAt: TimeInterval = 0
+
+    /// Gyro as a mouse: the tick's turn becomes whole mouse counts, with the
+    /// fraction carried to the next tick so slow turns are never lost. Each
+    /// delta carries a sequence number; the page applies it exactly once.
+    private func addMouseTurn(_ turn: (x: Double, y: Double), countsPerDegree: Double, to output: inout [String: Double]) {
+        let degrees = 180 / Double.pi
+        mouseRemainder.x += turn.x * degrees * countsPerDegree
+        mouseRemainder.y -= turn.y * degrees * countsPerDegree   // turning up moves the mouse up (negative)
+        let x = mouseRemainder.x.rounded(.towardZero), y = mouseRemainder.y.rounded(.towardZero)
+        guard x != 0 || y != 0 else { return }
+        mouseRemainder.x -= x; mouseRemainder.y -= y
+        mouseSequence += 1
+        output["mouseX"] = x
+        output["mouseY"] = y
+        output["mouseSeq"] = mouseSequence
+    }
+
+    /// Whether the pause button currently stops gyro aiming. Holding pauses;
+    /// with toggling, each press switches gyro aiming off or back on.
+    private func gyroPaused(_ e: ControllerEnhancements, _ snapshot: ControllerInputSnapshot) -> Bool {
+        guard let button = e.gyroPauseButton else {
+            gyroPauseWasHeld = false
+            if gyroAimToggledOff { gyroAimToggledOff = false }
+            return false
+        }
+        let held = button.isHeld(in: snapshot)
+        defer { gyroPauseWasHeld = held }
+        guard e.gyroPauseToggles == true else {
+            if gyroAimToggledOff { gyroAimToggledOff = false }
+            return held
+        }
+        if held && !gyroPauseWasHeld {
+            gyroAimToggledOff.toggle()
+            onGyroPauseToggled?(gyroAimToggledOff)
+        }
+        return gyroAimToggledOff
+    }
 
     private func buttonsSnapshot(from gamepad: GCExtendedGamepad, dualSense: GCDualSenseGamepad?) -> ControllerButtonsSnapshot {
         ControllerButtonsSnapshot(
@@ -1178,6 +1280,60 @@ final class ControllerFeatureService: ObservableObject {
             rumbleLevels[channel] = nil
             let message = "Rumble failed: \(error.localizedDescription)"
             if lastError != message { lastError = message }
+        }
+    }
+
+    // MARK: - Sound-driven vibration
+
+    /// Whether the page should measure the game's sound right now.
+    func refreshAudioHapticsWanted() {
+        let wanted = enhancements.audioHaptics == true && settings.haptics.mode != .off
+            && controller != nil && !hapticEngines.isEmpty
+        guard wanted != audioHapticsWanted else { return }
+        audioHapticsWanted = wanted
+        if !wanted, audioRumble != 0 { audioRumble = 0; applyRumbleMix() }
+        onAudioHapticsWanted?(wanted)
+    }
+
+    /// The loudness of the game's low sounds (RMS below ~140 Hz, 0…1), about
+    /// 50 times a second. Quiet sound does nothing; loud bass approaches the
+    /// chosen strength. Attack is quick, release slower, so engines hum and
+    /// impacts thump without chatter.
+    func receiveAudioLevel(_ rms: Double) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let dt = audioRumbleAt > 0 ? min(max(now - audioRumbleAt, 0.001), 0.2) : 0.02
+        audioRumbleAt = now
+        guard streamInputEnabled, audioHapticsWanted, rms.isFinite else {
+            if audioRumble != 0 { audioRumble = 0; applyRumbleMix() }
+            return
+        }
+        let gate = 0.03, full = 0.3
+        let demand = pow(min(max(rms - gate, 0) / (full - gate), 1), 0.75)
+        let target = Float(demand) * enhancements.effectiveAudioHapticsStrength * min(globalRumbleGain, 1.5)
+        let tau: Float = target > audioRumble ? 0.015 : 0.12
+        audioRumble += (target - audioRumble) * (1 - exp(-Float(dt) / tau))
+        if audioRumble < 0.01 { audioRumble = target > 0 ? audioRumble : 0 }
+        if audioRumble > 0.05 { audioRumbleEndsAt = now + 0.15 }
+        applyRumbleMix()
+    }
+
+    /// Plays the stronger of the game's rumble and the sound-driven level on
+    /// each grip.
+    private func applyRumbleMix() {
+        var targets = gameRumble
+        if audioRumble > 0.003 {
+            let texture = (min(max(settings.haptics.sharpness, 0), 1) - 0.5) * 0.4
+            let locality = settings.haptics.preferredLocality
+            let grips = (locality == .default || locality == .handles || locality == .all)
+                && hapticEngines[.leftHandle] != nil && hapticEngines[.rightHandle] != nil
+            for channel in grips ? [HapticLocality.leftHandle, .rightHandle] : [locality] {
+                if audioRumble > (targets[channel]?.intensity ?? 0) {
+                    targets[channel] = (min(audioRumble, 1), min(max(0.12 + texture, 0), 1))
+                }
+            }
+        }
+        for channel in Set(targets.keys).union(rumbleLevels.keys) {
+            setRumble(targets[channel] ?? (0, 0.5), on: channel)
         }
     }
 

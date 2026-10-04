@@ -147,7 +147,30 @@ struct ControllerContracts {
         for reading in simulate(10, pose: { _ in (0, 35 * deg, 0) }) {
             restingFusion.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
         }
-        check(simd_length(restingFusion.bias - MotionVector(0.4, -0.3, 0.5) * deg) < 0.15 * deg, "A resting controller's gyro bias is learned continuously")
+        check(simd_length(restingFusion.bias - MotionVector(0.4, -0.3, 0.5) * deg) < 0.05 * deg, "A controller resting on a table has its gyro offset measured")
+        check(restingFusion.biasSource == .rested, "A table rest counts as a measurement")
+
+        // Held in the hands: tremor-level noise, then a slow deliberate turn
+        // that keeps gravity put (pure yaw). It must not be taken for drift.
+        let trueBias = MotionVector(0.4, -0.3, 0.5) * deg
+        var heldMeasured = MotionFusion(bias: trueBias, source: .rested)
+        for reading in simulate(6, gyroNoise: 0.7 * deg, pose: { t in (0, 35 * deg, t < 2 ? 0 : 0.8 * deg * (t - 2)) }) {
+            heldMeasured.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
+        }
+        check(simd_length(heldMeasured.bias - trueBias) < 0.01 * deg, "A measured offset is never overwritten while the controller is held")
+        var heldLearning = MotionFusion()
+        for reading in simulate(8, gyroNoise: 0.7 * deg, pose: { t in (0, 35 * deg, t < 4 ? 0 : 0.8 * deg * (t - 4)) }) {
+            heldLearning.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
+        }
+        check(heldLearning.biasSource < .rested, "Holding the controller is not mistaken for a table rest")
+        check(abs(heldLearning.bias.z * cos(35 * deg) + heldLearning.bias.y * sin(35 * deg)) < 0.25 * deg,
+              "A slow deliberate turn is not learned as drift")
+        // A lap or a stand that sways slowly (breathing) is not a table.
+        var lap = MotionFusion()
+        for reading in simulate(12, gyroNoise: 0.05 * deg, pose: { t in (0, (35 + 0.4 * sin(2 * .pi * 0.25 * t)) * deg, 0) }) {
+            lap.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false)
+        }
+        check(simd_length(lap.bias - trueBias) < 0.12 * deg || lap.biasSource < .rested, "Slow sway on a lap does not corrupt the measurement")
         var calibrating = MotionFusion()
         calibrating.beginCalibration(duration: 1)
         for reading in simulate(1.5, pose: { _ in (0, 0, 0) }) { calibrating.ingest(rotationRate: reading.gyro, acceleration: reading.acc, dt: 0.004, vibrating: false) }
@@ -279,7 +302,24 @@ struct ControllerContracts {
         check(quickTurn.map(\.x).reduce(0, +) > baseTurn.map(\.x).reduce(0, +) * 1.4, "Sensitivity scales aim speed")
         check(StickShaper.magnitude(demand: 0, exponent: 1, antiDeadzone: 0.2) == 0, "Zero demand is exactly zero even with compensation")
 
-        // MARK: - Touchpad camera
+                // Gyro as a mouse: the per-tick turn adds up to the real rotation, so
+        // a mouse following it moves exactly as far as the hand turned.
+        var mouseAim = GyroAimEngine()
+        mouseAim.configure(GyroAimEngine.Configuration(smoothing: 0))
+        var turned = 0.0
+        for _ in 0..<120 {   // one second at 120 Hz, turning right at 30°/s while held flat
+            _ = mouseAim.sample(rate: MotionVector(0, 0, -30 * deg), gravity: MotionVector(0, 0, -1), dt: 1.0 / 120)
+            turned += mouseAim.turn.x
+        }
+        check(abs(turned * 180 / .pi - 30) < 1.5, "Gyro mouse output adds up to the controller's real turn (\(Int((turned * 180 / .pi).rounded()))°)")
+        var restingTurn = 0.0
+        for tick in 0..<120 {   // then a second of a resting hand (tremor-level 0.4°/s)
+            _ = mouseAim.sample(rate: MotionVector(0, 0, -0.4 * deg), gravity: MotionVector(0, 0, -1), dt: 1.0 / 120)
+            if tick >= 24 { restingTurn += abs(mouseAim.turn.x) + abs(mouseAim.turn.y) }
+        }
+        check(restingTurn == 0, "A resting hand moves the mouse not at all")
+
+// MARK: - Touchpad camera
 
         func touch(_ positions: (Double) -> (Double, Double)?, duration: Double, rate: Double = 250, configuration: TouchpadCameraEngine.Configuration = .init()) -> [(t: Double, x: Double, y: Double)] {
             var engine = TouchpadCameraEngine(); engine.configure(configuration)

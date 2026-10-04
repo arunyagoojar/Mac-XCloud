@@ -64,6 +64,10 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
             if !t.resolution.isEmpty { parts.append(t.resolution) }
             if !browser.currentRegion.isEmpty { parts.append(browser.currentRegion) }
             if !parts.isEmpty { menu.addItem(label(parts.joined(separator: " · "))) }
+            if let health = browser.streamHealth.report {
+                let issue = health.issues.first.map { " · \($0.title)" } ?? ""
+                menu.addItem(label("Connection: \(health.level.title)\(issue)"))
+            }
         }
 
         menu.addItem(.separator())
@@ -88,6 +92,15 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
         }
         profiles.submenu = profileMenu
         menu.addItem(profiles)
+
+        if !browser.gameLibrary.recent.isEmpty {
+            let recent = NSMenuItem(title: "Recent Games", action: nil, keyEquivalent: "")
+            let games = browser.dockMenu.menu()
+            // The Dock menu leads with its own header; the submenu title says it.
+            if let header = games.items.first, !header.isEnabled { games.removeItem(header) }
+            recent.submenu = games
+            menu.addItem(recent)
+        }
 
         menu.addItem(.separator())
         menu.addItem(action("Open Mac Xcloud", #selector(openMainWindow)))
@@ -128,15 +141,6 @@ final class MenuBarStatusController: NSObject, NSMenuDelegate {
     @objc private func toggleFullscreen() { browser?.toggleFullscreen() }
     @objc private func reload() { browser?.reload() }
     @objc private func quitApp() { NSApp.terminate(nil) }
-}
-
-struct StatusItemBootstrap: NSViewRepresentable {
-    @EnvironmentObject var browser: BrowserModel
-    func makeNSView(context: Context) -> NSView {
-        if browser.statusController == nil { browser.statusController = MenuBarStatusController(browser: browser) }
-        return NSView(frame: .zero)
-    }
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 private extension NSFont {

@@ -42,26 +42,30 @@ struct CheckForUpdatesView: View {
     }
 }
 
-/// Intercepts app termination to confirm when a game is still streaming.
-/// Covers Cmd-Q, the app menu, the Dock, and the menu-bar Quit item.
+/// Owns the app's single model and its windows. The game window is created
+/// in AppKit at launch (see `BrowserModel.openMainWindow`), so SwiftUI never
+/// opens a placeholder window of its own that could be left behind blank.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var browser: BrowserModel? {
-        didSet {
-            // A macxcloud:// URL that opened the app can arrive before the
-            // SwiftUI scene hands us the model; flush those now.
-            guard browser != nil, !pendingLinks.isEmpty else { return }
-            let links = pendingLinks
-            pendingLinks.removeAll()
-            links.forEach { browser?.handleDeepLink($0) }
-        }
-    }
-    private var pendingLinks: [URL] = []
+    private(set) lazy var browser = BrowserModel()
     private var quitConfirmed = false
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if browser.statusController == nil { browser.statusController = MenuBarStatusController(browser: browser) }
+        browser.openMainWindow()
+        handleLaunchArguments()
+    }
+
+    /// Clicking the Dock icon with no window open brings the game window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { browser.openMainWindow() }
+        return false
+    }
+
+    /// Intercepts termination to confirm when a game is still streaming.
+    /// Covers Cmd-Q, the app menu, the Dock, and the menu-bar Quit item.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !quitConfirmed else { return .terminateNow }
-        guard let browser, browser.isStreaming else { return .terminateNow }
+        guard !quitConfirmed, browser.isStreaming else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "Quit while streaming?"
         let title = browser.currentGameTitle.isEmpty ? "A game" : browser.currentGameTitle
@@ -76,60 +80,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateCancel
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        browser.prepareForTermination()
+    }
+
     /// macOS delivers `macxcloud://…` links here when the app is already
-    /// running or launched by the link. Works regardless of window state
-    /// because our real window is AppKit-owned, not SwiftUI.
+    /// running or launched by the link.
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let browser else {
-            pendingLinks.append(contentsOf: urls)
-            return
-        }
         for url in urls { browser.handleDeepLink(url) }
+    }
+
+    /// Recent games, a click away in the Dock.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        browser.dockMenu.menu()
+    }
+
+    /// A game chosen in Spotlight.
+    func application(_ application: NSApplication, continue userActivity: NSUserActivity,
+                     restorationHandler: @escaping ([any NSUserActivityRestoring]) -> Void) -> Bool {
+        guard let id = GameLibrary.gameID(fromSpotlight: userActivity) else { return false }
+        browser.play(gameID: id)
+        return true
+    }
+
+    /// Validation affordances for scripted UI checks.
+    private func handleLaunchArguments() {
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "--xcg-appearance"), arguments.indices.contains(index + 1) {
+            NSApp.appearance = NSAppearance(named: arguments[index + 1] == "dark" ? .darkAqua : .aqua)
+        }
+        #if DEBUG
+        if let index = arguments.firstIndex(of: "--xcg-snapshot-settings"), arguments.indices.contains(index + 1) {
+            SettingsSnapshotter.run(browser: browser, directory: URL(fileURLWithPath: arguments[index + 1]))
+        }
+        if let index = arguments.firstIndex(of: "--xcg-selftest"), arguments.indices.contains(index + 1) {
+            SelfTest.run(browser: browser, directory: URL(fileURLWithPath: arguments[index + 1]))
+        }
+        #endif
+        // --xcg-open-settings opens Settings (optionally on the page named by
+        // --xcg-settings-route) without UI scripting.
+        if arguments.contains("--xcg-open-settings") {
+            var route = SettingsRoute.home
+            if let index = arguments.firstIndex(of: "--xcg-settings-route"), arguments.indices.contains(index + 1) {
+                route = SettingsRoute.launchRoute(named: arguments[index + 1])
+            }
+            browser.openSettingsWindow(route: route)
+        }
     }
 }
 
 @main
 struct Mac_XCloudApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    /// Held without observation: the model publishes many times a second,
-    /// and re-rendering the App body rebuilds the menu bar, which closes any
-    /// open submenu. Views observe it through the environment instead.
-    @State private var browser = BrowserModel()
+
+    /// The model is read here without observation: it publishes many times a
+    /// second, and re-rendering the App body rebuilds the menu bar, which
+    /// closes any open submenu.
+    private var browser: BrowserModel { appDelegate.browser }
 
     var body: some Scene {
-        WindowGroup {
-            ZStack {
-                MainWindowLauncher()
-                StatusItemBootstrap()
-                    .frame(width: 1, height: 1)
-            }
-            .environmentObject(browser)
-            .onAppear {
-                appDelegate.browser = browser
-                // Validation affordance for scripted UI checks: launching with
-                // --xcg-open-settings opens Settings (optionally on the page
-                // named by --xcg-settings-route) without UI scripting.
-                let arguments = ProcessInfo.processInfo.arguments
-                if let index = arguments.firstIndex(of: "--xcg-appearance"), arguments.indices.contains(index + 1) {
-                    NSApp.appearance = NSAppearance(named: arguments[index + 1] == "dark" ? .darkAqua : .aqua)
-                }
-                #if DEBUG
-                if let index = arguments.firstIndex(of: "--xcg-snapshot-settings"), arguments.indices.contains(index + 1) {
-                    SettingsSnapshotter.run(browser: browser, directory: URL(fileURLWithPath: arguments[index + 1]))
-                }
-                #endif
-                if arguments.contains("--xcg-open-settings") {
-                    let route: SettingsRoute
-                    if let index = arguments.firstIndex(of: "--xcg-settings-route"),
-                       arguments.indices.contains(index + 1) {
-                        route = SettingsRoute.launchRoute(named: arguments[index + 1])
-                    } else {
-                        route = .home
-                    }
-                    browser.openSettingsWindow(route: route)
-                }
-            }
-        }
+        // Only a Settings scene: every window is created by the app itself,
+        // so SwiftUI has no window group to open (or reopen) on its own.
+        Settings { EmptyView() }
         .commands {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView()
@@ -140,6 +152,7 @@ struct Mac_XCloudApp: App {
                 Divider()
                 Button("Sign Out of Xbox…") { browser.confirmSignOut() }
             }
+            CommandGroup(replacing: .newItem) {}
             ControllerCommands(browser: browser)
             CommandGroup(after: .toolbar) {
                 Button("Reload Page") { browser.reload() }
@@ -157,6 +170,10 @@ struct Mac_XCloudApp: App {
                 Divider()
                 Button("Toggle Full Screen") { browser.toggleFullscreen() }
                     .keyboardShortcut("f", modifiers: [.command, .control])
+            }
+            CommandGroup(after: .windowArrangement) {
+                Divider()
+                Button("Game Window") { browser.openMainWindow() }
             }
         }
     }

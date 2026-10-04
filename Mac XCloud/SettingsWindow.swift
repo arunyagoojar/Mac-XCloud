@@ -183,7 +183,7 @@ struct SettingsRootView: View {
             case .controller: ControllerSettingsPage(service: browser.controllerFeatures, model: model)
             case .motion: MotionSettingsPage(service: browser.controllerFeatures)
             case .touchpad: TouchpadSettingsPage(service: browser.controllerFeatures)
-            case .keyboardMouse: KeyboardMouseSettingsPage(model: model)
+            case .keyboardMouse: KeyboardMouseSettingsPage(model: model, store: browser.keyboardMouse)
             case .shortcuts: ShortcutsSettingsPage(service: browser.controllerFeatures, model: model)
             case .profiles: ProfilesSettingsPage(store: browser.inputPresets)
             case .site: SiteSettingsPage(model: model)
@@ -394,6 +394,10 @@ struct GeneralSettingsPage: View {
             }
             SettingsGroup("Launch") {
                 BxSettingRow(model: model, id: "ui.splashVideo.skip", label: "Skip the Xbox intro video", note: nil)
+                Divider()
+                SettingsToggleRow(label: "Play games in full screen",
+                                  note: "Full screen lets macOS turn on Game Mode: the game gets priority and controllers are read more often over Bluetooth. Leaves full screen when the game ends.",
+                                  isOn: $browser.fullscreenForGames)
             }
             SettingsGroup("Updates") {
                 SettingsToggleRow(label: "Check for updates automatically", isOn: Binding(
@@ -509,11 +513,13 @@ struct StreamingSettingsPage: View {
 // MARK: - Overlay
 
 struct OverlaySettingsPage: View {
+    @EnvironmentObject private var browser: BrowserModel
     @ObservedObject var model: SettingsModel
 
     var body: some View {
-        SettingsPage("Performance Overlay", subtitle: "Latency, frame rate and bitrate while you play.") {
-            SettingsGroup {
+        SettingsPage("Performance", subtitle: "How the stream is doing, and the overlay with its numbers.") {
+            StreamHealthSection(monitor: browser.streamHealth, isStreaming: browser.isStreaming)
+            SettingsGroup("Overlay") {
                 BxSettingRow(model: model, id: "stats.showWhenPlaying", label: "Show while playing", note: nil)
                 Divider()
                 BxSettingRow(model: model, id: "stats.quickGlance.enabled", label: "Show while holding the Xbox button",

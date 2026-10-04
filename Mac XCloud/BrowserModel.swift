@@ -64,6 +64,8 @@ struct StreamTelemetry: Equatable {
     var jitterMs: Double = 0
     var resolution = ""
     var decodeTimeMs: Double = 0
+    var packetsReceived: Int = 0
+    var framesReceived: Int = 0
 
     static let empty = StreamTelemetry()
 }
@@ -108,7 +110,14 @@ final class BrowserModel: ObservableObject {
     var controllerMismatch: Bool { report.controllerMismatch }
 
     var statusController: MenuBarStatusController?
+    /// The running app's model, for App Intents (Shortcuts, Siri, Spotlight).
+    private(set) static weak var current: BrowserModel?
+
     let controllerFeatures = ControllerFeatureService()
+    let keyboardMouse = KeyboardMouseStore()
+    let gameLibrary = GameLibrary()
+    let streamHealth = StreamHealthMonitor()
+    lazy var dockMenu = DockMenuBuilder(browser: self)
     lazy var controllerInput = ControllerInputService(controllerProvider: controllerFeatures.selectedControllerProvider)
     lazy var inputPresets: InputPresetStore = {
         let store = InputPresetStore(browser: self)
@@ -116,6 +125,7 @@ final class BrowserModel: ObservableObject {
             guard let self, self.isSettingsWindowOpen else { return }
             self.settingsModel.load()
         }
+        store.onNewGameProfile = { [weak self] id, title in self?.offerSetup(gameID: id, title: title) }
         return store
     }()
     private var cancellables = Set<AnyCancellable>()
@@ -239,8 +249,6 @@ final class BrowserModel: ObservableObject {
     weak var webView: WKWebView?
     /// True while the page holds pointer lock (keyboard & mouse play).
     @Published private(set) var pointerCaptured = false
-    /// True while Better xCloud's keyboard-driven virtual controller is live.
-    @Published private(set) var virtualControllerActive = false
     @Published private(set) var isFullscreen = false
     private var escapeHoldTask: Task<Void, Never>?
     private var escapeForwarded = false
@@ -250,6 +258,14 @@ final class BrowserModel: ObservableObject {
     /// keyboard/mouse fallback alike; stale samples never queue).
     private func submitStreamInput(_ values: [String: Double]) {
         guard controllerInputOwner == .stream, Date() >= aimTestUntil else { return }
+        var values = values
+        // Mouse movement from gyro is a delta, not a state: a sample replaced
+        // before delivery hands its movement on instead of losing it.
+        if let pending = pendingStreamInput, pending["mouseSeq"] != nil {
+            values["mouseX"] = (values["mouseX"] ?? 0) + (pending["mouseX"] ?? 0)
+            values["mouseY"] = (values["mouseY"] ?? 0) + (pending["mouseY"] ?? 0)
+            values["mouseSeq"] = values["mouseSeq"] ?? pending["mouseSeq"]
+        }
         pendingStreamInput = values
         guard !streamInputInFlight else { return }
         streamInputInFlight = true
@@ -294,30 +310,94 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// Whether the keyboard-driven virtual controller is available ("ready"),
-    /// in use ("active") or not part of the current game ("off").
+    /// The keyboard & mouse controller layout in the current game: "off"
+    /// (no game, or the game supports keyboard & mouse itself), "ready",
+    /// "keys" (keys in use) or "active" (the mouse is captured).
     @Published private(set) var keyboardEmulationState = "off"
 
-    /// Turns the virtual controller on or off immediately (no reload).
-    func setEmulatedKeyboardMouse(_ on: Bool) {
-        NativeSettingsMirror.save(on, for: "mkb.enabled", scope: .global)
-        settingsModel.noteGlobal("mkb.enabled", value: on)
-        evaluateJS("try { window.BxCBridge && BxCBridge.setEmulatedMkb(\(on)); } catch (e) {}")
+    // MARK: - Full screen for games
+
+    private static let fullscreenForGamesKey = "games.fullscreenOnStart.v1"
+    static let fullscreenPersistedKeys = [fullscreenForGamesKey]
+    /// Enter full screen when a game starts, so macOS can turn on Game Mode
+    /// (game priority, and controllers polled more often over Bluetooth).
+    @Published var fullscreenForGames = UserDefaults.standard.bool(forKey: fullscreenForGamesKey) {
+        didSet { UserDefaults.standard.set(fullscreenForGames, forKey: Self.fullscreenForGamesKey) }
+    }
+    private var enteredFullscreenForGame = false
+
+    private func gameSessionChanged(playing: Bool) {
+        guard let window = mainWindow else { return }
+        let inFullscreen = window.styleMask.contains(.fullScreen)
+        if playing, fullscreenForGames, !inFullscreen, window.isVisible {
+            enteredFullscreenForGame = true
+            window.toggleFullScreen(nil)
+        } else if !playing, enteredFullscreenForGame {
+            enteredFullscreenForGame = false
+            if inFullscreen { window.toggleFullScreen(nil) }
+        }
     }
 
-    /// Applies a keyboard layout choice to the running game.
-    func refreshKeyboardLayout() {
-        evaluateJS("try { window.BxCBridge && BxCBridge.refreshMkbLayout(); } catch (e) {}")
+    /// A setup offered for a game played for the first time.
+    @Published private(set) var setupOffer: GameSetupOffer?
+    private var setupOfferTask: Task<Void, Never>?
+
+    /// Looks up a new game's genre and, for racing games and shooters, offers
+    /// the setup that suits it.
+    private func offerSetup(gameID: String, title: String) {
+        guard GameSetupPreferences.suggestionsEnabled else { return }
+        setupOfferTask?.cancel()
+        setupOfferTask = Task { @MainActor [weak self] in
+            guard let self, let game = await self.gameLibrary.details(for: gameID), !Task.isCancelled,
+                  self.isStreaming, self.currentGameID.uppercased() == gameID.uppercased(),
+                  let kind = GameSetupKind.suggested(category: game.category, title: title.isEmpty ? game.title : title) else { return }
+            let offer = GameSetupOffer(gameID: gameID, title: title.isEmpty ? game.title : title, kind: kind)
+            withAnimation(.easeOut(duration: 0.25)) { self.setupOffer = offer }
+            // Unanswered, it goes away on its own.
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            if self.setupOffer == offer { withAnimation(.easeIn(duration: 0.25)) { self.setupOffer = nil } }
+        }
     }
 
-    /// Starts the keyboard-driven virtual controller in the current stream.
-    func activateEmulatedKeyboardMouse() {
-        evaluateJS("try { window.BxCBridge && BxCBridge.activateEmulatedMkb(); } catch (e) {}")
+    func acceptSetupOffer() {
+        guard let offer = setupOffer else { return }
+        controllerFeatures.updateSettings { offer.kind.apply(to: &$0) }
+        withAnimation(.easeIn(duration: 0.2)) { setupOffer = nil }
+        showHint("\(offer.title) is set up for \(offer.kind.purpose)", symbol: "checkmark.circle")
+        mainWindow?.makeFirstResponder(webView)
     }
 
-    func setMouseSensitivity(_ value: Double) {
-        KeyboardMouseSettings.mouseSensitivity = value
-        evaluateJS("try { window.BxCBridge && BxCBridge.setMouseSensitivity(\(KeyboardMouseSettings.mouseSensitivity)); } catch (e) {}")
+    func dismissSetupOffer(forever: Bool) {
+        if forever {
+            GameSetupPreferences.suggestionsEnabled = false
+            showHint("Setup suggestions are off · Turn them on in Settings › Game Profiles", symbol: "info.circle")
+        }
+        withAnimation(.easeIn(duration: 0.2)) { setupOffer = nil }
+        mainWindow?.makeFirstResponder(webView)
+    }
+
+    /// A one-off notice at the top of the game window ("Gyro aiming paused").
+    @Published private(set) var transientHint: GameHint?
+    private var transientHintCount = 0
+
+    func showHint(_ text: String, symbol: String? = nil) {
+        transientHintCount += 1
+        let hint = GameHint(key: "notice-\(transientHintCount)", text: text, symbol: symbol)
+        transientHint = hint
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            if self?.transientHint == hint { self?.transientHint = nil }
+        }
+    }
+
+    /// Starts or stops the page listening to the game's sound for vibration.
+    func pushAudioHaptics(_ on: Bool) {
+        evaluateJS("try { window.BxCBridge && BxCBridge.setAudioHaptics(\(on)); } catch (e) {}")
+    }
+
+    /// Sends the current keyboard layout and settings to the running page.
+    func pushKeyboardConfiguration() {
+        let json = keyboardMouse.pageConfigurationJSON
+        evaluateJS("try { window.BxCBridge && BxCBridge.configureKeyboard(\(json)); } catch (e) {}")
     }
 
     // MARK: - Pointer capture and Escape
@@ -346,9 +426,10 @@ final class BrowserModel: ObservableObject {
         escapeHoldTask?.cancel(); escapeHoldTask = nil
         escapeForwarded = false
         if pointerCaptured { pointerCaptured = false }
-        if virtualControllerActive { virtualControllerActive = false }
         if keyboardEmulationState != "off" { keyboardEmulationState = "off" }
-        controllerFeatures.setMKBStreamActive(false, emulated: false)
+        controllerFeatures.gyroMouseAvailable = false
+        setupOfferTask?.cancel()
+        if setupOffer != nil { setupOffer = nil }
     }
 
     /// User scripts are built once per web view; rebuild them before a reload
@@ -357,7 +438,7 @@ final class BrowserModel: ObservableObject {
     private func refreshUserScripts() {
         guard let controller = webView?.configuration.userContentController else { return }
         controller.removeAllUserScripts()
-        BetterXCloud.userScripts().forEach(controller.addUserScript)
+        BetterXCloud.userScripts(keyboardConfiguration: keyboardMouse.pageConfigurationJSON).forEach(controller.addUserScript)
         controller.addUserScript(WKUserScript(source: WebView.Coordinator.capabilitiesScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
     }
 
@@ -373,7 +454,7 @@ final class BrowserModel: ObservableObject {
                 evaluateJS("try { window.BxCBridge && BxCBridge.forwardEscape(true); } catch (e) {}")
                 escapeHoldTask?.cancel()
                 escapeHoldTask = Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: UInt64(KeyboardMouseSettings.escapeHoldToRelease * 1_000_000_000))
+                    try? await Task.sleep(nanoseconds: UInt64(KeyboardMouseStore.escapeHoldToRelease * 1_000_000_000))
                     guard let self, !Task.isCancelled, self.escapeForwarded else { return }
                     self.evaluateJS("try { window.BxCBridge && BxCBridge.releasePointer(); } catch (e) {}")
                 }
@@ -414,6 +495,11 @@ final class BrowserModel: ObservableObject {
     }
 
     init() {
+        Self.current = self
+        gameLibrary.onChange = { [weak self] in
+            AppShortcutsSync.refresh()
+            self?.statusController?.refreshMenu()
+        }
         controllerInput.onToggleOverlay = { [weak self] in
             self?.openSettingsWindow()
         }
@@ -429,6 +515,16 @@ final class BrowserModel: ObservableObject {
             if connected { self?.settingsModel.applyLightBar() }
         }
         controllerFeatures.onLightRestore = { [weak self] in self?.settingsModel.applyLightBar() }
+        keyboardMouse.onChange = { [weak self] in self?.pushKeyboardConfiguration() }
+        controllerFeatures.onAudioHapticsWanted = { [weak self] on in self?.pushAudioHaptics(on) }
+        streamHealth.onNotice = { [weak self] issue in
+            guard let self, self.controllerInputOwner == .stream, self.setupOffer == nil else { return }
+            self.showHint("\(issue.title) · \(issue.shortAdvice)", symbol: issue.symbol)
+        }
+        controllerFeatures.onGyroPauseToggled = { [weak self] off in
+            guard let self, self.controllerInputOwner == .stream else { return }
+            self.showHint(off ? "Gyro aiming off" : "Gyro aiming on", symbol: off ? "pause.circle" : "gyroscope")
+        }
         controllerInput.onBatteryLow = { [weak self] percent in
             self?.notifyBatteryLow(percent: percent)
         }
@@ -530,6 +626,11 @@ final class BrowserModel: ObservableObject {
         beginKeepingAwake()
     }
 
+    /// Last chance to persist state that is otherwise saved lazily.
+    func prepareForTermination() {
+        controllerFeatures.persistLearnedState()
+    }
+
     // MARK: - Keep-awake
 
     private func beginKeepingAwake() {
@@ -564,7 +665,9 @@ final class BrowserModel: ObservableObject {
     /// floating traffic lights (no titlebar strip).
     func openMainWindow() {
         if let mainWindow {
+            if mainWindow.isMiniaturized { mainWindow.deminiaturize(nil) }
             mainWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: false)
             DispatchQueue.main.async { [weak self] in
                 self?.synchronizeBrowserGamepadIfNeeded()
             }
@@ -1030,8 +1133,11 @@ final class BrowserModel: ObservableObject {
                     if gameReadyAlertedKey != key {
                         gameReadyAlertedKey = key
                         notifyGameReady()
+                        if !gameID.isEmpty { gameLibrary.notePlayed(id: gameID, title: gameTitle) }
+                        gameSessionChanged(playing: true)
                     }
                 } else {
+                    if !gameReadyAlertedKey.isEmpty { gameSessionChanged(playing: false) }
                     gameReadyAlertedKey = ""
                 }
                 let gameKey = playing ? InputPresetStore.gameKey(id: gameID, title: gameTitle) : ""
@@ -1054,12 +1160,16 @@ final class BrowserModel: ObservableObject {
                         framesDropped: (frames["dropped"] as? NSNumber)?.intValue ?? 0,
                         jitterMs: (stats["jitter"] as? NSNumber)?.doubleValue ?? 0,
                         resolution: stats["resolution"] as? String ?? "",
-                        decodeTimeMs: (stats["decodeTime"] as? NSNumber)?.doubleValue ?? 0
+                        decodeTimeMs: (stats["decodeTime"] as? NSNumber)?.doubleValue ?? 0,
+                        packetsReceived: (loss["received"] as? NSNumber)?.intValue ?? 0,
+                        framesReceived: (frames["received"] as? NSNumber)?.intValue ?? 0
                     )
+                    if isStreaming { streamHealth.ingest(telemetry) }
                 } else if !isStreaming {
                     telemetry = .empty
                     nativeHUDValues = [:]
                 }
+                if !isStreaming { streamHealth.reset() }
                 statusController?.refreshMenu()
             } catch {
                 // Keep the last good telemetry sample; the page may be navigating.
@@ -1326,7 +1436,8 @@ final class BrowserModel: ObservableObject {
             evaluateJS("try { window.BxCBridge && BxCBridge.rescanGamepads(); } catch (e) {}")
             reconcileControllerOwnerState()
             controllerFeatures.recheckMotionSensors()
-            setMouseSensitivity(KeyboardMouseSettings.mouseSensitivity)
+            pushKeyboardConfiguration()
+            pushAudioHaptics(controllerFeatures.audioHapticsWanted)
             setGamepadPollingPaused(controllerInputOwner == .settings, force: true)
             inputPresets.retryActiveWebSettings()
             // The automatic region selector must receive Xbox's offered
@@ -1352,18 +1463,15 @@ final class BrowserModel: ObservableObject {
         case "mkb-emulation":
             let state = body["state"] as? String ?? "off"
             if keyboardEmulationState != state { keyboardEmulationState = state }
+        case "audio-level":
+            controllerFeatures.receiveAudioLevel(body["level"] as? Double ?? 0)
+        case "title-input":
+            let mouse = body["nativeMouse"] as? Bool ?? false
+            if controllerFeatures.gyroMouseAvailable != mouse { controllerFeatures.gyroMouseAvailable = mouse }
         case "mkb-state":
-            // The page reports when a keyboard/mouse path owns the stream
-            // (pointer lock active or the Better xCloud virtual controller is
-            // connected); native motion engines must stand down until it ends.
-            let active = body["active"] as? Bool ?? false
-            let emulated = body["emulated"] as? Bool ?? false
-            // Only the virtual controller replaces the physical one; games with
-            // native keyboard & mouse keep the controller (and its gyro and
-            // touchpad) working alongside.
-            _ = active
-            controllerFeatures.setMKBStreamActive(emulated, emulated: emulated)
-            if virtualControllerActive != emulated { virtualControllerActive = emulated }
+            // The keyboard layer adds to the controller instead of replacing
+            // it, so gyro and touchpad keep working; only Escape routing
+            // depends on the mouse being captured.
             pointerLockChanged(body["pointerLocked"] as? Bool ?? false)
 
         default:
@@ -1438,6 +1546,18 @@ final class BrowserModel: ObservableObject {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
         return value.count >= 8 && value.count <= 20
             && value.uppercased().unicodeScalars.allSatisfy(allowed.contains)
+    }
+
+    /// Starts a game by its Xbox product ID (Dock menu, Shortcuts, Spotlight).
+    func play(gameID: String) {
+        openMainWindow()
+        guard isUsableGameIdentifier(gameID) else { return }
+        streamGame(productID: gameID)
+    }
+
+    func resumeLastGame() {
+        openMainWindow()
+        if let last = gameLibrary.recent.first?.id ?? lastPlayedGameID { streamGame(productID: last) } else { loadHome() }
     }
 
     private func streamGame(productID: String) {

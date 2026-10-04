@@ -1123,6 +1123,22 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
     var gyroStillThreshold: Float? = nil
     var gyroInvertX: Bool? = nil
     var gyroSmoothing: Float? = nil
+    /// A button that pauses gyro aiming, so hands can be repositioned
+    /// without moving the camera (a "ratchet").
+    var gyroPauseButton: GyroPauseButton? = nil
+    /// true: each press turns gyro aiming off or back on. false: hold to pause.
+    var gyroPauseToggles: Bool? = nil
+    /// The pause button stops reaching the game (bumpers and stick presses).
+    var gyroPauseExclusive: Bool? = nil
+    /// Right stick (every game) or mouse movement (games with keyboard &
+    /// mouse support; others fall back to the stick).
+    var gyroOutput: GyroAimOutput? = nil
+    /// Mouse counts per degree of controller rotation.
+    var gyroMouseSensitivity: Float? = nil
+    /// Low sounds in the game (engines, impacts, explosions) also play as
+    /// vibration, on top of the game's own rumble.
+    var audioHaptics: Bool? = nil
+    var audioHapticsStrength: Float? = nil
     var steeringAngleDegrees: Float? = nil
     var steeringPhysicalDeadzone: Float? = nil
     var steeringRangeDegrees: Float? = nil
@@ -1196,6 +1212,9 @@ struct ControllerEnhancements: Codable, Equatable, Sendable {
     var effectiveAimDeadzoneCompensation: Float { Self.finite(gyroOutputFloor, Self.defaultAimDeadzoneCompensation, 0...0.4) }
     var effectiveGyroStillThreshold: Float { Self.finite(gyroStillThreshold, 1.4, 0.3...5) }
     var effectiveGyroSmoothing: Float { Self.finite(gyroSmoothing, 0.5, 0...1) }
+    var effectiveGyroOutput: GyroAimOutput { gyroOutput ?? .stick }
+    var effectiveAudioHapticsStrength: Float { Self.finite(audioHapticsStrength, 0.6, 0.1...1) }
+    var effectiveGyroMouseSensitivity: Float { Self.finite(gyroMouseSensitivity, 12, 1...60) }
 
     var gyroAimConfiguration: GyroAimEngine.Configuration {
         GyroAimEngine.Configuration(
@@ -1256,6 +1275,57 @@ enum GyroAimActivation: String, Codable, CaseIterable, Sendable {
         switch self {
         case .always: return "Always"
         case .whileAiming: return "While aiming (LT)"
+        }
+    }
+}
+
+/// Where gyro aiming goes.
+enum GyroAimOutput: String, Codable, CaseIterable, Sendable {
+    case stick, mouse
+
+    var title: String {
+        switch self {
+        case .stick: return "Right stick"
+        case .mouse: return "Mouse"
+        }
+    }
+}
+
+/// Buttons that can pause gyro aiming. The touchpad is free on Xbox, so it
+/// pauses without side effects; the others can also be kept from the game.
+enum GyroPauseButton: String, Codable, CaseIterable, Sendable {
+    case touchpadTouch, touchpadPress, leftBumper, rightBumper, leftStick, rightStick
+
+    var title: String {
+        switch self {
+        case .touchpadTouch: return "Touch the touchpad"
+        case .touchpadPress: return "Press the touchpad"
+        case .leftBumper: return "Left bumper (L1)"
+        case .rightBumper: return "Right bumper (R1)"
+        case .leftStick: return "Left stick press (L3)"
+        case .rightStick: return "Right stick press (R3)"
+        }
+    }
+
+    /// Standard Gamepad button index when the button also plays in the game.
+    var gameButtonIndex: Int? {
+        switch self {
+        case .touchpadTouch, .touchpadPress: return nil
+        case .leftBumper: return 4
+        case .rightBumper: return 5
+        case .leftStick: return 10
+        case .rightStick: return 11
+        }
+    }
+
+    func isHeld(in snapshot: ControllerInputSnapshot) -> Bool {
+        switch self {
+        case .touchpadTouch: return snapshot.primaryTouch.isActive || snapshot.secondaryTouch.isActive
+        case .touchpadPress: return snapshot.buttons.touchpad.isPressed
+        case .leftBumper: return snapshot.buttons.leftShoulder.isPressed
+        case .rightBumper: return snapshot.buttons.rightShoulder.isPressed
+        case .leftStick: return snapshot.buttons.leftStick.isPressed
+        case .rightStick: return snapshot.buttons.rightStick.isPressed
         }
     }
 }

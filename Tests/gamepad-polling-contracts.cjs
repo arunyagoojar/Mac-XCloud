@@ -1,6 +1,6 @@
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const swift=fs.readFileSync(`${__dirname}/../Mac XCloud/BetterXCloud.swift`,'utf8');
-const adapter=swift.split('let inputAdapter = #"""')[1].split('"""#')[0];
+const adapter=swift.split('static let inputAdapterScript = #"""')[1].split('"""#')[0];
 let now=100;
 // Hardware clock deliberately far ahead of page clock: the previous build froze here.
 const pad={id:'DualSense',mapping:'standard',index:2,connected:true,timestamp:1e9,axes:[.65,-.5,0,0],buttons:Array.from({length:17},(_,i)=>({value:i===7?.8:0,pressed:i===7})),vibrationActuator:{}};
@@ -20,7 +20,9 @@ pad.axes[2]=.75;pad.axes[3]=-.6;p=input({gyroX:1,touchpadAim:1,touchActive:1,tou
 p=input({gyroX:1});assert.equal(p.axes[2],1);now+=201;p=poll();assert.equal(p.axes[2],0);const released=received.length;now+=20;poll();assert.equal(received.length,released);
 context.document.hidden=true;assert.equal(input({gyroX:1}).axes[2],0);context.document.hidden=false;
 context.window.BX_EXPOSED.disableGamepadPolling=true;assert.equal(input({gyroX:1}).axes[2],0);context.window.BX_EXPOSED.disableGamepadPolling=false;
-pads.push({...pad,index:3});assert.equal(poll(),pad);pads.pop();assert.equal(input({gyroX:NaN}).axes[2],0);
+// A second controller: native motion is ambiguous and stays out; the first
+// pad keeps its own values (on the adapter's monotonic timestamps).
+pads.push({...pad,index:3});{const q=poll();assert.deepEqual(Array.from(q.axes),pad.axes);assert.equal(q.buttons[7],pad.buttons[7]);}pads.pop();assert.equal(input({gyroX:NaN}).axes[2],0);
 pad.axes[2]=.03;pad.axes[3]=-.02;p=input({gyroX:0,gyroY:0});assert.equal(p.axes[2],0);assert.equal(p.axes[3],0);
 p=input({});assert.equal(p.axes[2],.03);assert.equal(p.axes[3],-.02);pad.axes[2]=0;pad.axes[3]=0;
 p=input({gyroAxisBase:0,gyroX:.2,gyroY:.1});assert(Math.abs(p.axes[0]-.85)<1e-9);assert.equal(p.axes[1],-.6);assert.equal(p.axes[2],0);

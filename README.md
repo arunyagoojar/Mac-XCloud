@@ -61,21 +61,25 @@ Running in Apple's native `WKWebView`, stream video benefits from custom WebKit 
 - **Native Settings**: A System Settings–style window with a searchable sidebar, plain-language options, live previews for motion and touch controls, and advanced tuning tucked away until you need it.
 - **Background Menu Bar Companion**: Quick menu bar status item with instant access to settings, trigger presets, and stream actions.
 - **Automatic Updates**: Built-in [Sparkle](https://sparkle-project.org/) framework delivers seamless background checks with detailed, versioned release notes.
+- **Mac Integration**: Games you play appear in Spotlight, in the Dock menu and in the menu bar's Recent Games. Shortcuts and Siri get "Play *game* in Mac Xcloud" and "Resume my game in Mac Xcloud".
+- **Game Setup Suggestions**: The first time you play a racing game or a shooter, a small banner offers the setup that suits it (motion steering with pedal triggers, or gyro aiming with a trigger break), saved for that game only. Not Now dismisses it; suggestions can be turned off in Settings › Game Profiles.
 - **Deep Links**: `macxcloud://play/<game-id>` launches a game directly, `macxcloud://resume` reopens your last game, and `macxcloud://home` returns to the start page. Works from the Terminal (`open "macxcloud://…"`), Raycast, Alfred, Shortcuts, or browser links. The current game's ID is shown in the Diagnostics panel with a copy button.
 
 ### 🎮 Controller Suite & DualSense Support
 - **Hardware Calibration**: Live stick center, range calibration, customizable dead zones, and response curves (Linear, Precise Center, Quick Response, S-Curve).
 - **DualSense Adaptive Triggers**: Full implementation using macOS 10-zone resistance arrays with presets matching the popular DualSenseX catalog (GameCube digital click, bow draw, machine gun recoil, staged resistance).
 - **CoreHaptics & Rumble Routing**: Real-time translation of stream rumble telemetry to native body and trigger haptics with customizable rumble exponent and gain curves.
+- **Feel the Game's Sound** (optional, per game): deep sounds such as engines, impacts and explosions also play as vibration, mixed with the game's own rumble.
 - **Trigger Lock & Stop Emulation**: Software-defined trigger stops with resistance thresholds.
 - **Lightbar & Battery**: Controller battery levels mirrored into the stream status bar and the menu bar. Customizable lightbar colors, with a battery policy that dims, reddens, or switches off the light when the controller is low.
 - **Low Battery Alert**: A macOS notification fires once per discharge cycle when the controller drops to about 20%.
 - **"Game Ready" Alert**: When a queued game finally connects, you get a macOS notification plus three light-green lightbar pulses with a controller rumble each — so you can browse elsewhere and still know when to hop back in.
 
 ### 🏎️ Motion Steering & Gyro Aiming
-Motion controls run on a gyro + accelerometer fusion that processes every sensor report (not a 60 Hz snapshot), learns the gyroscope's drift whenever the controller rests, and ignores rumble, adaptive-trigger buzz and arm movement.
+Motion controls run on a gyro + accelerometer fusion that processes every sensor report (not a 60 Hz snapshot) and ignores rumble, adaptive-trigger buzz and arm movement. The gyroscope's drift is measured exactly whenever the controller rests on a table, estimated slowly while you hold it until then, and remembered between launches.
 - **Steering (left stick)**: Hold the controller like a wheel and turn it. The wheel angle is the controller's *bank* relative to the horizon, so tilting it toward or away from you, or turning it on the spot, never steers the car, and the center can't drift. Set the steering range and how quick the response is around center; Recenter (⌥⌘R) makes your natural hold straight ahead.
-- **Gyro Aiming (right stick)**: Turn the controller to move the camera, like aiming with a mouse. Works held flat, tilted or upright, ignores hand tremor at rest, and stops the instant your hand stops. Compensates the game's own right-stick dead zone so the smallest movement registers. Active all the time or only while aiming (LT).
+- **Gyro Aiming (right stick)**: Turn the controller to move the camera, like aiming with a mouse. Works held flat, tilted or upright, ignores hand tremor at rest, and stops the instant your hand stops. Compensates the game's own right-stick dead zone so the smallest movement registers. Active all the time or only while aiming (LT). In games with keyboard & mouse support, gyro can aim with the **mouse** instead: one to one, with no stick dead zone or curve in the way.
+- **Gyro Pause Button**: Hold (or tap) a chosen button to pause gyro aiming and reposition your hands without moving the camera. The touchpad works well for this; bumpers and stick presses can be kept from the game.
 - **Touchpad Camera (DualSense)**: The touchpad works like a trackpad for the camera — slow strokes are precise, fast swipes turn further, and the camera stops when your finger stops or lifts. Nothing accumulates or coasts.
 - **Touchpad Gestures**: Swipe and tap gestures mapped to app actions (performance overlay, full screen, screenshot, macros, and more).
 
@@ -83,6 +87,8 @@ Motion controls run on a gyro + accelerometer fusion that processes every sensor
 - **Pill HUD Overlay**: Lightweight macOS material overlay rendering FPS, network ping, bitrate (Mbps), decode time, packet loss, and dropped frames.
 - **Customizable Appearance**: Selectable screen positions, font sizes, opacity, background blur, and conditional green/yellow/red latency coloring.
 - **Quick Glance**: Momentarily summon stream metrics via controller shortcut without keeping the HUD permanently on screen.
+- **Connection Health**: Settings › Performance says how the stream is doing in plain words (weak Wi‑Fi, 2.4 GHz, packet loss, latency spikes, a slow decoder) and what to do about it. A short notice appears in the game when a problem lasts.
+- **Play in Full Screen**: Optionally enter full screen when a game starts, so macOS can turn on Game Mode.
 - **Diagnostics Panel (`⇧⌘D`)**: Live inspection of WebRTC connections, Gamepad API status, bridge message latency, and hardware detection, plus the current game's ID with a copy button for deep links.
 
 ### ⚡ Stream Optimization & Video Clarity
@@ -138,10 +144,11 @@ Mac Xcloud features a DualSenseX-inspired trigger preset catalog. Each mode maps
 ## Keyboard & Mouse
 
 * **Games with keyboard & mouse support** get them natively, exactly as in Chrome or Edge. Click the game to capture the mouse. A quick press of **Esc** goes to the game (pause menus); **hold Esc** to release the mouse.
-* **Every other game** can be played with keyboard and mouse through a virtual controller (Settings → Keyboard & Mouse → Play with keyboard & mouse), with Standard and Shooter layouts and adjustable mouse sensitivity.
+* **Every other game** plays with the keyboard and mouse as an Xbox controller: keys work as soon as the game starts, a click on the game captures the mouse for the camera, a tap of **Esc** presses Menu and holding it releases the mouse. Keys add to a connected controller rather than replacing it, so gyro and touchpad keep working.
+* **Layouts**: Standard and Shooter are built in. Make your own in Settings → Keyboard & Mouse: click a key cap, then press the new key, mouse button or scroll direction. Two inputs per control, and mouse movement can drive either stick.
 * **Game controllers**: PlayStation DualSense / DualSense Edge, DualShock 4, Xbox Wireless Controllers, Nintendo Switch Pro Controllers and MFi gamepads via Apple's `GameController` framework.
 
-Why it works here: Xbox's web client enables keyboard & mouse only when the browser offers the Keyboard Lock API, pointer lock and element fullscreen. `WKWebView` lacks Keyboard Lock and denies pointer lock unless the host app grants it, so Mac Xcloud provides all three — see `KeyboardMouse.swift`.
+Why it works here: Xbox's web client enables keyboard & mouse only when the browser offers the Keyboard Lock API, pointer lock and element fullscreen. `WKWebView` lacks Keyboard Lock and denies pointer lock unless the host app grants it, so Mac Xcloud provides all three — see `KeyboardMouse.swift`. The controller layout presses buttons through the same Gamepad API path a physical controller uses, so Xbox reads it exactly like one.
 
 ---
 
@@ -257,6 +264,12 @@ Automated regression and validation suites verify trigger math, profile encoding
 
 # Keyboard & mouse web contract in a real WKWebView
 ./Tests/run-webkit-contracts.sh
+
+# Keyboard controller layout, read the way Xbox's input loop reads it
+./Tests/run-keyboard-layer-contracts.sh
+
+# Connection health rules and game setup suggestions
+./Tests/run-stream-health-contracts.sh
 
 # Injected script and bridge contracts
 for test in Tests/*.cjs; do node "$test"; done

@@ -7,6 +7,10 @@ struct NativeStreamHUD: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             HStack(spacing: 7) {
+                if let level = browser.streamHealth.report?.level, level != .good {
+                    Circle().fill(level.color).frame(width: 6, height: 6)
+                        .help(browser.streamHealth.report?.issues.first?.title ?? "")
+                }
                 ForEach(browser.nativeHUDItems, id: \.self) { key in
                     HStack(spacing: 3) {
                         Text(key.uppercased()).foregroundStyle(.secondary)

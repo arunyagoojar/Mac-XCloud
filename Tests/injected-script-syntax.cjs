@@ -30,3 +30,19 @@ for (const file of files) {
 }
 assert(checked >= 10, `expected to find the injected scripts, found ${checked}`);
 console.log(`PASS: ${checked} injected scripts parse`);
+
+// The input adapter, Better xCloud and the bridge run in one strict-mode
+// function: a name declared twice there is a syntax error that disables all
+// three at once, so they must also parse together.
+{
+  const swift = fs.readFileSync(`${root}/BetterXCloud.swift`, 'utf8');
+  const grab = marker => swift.split(marker)[1].split('"""#')[0];
+  const adapter = grab('static let inputAdapterScript = #"""');
+  const bridge = grab('let bridge = #"""').replace(/\\#\([^()]*(?:\([^()]*\)[^()]*)*\)/g, 'true');
+  const userscript = fs.readFileSync(`${root}/better-xcloud.js`, 'utf8')
+    .split('\n').filter(line => !line.trim().startsWith('//#')).join('\n');
+  const composed = `(function () {\n"use strict";\ntry {\n${adapter}\n${userscript}\n${bridge}\n} catch (e) {}\n})();`;
+  try { new vm.Script(composed, { filename: 'BetterXCloud.wrappedScript' }); }
+  catch (error) { assert.fail(`The composed Better xCloud script does not parse: ${error.message}`); }
+  console.log('PASS: input adapter, Better xCloud and bridge parse together');
+}

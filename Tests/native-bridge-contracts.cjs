@@ -80,13 +80,16 @@ assert.equal(b.mkbStatus, undefined);
 assert.equal(b.toggleMkb, undefined);
 assert.equal(b.toggleEmulatedMkb, undefined);
 assert(!events.some(e => e.type === 'mkb-capture' || e.type === 'mkb-text-focus'));
-assert.equal(typeof b.activateEmulatedMkb, 'function');
+assert.equal(b.activateEmulatedMkb, undefined);
+assert.equal(b.setEmulatedMkb, undefined);
+assert.equal(typeof b.configureKeyboard, 'function');
+assert.equal(typeof b.setAudioHaptics, 'function');
 assert.equal(typeof b.releasePointer, 'function');
 assert.equal(b.forwardEscape(true), true);
 assert.deepEqual(dispatchedKeys.slice(-1), ['Escape:keydown']);
 assert.equal(b.forwardEscape(false), true);
 assert.deepEqual(dispatchedKeys.slice(-1), ['Escape:keyup']);
-console.log('PASS: keyboard & mouse entry points, Escape forwarding, retired capture routes stay absent');
+console.log('PASS: keyboard & mouse entry points, Escape forwarding, retired capture and Better xCloud emulation routes stay absent');
 
 (async () => {
   const globalWrites = {}, streamWrites = {};

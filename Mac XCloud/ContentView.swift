@@ -8,56 +8,6 @@
 import AppKit
 import SwiftUI
 
-/// Captures the SwiftUI WindowGroup window that hosts this view so it can be
-/// closed by direct reference — never by guessing from title or size, which
-/// could close an unrelated window.
-private final class LauncherWindowBinderView: NSView {
-    var onBind: ((NSWindow) -> Void)?
-    private weak var lastWindow: NSWindow?
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard let window, window !== lastWindow else { return }
-        lastWindow = window
-        onBind?(window)
-    }
-}
-
-private struct LauncherWindowBinder: NSViewRepresentable {
-    var onBind: (NSWindow) -> Void
-    func makeNSView(context: Context) -> LauncherWindowBinderView {
-        let view = LauncherWindowBinderView()
-        view.onBind = onBind
-        return view
-    }
-    func updateNSView(_ view: LauncherWindowBinderView, context: Context) {
-        view.onBind = onBind
-    }
-}
-
-/// Invisible bootstrap view: SwiftUI's WindowGroup window keeps a titlebar
-/// strip no matter what, so it immediately hands off to our own AppKit main
-/// window (created chrome-less) and closes itself.
-struct MainWindowLauncher: View {
-    @EnvironmentObject private var browser: BrowserModel
-    @State private var launcherWindow: NSWindow?
-
-    var body: some View {
-        Color.black
-            .ignoresSafeArea()
-            .background(LauncherWindowBinder { window in
-                launcherWindow = window
-            })
-            .onAppear {
-                browser.openMainWindow()
-                // Give the AppKit window a moment to take key status before
-                // closing the launcher.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [launcherWindow] in
-                    launcherWindow?.close()
-                }
-            }
-    }
-}
-
 /// Invisible replacement for the removed title bar: drag to move the window,
 /// double-click to zoom (maximize into available space). Traffic lights stay
 /// clickable because they're window-level buttons layered above this strip.
@@ -145,7 +95,15 @@ struct ContentView: View {
             if !browser.isFullscreen { WindowDragStrip().frame(height: 28).frame(maxWidth: .infinity) }
         }
         .overlay(alignment: .top) {
-            PlayHint(message: hintMessage)
+            if let offer = browser.setupOffer {
+                GameSetupBanner(offer: offer,
+                                onSetUp: browser.acceptSetupOffer,
+                                onNotNow: { browser.dismissSetupOffer(forever: false) },
+                                onNever: { browser.dismissSetupOffer(forever: true) })
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            } else {
+                PlayHint(hint: browser.transientHint ?? stateHint)
+            }
         }
         .overlay(alignment: hudAlignment) {
             if browser.isStreaming && (browser.nativeHUDVisible || (browser.nativeHUDQuickGlance && browser.nativeHUDGlancing)) {
@@ -163,12 +121,15 @@ struct ContentView: View {
     }
 
     /// One short hint at a time about keyboard & mouse play.
-    private var hintMessage: String? {
+    private var stateHint: GameHint? {
         guard browser.isStreaming || browser.pointerCaptured else { return nil }
         switch browser.keyboardEmulationState {
-        case "active": return "Keyboard & mouse · Hold Esc to go back to your controller"
-        case "ready": return "Click the game or press a key to play with keyboard & mouse"
-        default: return browser.pointerCaptured ? "Hold Esc to release the mouse" : nil
+        case "active": return GameHint(key: "kbm-active", text: "Mouse captured · Hold Esc to release it", symbol: "computermouse")
+        case "keys":
+            let usesMouse = browser.keyboardMouse.selectedLayout.mouseLook != .off
+            return GameHint(key: "kbm-keys", text: usesMouse ? "Keyboard controls on · Click the game to use the mouse" : "Keyboard controls on",
+                            symbol: "keyboard")
+        default: return browser.pointerCaptured ? GameHint(key: "pointer", text: "Hold Esc to release the mouse", symbol: nil) : nil
         }
     }
 
@@ -275,30 +236,44 @@ struct ContentView: View {
         .environmentObject(BrowserModel())
 }
 
+/// One notice for the top of the game window. `key` identifies it, so the
+/// same notice is not replayed by every view update.
+struct GameHint: Equatable {
+    let key: String
+    let text: String
+    var symbol: String? = nil
+}
+
 /// A brief notice at the top of the game (like Chrome's "Press and hold Esc
-/// to exit"). Each new message shows for a few seconds, then fades.
+/// to exit"). Each new notice shows for a few seconds, then fades.
 private struct PlayHint: View {
-    let message: String?
-    @State private var shown: String?
+    let hint: GameHint?
+    @State private var shown: GameHint?
     @State private var hideTask: Task<Void, Never>?
 
     var body: some View {
         Group {
             if let shown {
-                Text(shown)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .environment(\.colorScheme, .dark)
-                    .padding(.top, 36)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                    .accessibilityAddTraits(.isStaticText)
+                HStack(spacing: 7) {
+                    if let symbol = shown.symbol {
+                        Image(systemName: SettingsSymbol.available(symbol)).font(.system(size: 12, weight: .semibold))
+                    }
+                    Text(shown.text)
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+                .environment(\.colorScheme, .dark)
+                .padding(.top, 36)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isStaticText)
             }
         }
         .allowsHitTesting(false)
         .animation(.easeInOut(duration: 0.25), value: shown)
-        .onChange(of: message) { next in
+        .onChange(of: hint) { next in
             hideTask?.cancel()
             shown = next
             guard next != nil else { return }

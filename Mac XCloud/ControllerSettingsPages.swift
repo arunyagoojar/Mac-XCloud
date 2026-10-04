@@ -147,6 +147,15 @@ struct ControllerSettingsPage: View {
                                       isOn: service.enhancement(\.gameDrivenTriggers))
                 }
                 Divider()
+                SettingsToggleRow(label: "Feel the game's sound",
+                                  note: "Deep sounds like engines, impacts and explosions also play as vibration. Saved per game.",
+                                  isOn: service.flag(\.audioHaptics))
+                if service.enhancements.audioHaptics == true {
+                    Divider()
+                    SettingsSliderRow(label: "Sound vibration", value: service.tuning(\.audioHapticsStrength) { $0.effectiveAudioHapticsStrength },
+                                      range: 0.1...1, minimumLabel: "Subtle", maximumLabel: "Strong")
+                }
+                Divider()
                 SettingsDisclosure("Fine-Tune", isExpanded: $showVibrationDetails) {
                     SettingsSliderRow(label: "Response", note: "Lower makes faint rumble easier to feel.",
                                       value: Binding(get: { Double(service.enhancements.rumbleExponent) },
@@ -408,6 +417,15 @@ struct MotionSettingsPage: View {
                     .fixedSize()
                 }
             }
+            if service.enhancements.gyroEnabled, service.motionReportRateHz > 0 {
+                SettingsGroup(footer: "How often the controller sends motion data; higher is smoother. In full screen, macOS Game Mode can raise it.") {
+                    SettingsRow("Motion data") {
+                        Text("\(Int(service.motionReportRateHz.rounded())) times a second")
+                            .font(.system(size: 12).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
             if service.descriptor != nil && !service.gyroAvailable {
                 SettingsWarning(text: "This controller has no motion sensors. Motion controls need a DualSense, DualShock 4 or Switch Pro Controller.")
             } else if service.enhancements.gyroEnabled && service.descriptor != nil && service.motionReportRateHz == 0 && service.motionStatus.hasPrefix("Waiting") {
@@ -433,7 +451,18 @@ struct MotionSettingsPage: View {
 
     private var aiming: some View {
         Group {
-            SettingsGroup("Aiming") {
+            SettingsGroup("Aiming", footer: aimFooter) {
+                SettingsRow("Aim with") {
+                    Picker("Aim with", selection: Binding(
+                        get: { service.enhancements.effectiveGyroOutput },
+                        set: { value in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.gyroOutput = value; $0.enhancements = e } })) {
+                        ForEach(GyroAimOutput.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                Divider()
                 SettingsRow("Active") {
                     Picker("Active", selection: Binding(
                         get: { service.enhancements.effectiveGyroActivation },
@@ -443,7 +472,15 @@ struct MotionSettingsPage: View {
                     .settingsPicker()
                 }
                 Divider()
-                SettingsSliderRow(label: "Sensitivity", value: Binding(
+                if service.enhancements.effectiveGyroOutput == .mouse {
+                    SettingsSliderRow(label: "Mouse speed", note: "Pair it with the game's own mouse sensitivity.",
+                                      value: service.tuning(\.gyroMouseSensitivity) { $0.effectiveGyroMouseSensitivity },
+                                      range: 2...40, minimumLabel: "Slow", maximumLabel: "Fast")
+                    Divider()
+                }
+                SettingsSliderRow(label: service.enhancements.effectiveGyroOutput == .mouse ? "Stick sensitivity" : "Sensitivity",
+                                  note: service.enhancements.effectiveGyroOutput == .mouse ? "In games without mouse support." : nil,
+                                  value: Binding(
                     get: { Double(service.enhancements.effectiveGyroSensitivity) },
                     set: { v in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.gyroSensitivity = Float(v); $0.enhancements = e } }),
                     range: 0.25...3, minimumLabel: "Slow", maximumLabel: "Fast")
@@ -454,6 +491,7 @@ struct MotionSettingsPage: View {
                 Divider()
                 GyroCalibrationRow(service: service)
             }
+            pauseButton
             SettingsGroup(footer: "If the slowest movements don't move the camera, raise Game dead zone until they just do.") {
                 SettingsDisclosure("Advanced", isExpanded: $showAdvanced) {
                     SettingsSliderRow(label: "Smoothing", note: "Steadies slow aiming; quick turns are never delayed.",
@@ -482,6 +520,62 @@ struct MotionSettingsPage: View {
                 }
             }
         }
+    }
+
+    private var aimFooter: String? {
+        guard service.enhancements.effectiveGyroOutput == .mouse else { return nil }
+        return service.gyroMouseAvailable
+            ? "This game takes a mouse: aiming follows the controller one to one, with no stick dead zone. The game may show keyboard prompts and turn off aim assist."
+            : "Games with keyboard & mouse support aim with the mouse, one to one. Other games use the right stick."
+    }
+
+    // MARK: Pause button
+
+    private var pauseButton: some View {
+        SettingsGroup("Pause Button", footer: pauseFooter) {
+            SettingsRow("Pause with") {
+                Picker("Pause with", selection: Binding<GyroPauseButton?>(
+                    get: { service.enhancements.gyroPauseButton },
+                    set: { value in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.gyroPauseButton = value; $0.enhancements = e } })) {
+                    Text("None").tag(GyroPauseButton?.none)
+                    Divider()
+                    ForEach(GyroPauseButton.allCases, id: \.self) { Text($0.title).tag(GyroPauseButton?.some($0)) }
+                }
+                .settingsPicker()
+            }
+            if let button = service.enhancements.gyroPauseButton {
+                Divider()
+                SettingsRow("Pressing it") {
+                    Picker("Pressing it", selection: Binding(
+                        get: { service.enhancements.gyroPauseToggles ?? false },
+                        set: { value in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.gyroPauseToggles = value; $0.enhancements = e } })) {
+                        Text(button == .touchpadTouch ? "Pauses while touching" : "Pauses while held").tag(false)
+                        Text("Turns gyro off or on").tag(true)
+                    }
+                    .settingsPicker()
+                }
+                if button.gameButtonIndex != nil {
+                    Divider()
+                    SettingsToggleRow(label: "Only pause gyro", note: "The button no longer does anything in the game.",
+                                      isOn: service.flag(\.gyroPauseExclusive))
+                }
+            }
+        }
+    }
+
+    private var pauseFooter: String {
+        guard let button = service.enhancements.gyroPauseButton else {
+            return "Pause gyro aiming to reposition your hands without moving the camera, like lifting a mouse off the desk."
+        }
+        if button == .touchpadTouch {
+            return "Touches never reach the game, so resting a thumb on the touchpad pauses gyro without side effects."
+        }
+        if button == .touchpadPress {
+            return "A game that uses the touchpad press still receives it."
+        }
+        return service.enhancements.gyroPauseExclusive == true
+            ? "The button is used only to pause gyro aiming."
+            : "The button still works in the game as well."
     }
 
     // MARK: Steering
@@ -572,12 +666,34 @@ private struct GyroCalibrationRow: View {
 
     private var note: String {
         switch service.gyroCalibration {
-        case .idle: return "Calibrates continuously while the controller rests. To force it, put the controller on a table first."
+        case .idle: return idleNote
         case .measuring: return "Keep the controller still…"
         case .succeeded: return "Calibrated."
         case .failedMoved: return "The controller moved. Put it on a flat surface and try again."
         }
     }
+
+    /// Calibration happens by itself whenever the controller rests on a
+    /// table; say how the current measurement was made.
+    private var idleNote: String {
+        switch service.gyroBiasSource {
+        case .calibrated, .rested:
+            if let date = service.gyroBiasMeasuredAt {
+                return "Measured \(Self.relative.localizedString(for: date, relativeTo: Date())). Updates whenever the controller rests on a table."
+            }
+            return "Measured. Updates whenever the controller rests on a table."
+        case .held:
+            return "Estimated while you play. Put the controller on a table for a few seconds for an exact measurement."
+        case .none:
+            return "Put the controller on a table for a few seconds; it calibrates by itself."
+        }
+    }
+
+    private static let relative: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
 }
 
 /// A miniature wheel turning with the controller, plus the stick output.
@@ -749,75 +865,6 @@ extension TouchpadGesture {
     }
 }
 
-// MARK: - Keyboard & mouse
-
-struct KeyboardMouseSettingsPage: View {
-    @EnvironmentObject private var browser: BrowserModel
-    @ObservedObject var model: SettingsModel
-    @State private var sensitivity = KeyboardMouseSettings.mouseSensitivity
-    @State private var showControls = false
-
-    private var nativeEnabled: Binding<Bool> {
-        Binding(get: { (model.globalValue("nativeMkb.mode") as? String) != "off" },
-                set: { on in model.write(id: "nativeMkb.mode", scope: .global, value: on ? "default" : "off") })
-    }
-
-    private var emulationEnabled: Binding<Bool> {
-        Binding(get: { (model.globalValue("mkb.enabled") as? Bool) ?? false },
-                set: { on in browser.setEmulatedKeyboardMouse(on) })
-    }
-
-    private var layoutID: Binding<Int> {
-        Binding(get: {
-            let raw = model.streamValue("mkb.p1.preset.mappingId")
-            return (raw as? Int) ?? (raw as? Double).map(Int.init) ?? -1
-        }, set: { id in
-            model.write(id: "mkb.p1.preset.mappingId", scope: .stream, value: id)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { browser.refreshKeyboardLayout() }
-        })
-    }
-
-    var body: some View {
-        SettingsPage("Keyboard & Mouse") {
-            SettingsGroup("Games with Keyboard & Mouse Support", footer: "Works like Xbox Cloud Gaming in Chrome or Edge: games that support keyboard and mouse get them directly.") {
-                SettingsToggleRow(label: "Use keyboard & mouse", isOn: nativeEnabled)
-            }
-            SettingsGroup("Other Games", footer: "Plays games made for controllers with a keyboard and mouse through a virtual controller. Click the game or press any mapped key to start; hold Esc to go back to your controller.") {
-                SettingsToggleRow(label: "Play with keyboard & mouse", isOn: emulationEnabled)
-                if emulationEnabled.wrappedValue {
-                    Divider()
-                    SettingsRow("Layout") {
-                        Picker("Layout", selection: layoutID) {
-                            ForEach(KeyboardMouseSettings.layouts) { Text($0.name).tag($0.id) }
-                        }
-                        .settingsPicker()
-                    }
-                    Divider()
-                    SettingsSliderRow(label: "Mouse sensitivity", value: Binding(
-                        get: { sensitivity }, set: { sensitivity = $0; browser.setMouseSensitivity($0) }),
-                        range: 0.25...3, minimumLabel: "Slow", maximumLabel: "Fast")
-                    Divider()
-                    SettingsDisclosure("Controls", isExpanded: $showControls) {
-                        let layout = KeyboardMouseSettings.layouts.first { $0.id == layoutID.wrappedValue } ?? KeyboardMouseSettings.layouts[0]
-                        ForEach(Array(layout.summary.enumerated()), id: \.offset) { index, item in
-                            if index > 0 { Divider() }
-                            SettingsRow(item.control) { Text(item.keys).foregroundStyle(.secondary) }
-                        }
-                    }
-
-                }
-            }
-            SettingsGroup("While Playing") {
-                SettingsRow("Capture the mouse") { Text("Click the game").foregroundStyle(.secondary) }
-                Divider()
-                SettingsRow("Release the mouse") { Text("Hold Esc").foregroundStyle(.secondary) }
-                Divider()
-                SettingsRow("Pause menu (Esc)", note: "A quick press of Esc goes to the game.") { Text("Press Esc").foregroundStyle(.secondary) }
-            }
-        }
-    }
-}
-
 // MARK: - Shortcuts
 
 struct ShortcutsSettingsPage: View {
@@ -866,9 +913,15 @@ struct ShortcutsSettingsPage: View {
 
 struct ProfilesSettingsPage: View {
     @ObservedObject var store: InputPresetStore
+    @State private var suggestSetups = GameSetupPreferences.suggestionsEnabled
 
     var body: some View {
         SettingsPage("Game Profiles", subtitle: "Controller, motion, trigger and vibration settings are saved per game and switch automatically.") {
+            SettingsGroup(footer: "The first time you play a racing game or a shooter, Mac Xcloud offers the controller setup that suits it.") {
+                SettingsToggleRow(label: "Suggest a setup for new games", isOn: Binding(
+                    get: { suggestSetups },
+                    set: { suggestSetups = $0; GameSetupPreferences.suggestionsEnabled = $0 }))
+            }
             InputPresetManagerView(store: store)
             ProfileFilesView(store: store)
         }

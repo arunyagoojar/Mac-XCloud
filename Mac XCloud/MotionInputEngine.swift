@@ -159,8 +159,10 @@ struct MotionSampleClock {
 /// vibrating the controller. Drift is therefore bounded, shakes are
 /// rejected, and nothing ever snaps.
 ///
-/// The gyroscope's bias is learned continuously whenever the controller is
-/// genuinely still, and can also be measured explicitly.
+/// The gyroscope's bias (its reading at rest, which a stick output would turn
+/// into a slow camera drift) is measured precisely whenever the controller
+/// rests on something solid, learned slowly while it is held still until
+/// such a measurement exists, and can also be measured explicitly.
 struct MotionFusion {
     struct Configuration {
         /// Accelerometer correction time constant while handling normally.
@@ -171,12 +173,37 @@ struct MotionFusion {
         /// Deviation of |acceleration| from 1 g beyond which the
         /// accelerometer is ignored completely.
         var accelerationTolerance: Double = 0.1
-        /// Raw angular speed (rad/s) below which the controller may be still.
+        /// Raw angular speed (rad/s) below which a held controller may be still.
         var stillRateThreshold: Double = 0.05
-        /// Continuous stillness required before bias learning starts.
+        /// Continuous stillness required before held learning starts.
         var stillTimeRequired: Double = 0.6
-        var biasTimeConstant: Double = 3.0
+        /// Held learning is slow: a deliberate slow turn that passes for
+        /// stillness (pure yaw keeps gravity put) must not become "drift".
+        var biasTimeConstant: Double = 12.0
         var maximumBias: Double = 0.17
+        /// Gyro noise (rad/s, noisiest axis) below which the controller is
+        /// resting on something solid. A DualSense on a table measures about
+        /// 0.04 °/s; the steadiest grip several times more.
+        var restingNoise: Double = 0.25 * .pi / 180
+        /// Largest difference (rad/s) between the short and long resting
+        /// averages: a lap or a stand that sways slowly is not a rest.
+        var restingSteadiness: Double = 0.05 * .pi / 180
+        /// Rest needed before measuring, and the measurement's time constant.
+        var restingTimeRequired: Double = 1.2
+        var restingBiasTimeConstant: Double = 1.0
+        /// Rest after which the measurement counts as complete.
+        var restingTimeTrusted: Double = 4.0
+    }
+
+    /// Where the current bias came from, best last. A held estimate is never
+    /// allowed to overwrite a measured one.
+    enum BiasSource: Int, Comparable {
+        case none = 0
+        case held = 1
+        case rested = 2
+        case calibrated = 3
+
+        static func < (lhs: BiasSource, rhs: BiasSource) -> Bool { lhs.rawValue < rhs.rawValue }
     }
 
     enum CalibrationState: Equatable {
@@ -189,6 +216,9 @@ struct MotionFusion {
     var configuration = Configuration()
     private(set) var gravity: MotionVector?
     private(set) var bias = MotionVector.zero
+    private(set) var biasSource = BiasSource.none
+    /// Seconds the controller has been resting on something solid.
+    private(set) var restTime: Double = 0
     /// Latest bias-corrected angular velocity (rad/s, controller frame).
     private(set) var rate = MotionVector.zero
     private(set) var stillTime: Double = 0
@@ -207,9 +237,15 @@ struct MotionFusion {
     private var calibrationTime: Double = 0
     private var calibrationDuration: Double = 1.5
     private var calibrationReference: MotionVector?
+    private var restFastMean = MotionVector.zero
+    private var restSlowMean = MotionVector.zero
+    private var restVariance = MotionVector(repeating: 1)
+    private var restReference: MotionVector?
+    private var statisticsPrimed = false
 
-    init(bias: MotionVector = .zero) {
+    init(bias: MotionVector = .zero, source: BiasSource = .none) {
         self.bias = Self.clampBias(bias, limit: Configuration().maximumBias)
+        self.biasSource = bias == .zero ? .none : source
     }
 
     /// Forget orientation (after a reconnect or a long gap). Bias survives:
@@ -224,10 +260,14 @@ struct MotionFusion {
         accumulatedRotation = .zero
         accumulatedTime = 0
         accumulatedSamples = 0
+        restTime = 0
+        restReference = nil
+        statisticsPrimed = false
     }
 
-    mutating func setBias(_ value: MotionVector) {
+    mutating func setBias(_ value: MotionVector, source: BiasSource) {
         bias = Self.clampBias(value, limit: configuration.maximumBias)
+        biasSource = source
     }
 
     /// Starts an explicit gyro calibration: the controller must rest still
@@ -258,6 +298,7 @@ struct MotionFusion {
         let measuredDown = magnitude > 0.2 ? acceleration / magnitude : nil
 
         updateCalibration(raw: raw, down: measuredDown, magnitude: magnitude, dt: dt, vibrating: vibrating)
+        updateRestStatistics(raw: raw, dt: dt)
         if let filtered = filteredAcceleration, simd_length(filtered) > 0.2 {
             learnBias(raw: raw, down: simd_normalize(filtered), magnitude: magnitude, dt: dt, vibrating: vibrating)
         }
@@ -359,22 +400,39 @@ struct MotionFusion {
         return (accumulatedRotation / accumulatedTime, accumulatedTime, accumulatedSamples)
     }
 
+    /// Short and long running means of the raw rate and its short-term
+    /// variance: the signature of a controller resting on a solid surface.
+    private mutating func updateRestStatistics(raw: MotionVector, dt: Double) {
+        guard statisticsPrimed else {
+            restFastMean = raw; restSlowMean = raw
+            // Unknown noise counts as handling (2 °/s) until measured.
+            restVariance = MotionVector(repeating: pow(2 * .pi / 180, 2))
+            statisticsPrimed = true
+            return
+        }
+        let fast = 1 - exp(-dt / 0.5)
+        restFastMean += (raw - restFastMean) * fast
+        let deviation = raw - restFastMean
+        restVariance += (deviation * deviation - restVariance) * fast
+        restSlowMean += (raw - restSlowMean) * (1 - exp(-dt / 2.5))
+    }
+
     private mutating func learnBias(raw: MotionVector, down: MotionVector?, magnitude: Double, dt: Double, vibrating: Bool) {
-        // Stillness is judged on motion averaged over ~0.25 s: hand tremor in
-        // a resting grip swings the instantaneous rate past any sensible
-        // threshold but averages to (bias-sized) nothing, so the drift keeps
-        // being learned while the controller is held, not only on a table.
+        if learnRestingBias(down: down, magnitude: magnitude, dt: dt, vibrating: vibrating) { return }
+        // Held still in the hands. Stillness is judged on motion averaged
+        // over ~0.25 s: tremor swings the instantaneous rate past any sensible
+        // threshold but averages out. Learning here is deliberately slow and
+        // stops once a resting measurement exists, because a slow deliberate
+        // turn (pure yaw leaves gravity unchanged) looks the same as drift.
         averagedRate += (raw - bias - averagedRate) * (1 - exp(-dt / 0.25))
-        guard !vibrating, let down, abs(magnitude - 1) < 0.05,
-              simd_length(averagedRate) < configuration.stillRateThreshold * 0.6,
+        guard biasSource < .rested, !vibrating, let down, abs(magnitude - 1) < 0.05,
+              simd_length(averagedRate) < configuration.stillRateThreshold * 0.35,
               simd_length(raw - bias) < configuration.stillRateThreshold * 3 else {
             stillTime = 0
             stillReference = nil
             return
         }
-        // The (low-passed) gravity direction must stay put too: a slow deliberate turn has
-        // a low rate but steadily changes it (except pure yaw, which is why
-        // learning is slow and starts only after a full stillness window).
+        // The (low-passed) gravity direction must stay put too.
         if let reference = stillReference, simd_dot(reference, down) > cos(1.2 * .pi / 180) {
             stillTime += dt
         } else {
@@ -384,6 +442,38 @@ struct MotionFusion {
         guard stillTime >= configuration.stillTimeRequired else { return }
         let alpha = 1 - exp(-dt / configuration.biasTimeConstant)
         bias = Self.clampBias(bias + (raw - bias) * alpha, limit: configuration.maximumBias)
+        if biasSource == .none, stillTime >= configuration.stillTimeRequired + configuration.biasTimeConstant {
+            biasSource = .held
+        }
+    }
+
+    /// Resting on a table, a stand or a desk: sensor noise only, no tremor
+    /// and no slow sway. The offset measured here is exact to a few
+    /// hundredths of a degree per second. Returns true while resting.
+    private mutating func learnRestingBias(down: MotionVector?, magnitude: Double, dt: Double, vibrating: Bool) -> Bool {
+        let noise = max(restVariance.x, restVariance.y, restVariance.z).squareRoot()
+        let sway = restFastMean - restSlowMean
+        let swaying = max(abs(sway.x), abs(sway.y), abs(sway.z)) > configuration.restingSteadiness
+        guard !vibrating, let down, abs(magnitude - 1) < 0.05, noise < configuration.restingNoise,
+              simd_length(restFastMean) < configuration.maximumBias * 1.5 else {
+            restTime = 0
+            restReference = nil
+            return false
+        }
+        if let reference = restReference, simd_dot(reference, down) > cos(0.4 * .pi / 180) {
+            restTime += dt
+        } else {
+            // A new rest: the long average starts here, not in the movement before.
+            restReference = down
+            restTime = 0
+            restSlowMean = restFastMean
+            return true
+        }
+        guard restTime >= configuration.restingTimeRequired, !swaying else { return true }
+        let alpha = 1 - exp(-dt / configuration.restingBiasTimeConstant)
+        bias = Self.clampBias(bias + (restSlowMean - bias) * alpha, limit: configuration.maximumBias)
+        if restTime >= configuration.restingTimeTrusted, biasSource < .rested { biasSource = .rested }
+        return true
     }
 
     private mutating func updateCalibration(raw: MotionVector, down: MotionVector?, magnitude: Double, dt: Double, vibrating: Bool) {
@@ -411,6 +501,7 @@ struct MotionFusion {
         calibrationTime += dt
         if calibrationTime >= calibrationDuration {
             bias = Self.clampBias(calibrationSum / calibrationTime, limit: configuration.maximumBias)
+            biasSource = .calibrated
             calibration = .succeeded
         } else {
             calibration = .measuring(progress: calibrationTime / calibrationDuration)
@@ -651,6 +742,9 @@ struct GyroAimEngine {
     private(set) var output = ControllerVector2.zero
     private(set) var fine = ControllerVector2.zero
     private(set) var isMoving = false
+    /// The turn of the last tick in radians (x right, y up), after
+    /// smoothing, the rest gate and acceleration: what a mouse should move.
+    private(set) var turn = (x: 0.0, y: 0.0)
     private var history: [(x: Double, y: Double, dt: Double)] = []
 
     mutating func configure(_ configuration: Configuration) {
@@ -660,6 +754,7 @@ struct GyroAimEngine {
     mutating func reset() {
         history.removeAll(keepingCapacity: true)
         raw = .zero; smoothed = .zero; output = .zero; fine = .zero; isMoving = false
+        turn = (0, 0)
     }
 
     /// Player-space projection (JoyShockMapper's "player space"): yaw about
@@ -719,7 +814,7 @@ struct GyroAimEngine {
             isMoving = true
         }
         guard isMoving, magnitude > 1e-9 else {
-            output = .zero; fine = .zero
+            output = .zero; fine = .zero; turn = (0, 0)
             return (output, fine)
         }
         let settle = 1 - exp(-dt / max(0.012 * smoothing, 0.0005))
@@ -728,6 +823,7 @@ struct GyroAimEngine {
         let acceleration = min(max(c.acceleration, 0), 1)
         let blend = StickShaper.smoothstep(0.1, 1.6, magnitude)
         let scale = (1 - 0.5 * acceleration) + (1.5 * acceleration) * blend
+        turn = (sx * dt * scale, sy * dt * scale)
         let demand = magnitude * max(c.sensitivity, 0.01) * scale
         let onset = (magnitude - still * 0.8) / (still * 0.8)
         let coarseMagnitude = StickShaper.magnitude(demand: demand, exponent: c.exponent,
@@ -908,6 +1004,4 @@ enum MotionInputOwner: String {
     case steering = "Gyro steering"
     case gyroAim = "Gyro aiming"
     case touchpad = "Touchpad aiming"
-    case mkbNative = "Keyboard & mouse (native)"
-    case mkbEmulated = "Keyboard & mouse (emulated)"
 }

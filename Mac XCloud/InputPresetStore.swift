@@ -156,6 +156,8 @@ enum InputPresetStorageStatus: Equatable {
 @MainActor
 final class InputPresetStore: ObservableObject {
     var onSettingsApplied: (() -> Void)?
+    /// A game got its own profile for the first time (product ID, title).
+    var onNewGameProfile: ((String, String) -> Void)?
     static let schemaVersion = 2
 
     @Published private(set) var presets: [InputPreset] = [.default]
@@ -245,6 +247,7 @@ final class InputPresetStore: ObservableObject {
             links[key] = game.id.uuidString
             defaults.set(links, forKey: "inputPresets.games.v1")
             await applyPreset(id: game.id, rememberGame: false)
+            if !key.hasPrefix("title:"), currentGameID == key { onNewGameProfile?(key, title) }
         } catch { operationMessage = "Could not remember game settings: \(error.localizedDescription)" }
     }
 

@@ -46,7 +46,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "General"
         case .streaming: return "Streaming"
-        case .overlay: return "Performance Overlay"
+        case .overlay: return "Performance"
         case .controller: return "Controller"
         case .motion: return "Motion Controls"
         case .touchpad: return "Touchpad"
@@ -98,7 +98,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "region server latency ping language updates"
         case .streaming: return "resolution quality bitrate video picture clarity sharpness fps audio volume remote play"
-        case .overlay: return "stats hud ping fps bitrate"
+        case .overlay: return "stats hud ping fps bitrate overlay connection health wifi wi-fi network latency packet loss"
         case .controller: return "dualsense battery light bar led triggers adaptive haptics rumble vibration calibration test"
         case .motion: return "gyro aiming steering wheel racing tilt"
         case .touchpad: return "trackpad camera gestures swipe"

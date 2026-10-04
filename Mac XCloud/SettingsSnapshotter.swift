@@ -71,6 +71,41 @@ enum SettingsSnapshotter {
                     window.orderOut(nil)
                 }
             }
+            // New 1.4 surfaces: a custom keyboard layout, the setup banner and
+            // a struggling connection, all from throwaway state.
+            let keyboard = KeyboardMouseStore(defaults: UserDefaults(suiteName: suite)!)
+            keyboard.createLayout(from: BuiltInKeyboardLayouts.shooter, named: "My Racing Keys")
+            let health = StreamHealthMonitor()
+            health.preview(network: NetworkConditions(link: .wifi, rssi: -74, noise: -86, band: .ghz2), samples: (0...20).map { t in
+                StreamHealthSample(time: Double(t), pingMs: t % 4 == 0 ? 140 : 46, fps: 58, bitrateMbps: 14, packetsLost: 30 * t,
+                                   packetsReceived: 1400 * t, framesDropped: 2 * t, framesReceived: 58 * t, jitterMs: 24, decodeMs: 5)
+            })
+            let extras: [(String, AnyView, CGSize)] = [
+                ("keyboard-custom", AnyView(KeyboardMouseSettingsPage(model: browser.settingsModel, store: keyboard)), CGSize(width: 680, height: 1400)),
+                ("connection-poor", AnyView(SettingsPage { StreamHealthSection(monitor: health, isStreaming: true) }), CGSize(width: 680, height: 760)),
+                ("setup-banner", AnyView(ZStack(alignment: .top) {
+                    LinearGradient(colors: [.blue.opacity(0.6), .black], startPoint: .top, endPoint: .bottom)
+                    GameSetupBanner(offer: GameSetupOffer(gameID: "9NR1R1XWLCNB", title: "Forza Horizon 6", kind: .racing),
+                                    onSetUp: {}, onNotNow: {}, onNever: {})
+                }), CGSize(width: 900, height: 200)),
+            ]
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                for (name, page, size) in extras {
+                    let view = NSHostingView(rootView: page.environmentObject(browser).frame(width: size.width, height: size.height))
+                    let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: size.width, height: size.height),
+                                          styleMask: [.titled], backing: .buffered, defer: false)
+                    window.appearance = NSAppearance(named: appearance)
+                    window.contentView = view
+                    window.orderBack(nil)
+                    try? await Task.sleep(nanoseconds: 600_000_000)
+                    if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                        view.cacheDisplay(in: view.bounds, to: rep)
+                        try? rep.representation(using: .png, properties: [:])?
+                            .write(to: directory.appendingPathComponent("\(name)-\(appearance == .aqua ? "light" : "dark").png"))
+                    }
+                    window.orderOut(nil)
+                }
+            }
             UserDefaults.standard.removePersistentDomain(forName: suite)
             NSApp.terminate(nil)
         }
