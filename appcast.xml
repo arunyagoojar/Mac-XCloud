@@ -388,5 +388,34 @@
 			<pubDate>Sun, 04 Oct 2026 18:03:20 +0000</pubDate>
 			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.4.1-b30/MacXcloud.zip" sparkle:edSignature="xPca4PBEYDhM3OxQQL4b4QEDyUEg8VLHPNHSjk7oDow25RrqSBUXPDmFpUjP+UTh3JARy6eXf01YmUr1fhKCDA==" length="7012754" type="application/octet-stream" />
 		</item>
+		<item>
+			<title>Version 1.4.1</title>
+			<sparkle:version>32</sparkle:version>
+			<sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
+			<link>https://github.com/arunyagoojar/Mac-XCloud/releases/tag/v1.4.1-b32</link>
+			<sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+			<description><![CDATA[<h2>Mac Xcloud 1.4.1</h2>
+<h3>Improved</h3>
+<ul>
+<li>Steering is steadier. The accelerometer now corrects drift only while the controller is moving (the approach of Jibb Smart&#x27;s GamepadMotionHelpers), so a steady hold doesn&#x27;t wobble, rumble no longer pulls the wheel, and quick turns stop where your hands stop. Smoothing is always on; its lightest setting still steadies hand tremor.</li>
+<li>Steady during rumble is automatic now, so its switch is gone.</li>
+<li>Adaptive triggers keep their effect. The game&#x27;s trigger rumble plays in a trigger only when it has no effect of its own, otherwise you feel it in that grip. Choosing a preset again puts it back, and effects return when you come back to the app.</li>
+<li>Keyboard and controller take turns cleanly: a key or a click hands control to the keyboard, a button, trigger or stick takes it back. Moving the mouse or the controller alone no longer switches.</li>
+<li>In games with their own keyboard and mouse support, the controller&#x27;s motion controls pause while you use the keyboard or mouse, until you press a button on the controller.</li>
+<li>Gyro drift is learned while you hold the controller again, as in 1.3.9, and Wi‑Fi checks no longer run on the main thread.</li>
+<li>The touchpad camera is smoother on slow strokes, and a resting finger never moves it.</li>
+<li>Keyboard layouts: names keep their spaces, and one damaged saved layout no longer hides the others.</li>
+</ul>
+<h3>Removed</h3>
+<ul>
+<li>Gyro aiming with the mouse, and feeling the game&#x27;s sound as vibration.</li>
+</ul>
+<h3>Fixes</h3>
+<ul>
+<li>Dragging a slider in Settings could trigger &quot;Publishing changes from within view updates&quot;.</li>
+</ul>]]></description>
+			<pubDate>Wed, 07 Oct 2026 09:13:16 +0000</pubDate>
+			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.4.1-b32/MacXcloud.zip" sparkle:edSignature="PC9/H9NW2qhkEco25JBUJxO2hRUmEFGikQrLOhiJhPPrBUQgaL+fdKMj2eYl0m3yqVV1eQ18mHzl81cjCGU0DQ==" length="7043895" type="application/octet-stream" />
+		</item>
 	</channel>
 </rss>
