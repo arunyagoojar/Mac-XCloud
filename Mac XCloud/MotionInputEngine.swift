@@ -556,7 +556,11 @@ enum StickShaper {
     /// motion, so the jump past the game's dead zone happens only for motion
     /// that is clearly real.
     static func magnitude(demand: Double, exponent: Double, antiDeadzone: Double, onset: Double = 1) -> Double {
-        let shaped = curve(demand, exponent: exponent)
+        lifted(curve(demand, exponent: exponent), antiDeadzone: antiDeadzone, onset: onset)
+    }
+
+    /// Lifts an already shaped value past the game's dead zone (see above).
+    static func lifted(_ shaped: Double, antiDeadzone: Double, onset: Double = 1) -> Double {
         guard shaped > 0 else { return 0 }
         let floor = min(max(antiDeadzone.isFinite ? antiDeadzone : 0, 0), 0.5) * min(max(onset, 0), 1)
         return min(floor + (1 - floor) * shaped, 1)
@@ -609,6 +613,26 @@ enum SteeringResponse {
         min(max(span * 0.06, 1 * .pi / 180), 3 * .pi / 180)
     }
 
+    /// Exponent at which the gentle curve is at its gentlest.
+    static let gentlest = 1.4
+
+    /// Wheel travel (0…1) → stick travel (0…1).
+    ///
+    /// Above 1 (gentle) the response is finer around center but never dead:
+    /// sensitivity rises evenly from 1 − k at center to 1 + k at full lock
+    /// (k up to 0.7). A power curve, which aiming and the touchpad use, has
+    /// almost no response for the first few degrees and then gets steep
+    /// quickly, which at the wheel feels slow, then sudden. The blend matches
+    /// the power curve it replaces beyond the first fifth of the travel, so
+    /// a tuned setting keeps its feel. Below 1 (quick) it is the power curve.
+    static func curve(_ demand: Double, exponent: Double) -> Double {
+        let x = min(max(demand.isFinite ? demand : 0, 0), 1)
+        let e = exponent.isFinite ? exponent : 1
+        guard e > 1 else { return StickShaper.curve(x, exponent: e) }
+        let k = 0.7 * min((e - 1) / (gentlest - 1), 1)
+        return (1 - k) * x + k * x * x
+    }
+
     static func output(angle: Double, parameters p: Parameters) -> Double {
         guard angle.isFinite else { return 0 }
         let span = max(abs(p.fullLock), 5 * .pi / 180)
@@ -617,8 +641,8 @@ enum SteeringResponse {
         guard travel > 0 else { return 0 }
         let demand = min(travel / max(span - deadzone, 0.0001), 1)
         let onset = 1 - exp(-travel / compensationOnset(span: span))
-        let magnitude = StickShaper.magnitude(demand: demand, exponent: p.exponent,
-                                              antiDeadzone: p.antiDeadzone, onset: onset)
+        let magnitude = StickShaper.lifted(curve(demand, exponent: p.exponent),
+                                           antiDeadzone: p.antiDeadzone, onset: onset)
         let sign: Double = (angle < 0 ? -1 : 1) * (p.inverted ? -1 : 1)
         return sign * magnitude * min(max(p.maximum, 0.1), 1)
     }

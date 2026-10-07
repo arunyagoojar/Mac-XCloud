@@ -21,8 +21,15 @@ struct StreamHealthSample: Equatable {
     var packetsReceived: Int
     var framesDropped: Int
     var framesReceived: Int
+    /// The network's jitter (RTP interarrival, ms); 0 when not reported.
+    /// Not Better xCloud's "jitter", which is the playout buffer's delay and
+    /// sits at 20–60 ms on a perfect connection.
     var jitterMs: Double
     var decodeMs: Double
+    /// Cumulative count of picture freezes since the stream started.
+    var freezes: Int = 0
+    /// Height of the decoded picture (1080 for 1080p); 0 when not reported.
+    var frameHeight: Int = 0
 }
 
 struct NetworkConditions: Equatable {
@@ -85,6 +92,15 @@ struct StreamHealthIssue: Equatable, Identifiable {
     var symbol: String
 
     var id: String { kind.rawValue }
+
+    /// Worth interrupting the game for: the player can already see or feel
+    /// it. Everything else is shown in Settings › Performance only.
+    var hurtsPlay: Bool {
+        switch kind {
+        case .packetLoss, .frameDrops, .bandwidth: return true
+        default: return level == .poor
+        }
+    }
 }
 
 struct StreamHealthReport: Equatable {
@@ -119,7 +135,7 @@ enum StreamHealthAnalyzer {
         let pings = recent.map(\.pingMs).filter { $0 >= 0 }.sorted()
         let latency = pings.isEmpty ? nil : median(pings)
         let spike = pings.isEmpty ? 0 : percentile(pings, 0.9) - (latency ?? 0)
-        let jitter = median(recent.map(\.jitterMs).sorted())
+        let jitter = median(recent.map(\.jitterMs).filter { $0 > 0 }.sorted())
         let decode = median(recent.map(\.decodeMs).filter { $0 > 0 }.sorted())
         let fps = median(recent.map(\.fps).filter { $0 > 0 }.sorted())
         let bitrate = median(recent.map(\.bitrateMbps).filter { $0 > 0 }.sorted())
@@ -140,14 +156,23 @@ enum StreamHealthAnalyzer {
         let dropped = max(last.framesDropped - first.framesDropped, 0)
         let shown = max(last.framesReceived - first.framesReceived, 0)
         let dropRate = dropped + shown > 0 ? Double(dropped) * 100 / Double(dropped + shown) : 0
+        // Lost packets matter only when they reach the screen. WebRTC resends
+        // or repairs most of them, and those still count as lost.
+        let froze = last.freezes > first.freezes
+        let visible = dropRate >= 1 || froze
+        // Xbox lowers the resolution when the connection can't keep up; a
+        // lower bitrate alone is usually just a calm scene or a menu.
+        let heights = recent.map(\.frameHeight).filter { $0 > 0 }
+        let latestHeight = recent.suffix(4).map(\.frameHeight).filter { $0 > 0 }.max() ?? 0
+        let resolutionDropped = latestHeight > 0 && Double(latestHeight) < Double(heights.max() ?? 0) * 0.8
 
         var issues: [StreamHealthIssue] = []
         let wifi = network?.link == .wifi
-        let networkTrouble = (loss ?? 0) >= 0.5 || jitter >= 15 || spike >= 50
+        let networkTrouble = ((loss ?? 0) >= 1 && visible) || jitter >= 20 || spike >= 50
 
-        if let loss, loss >= 0.5 {
+        if let loss, loss >= 1, visible {
             issues.append(StreamHealthIssue(
-                kind: .packetLoss, level: loss >= 2 ? .poor : .fair,
+                kind: .packetLoss, level: loss >= 3 ? .poor : .fair,
                 title: String(format: "Packet loss (%.1f%%)", loss),
                 advice: wifi ? "Wi‑Fi is dropping data, which shows up as stutter and blocky video. Move closer to the router or use Ethernet."
                              : "The connection is dropping data, which shows up as stutter and blocky video. Pause downloads or other streams on the network.",
@@ -168,9 +193,9 @@ enum StreamHealthAnalyzer {
                 advice: "Something else on the network is using it in bursts: downloads, cloud backups or another stream.",
                 shortAdvice: "Pause downloads and backups", symbol: "waveform.path.ecg"))
         }
-        if jitter >= 15 {
+        if jitter >= 20 {
             issues.append(StreamHealthIssue(
-                kind: .jitter, level: jitter >= 30 ? .poor : .fair,
+                kind: .jitter, level: jitter >= 40 ? .poor : .fair,
                 title: "Unsteady connection",
                 advice: wifi ? "Data arrives unevenly, so the stream has to wait for it. A wired connection or a closer router helps most."
                              : "Data arrives unevenly, so the stream has to wait for it. Other traffic on the network is the usual cause.",
@@ -193,31 +218,27 @@ enum StreamHealthAnalyzer {
                                        : "The stream is skipping frames. If it continues, lower the resolution in Settings › Streaming.",
                 shortAdvice: "Check the connection", symbol: "film.stack"))
         }
-        if fps > 0 && fps < targetFPS * 0.8 && !decoding && dropRate < 1.5 {
-            issues.append(StreamHealthIssue(
-                kind: .lowFrameRate, level: .fair,
-                title: "Low frame rate (\(Int(fps.rounded())) fps)",
-                advice: "The game or the stream is running below \(Int(targetFPS)) fps.",
-                shortAdvice: "Lower the resolution", symbol: "speedometer"))
-        }
+        // A frame rate below 60 on its own is not reported: many games run at
+        // 30 fps, and that is not something the connection can fix.
         let latestBitrate = median(recent.suffix(5).map(\.bitrateMbps).filter { $0 > 0 }.sorted())
         let peakBitrate = recent.map(\.bitrateMbps).max() ?? 0
-        if peakBitrate > 0, latestBitrate > 0, latestBitrate < peakBitrate * 0.4, latestBitrate < 8 {
+        let bitrateCollapsed = peakBitrate > 0 && latestBitrate > 0 && latestBitrate < peakBitrate * 0.4 && latestBitrate < 8
+        if resolutionDropped || (bitrateCollapsed && visible) {
             issues.append(StreamHealthIssue(
                 kind: .bandwidth, level: .fair,
-                title: "Bandwidth dropped",
-                advice: "The network slowed down, so Xbox lowered the picture quality to keep up.",
+                title: resolutionDropped ? "Picture quality dropped (\(latestHeight)p)" : "Bandwidth dropped",
+                advice: "The network slowed down, so Xbox lowered the picture quality to keep up. Downloads or other streams on the network are the usual cause.",
                 shortAdvice: "Pause other downloads", symbol: "arrow.down.circle"))
         }
         if let network, network.link == .wifi {
             if let rssi = network.rssi, rssi <= -75 || (rssi <= -67 && networkTrouble) {
                 issues.append(StreamHealthIssue(
-                    kind: .weakSignal, level: rssi <= -75 ? .poor : .fair,
+                    kind: .weakSignal, level: rssi <= -75 && networkTrouble ? .poor : .fair,
                     title: "Weak Wi‑Fi signal (\(rssi) dBm)",
                     advice: "Move closer to the router or remove what's between them, or use Ethernet.",
                     shortAdvice: "Move closer to the router", symbol: "wifi.exclamationmark"))
             }
-            if network.band == .ghz2 {
+            if network.band == .ghz2, networkTrouble {
                 issues.append(StreamHealthIssue(
                     kind: .slowBand, level: .fair,
                     title: "2.4 GHz Wi‑Fi",

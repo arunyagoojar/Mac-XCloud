@@ -66,6 +66,11 @@ struct StreamTelemetry: Equatable {
     var decodeTimeMs: Double = 0
     var packetsReceived: Int = 0
     var framesReceived: Int = 0
+    /// The network's jitter (RTP interarrival, ms). `jitterMs` is Better
+    /// xCloud's figure, the playout buffer's delay.
+    var networkJitterMs: Double = 0
+    var freezeCount: Int = 0
+    var frameHeight: Int = 0
 
     static let empty = StreamTelemetry()
 }
@@ -1167,7 +1172,10 @@ final class BrowserModel: ObservableObject {
                         resolution: stats["resolution"] as? String ?? "",
                         decodeTimeMs: (stats["decodeTime"] as? NSNumber)?.doubleValue ?? 0,
                         packetsReceived: (loss["received"] as? NSNumber)?.intValue ?? 0,
-                        framesReceived: (frames["received"] as? NSNumber)?.intValue ?? 0
+                        framesReceived: (frames["received"] as? NSNumber)?.intValue ?? 0,
+                        networkJitterMs: (stats["networkJitter"] as? NSNumber)?.doubleValue ?? 0,
+                        freezeCount: (frames["freezes"] as? NSNumber)?.intValue ?? 0,
+                        frameHeight: (stats["height"] as? NSNumber)?.intValue ?? 0
                     )
                     if isStreaming { streamHealth.ingest(telemetry) }
                 } else if !isStreaming {
@@ -1175,6 +1183,7 @@ final class BrowserModel: ObservableObject {
                     nativeHUDValues = [:]
                 }
                 if !isStreaming { streamHealth.reset() }
+                watchPageMemory()
             } catch {
                 // Keep the last good telemetry sample; the page may be navigating.
             }
@@ -1361,9 +1370,67 @@ final class BrowserModel: ObservableObject {
         loadPhase = .failed(failure)
     }
 
-    private var webContentTerminationDates: [Date] = []
+    // MARK: - Page memory
 
-    func webContentTerminated() {
+    private var memoryWatch = PageMemoryWatch()
+    private var memoryCheckedAt: TimeInterval = 0
+    private var memoryStepInFlight = false
+
+    /// Every two seconds while a game streams, reads how much memory macOS
+    /// charges the Xbox page (see PageMemoryGuard.swift).
+    private func watchPageMemory() {
+        guard isStreaming else { memoryWatch.reset(); return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - memoryCheckedAt >= 2, let webView,
+              webView.responds(to: NSSelectorFromString("_webProcessIdentifier")),
+              let pid = (webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value,
+              let megabytes = PageProcess.footprintMB(pid: pid) else { return }
+        memoryCheckedAt = now
+        guard memoryWatch.add(megabytes, at: now) else { return }
+        memoryWatch.reset()
+        lightenRenderer(footprintMB: megabytes)
+    }
+
+    /// The page's memory is racing toward WebKit's limit: Sharpening moves to
+    /// the next lighter renderer while the game keeps running (Better xCloud
+    /// switches it live), and that choice is kept.
+    private func lightenRenderer(footprintMB: Double) {
+        guard !memoryStepInFlight else { return }
+        memoryStepInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.memoryStepInFlight = false }
+            let reply = try? await self.callAsyncJS("""
+                try {
+                  return JSON.stringify({renderer: String(BxCBridge.getStream('video.player.type')),
+                                         processing: String(BxCBridge.getStream('video.processing'))});
+                } catch (e) { return null; }
+                """) as? String
+            guard let data = reply?.data(using: .utf8),
+                  let current = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                  let renderer = current["renderer"] else { return }
+            let megabytes = Int(footprintMB.rounded())
+            guard let lighter = PageMemoryWatch.lighterRenderer(than: renderer),
+                  let def = self.settingsModel.def("app.clarityPipeline") else {
+                self.note("Page memory: \(megabytes) MB and climbing with the plain video renderer")
+                return
+            }
+            let pipeline = PageMemoryWatch.pipeline(renderer: lighter, processing: current["processing"] ?? "cas")
+            self.settingsModel.write(id: def.id, scope: def.scope, value: pipeline)
+            self.note("Page memory: \(megabytes) MB and climbing with the \(renderer) renderer; Sharpening switched to \(pipeline)")
+            self.showHint(lighter == "default" ? "Sharpening turned off to keep the game running"
+                                               : "Sharpening switched to Standard to keep the game running", symbol: "memorychip")
+        }
+    }
+
+    private var webContentTerminationDates: [Date] = []
+    private var lastAutoReconnectAt = Date.distantPast
+
+    /// `reason` is WebKit's: 0 memory limit, 1 CPU limit, 2 requested by the
+    /// app, 3 crash; nil when WebKit doesn't say.
+    func webContentTerminated(reason: Int? = nil) {
+        let wasPlaying = isStreaming
+        note("Web content process terminated" + (reason == 0 ? " (memory limit)" : reason == 1 ? " (CPU limit)" : reason == 3 ? " (crash)" : ""))
         stopSyntheticInputTest(message: "Input test cancelled: browser content stopped.")
         loadingTimeout?.cancel()
         loadingTimeout = nil
@@ -1371,10 +1438,22 @@ final class BrowserModel: ObservableObject {
         bridgeReady = false
         resetKeyboardMouseState()
         controllerFeatures.stopHaptics()
+        memoryWatch.reset()
         let now = Date()
         webContentTerminationDates = webContentTerminationDates.filter { now.timeIntervalSince($0) < 60 }
         webContentTerminationDates.append(now)
         let repeatedlyTerminated = webContentTerminationDates.count >= 3
+        // Mid-game, go straight back to the game: Xbox keeps the session for
+        // a few minutes, so reloading the stream page picks it up again.
+        // Once a minute at most, so a page that keeps failing at once still
+        // ends on the screen below.
+        if wasPlaying, reason != 2, !isOffline, !repeatedlyTerminated, now.timeIntervalSince(lastAutoReconnectAt) > 60 {
+            lastAutoReconnectAt = now
+            showHint(reason == 0 ? "The Xbox page ran out of memory · Reconnecting to your game"
+                                 : "The Xbox page stopped · Reconnecting to your game", symbol: "arrow.clockwise")
+            retryLoading()
+            return
+        }
         loadPhase = .failed(BrowserLoadFailure(
             title: repeatedlyTerminated ? "Xbox page repeatedly stopped" : "Connection issue",
             message: repeatedlyTerminated

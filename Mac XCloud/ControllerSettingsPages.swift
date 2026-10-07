@@ -556,7 +556,7 @@ struct MotionSettingsPage: View {
                                   value: service.tuning(\.steeringAngleDegrees) { $0.effectiveSteeringAngleDegrees },
                                   range: 15...90, valueText: { "\(Int($0.rounded()))°" })
                 Divider()
-                SettingsSliderRow(label: "Center response", note: "Quick suits arcade racers; gentle suits simulation.",
+                SettingsSliderRow(label: "Center response", note: "Gentle gives finer control around straight ahead and builds up evenly; Quick turns sooner.",
                                   value: Binding(
                                     get: { Self.centerResponse(fromExponent: Double(service.enhancements.effectiveSteeringExponent)) },
                                     set: { v in service.updateSettings { var e = $0.enhancements ?? ControllerEnhancements(); e.steeringExponent = Float(Self.exponent(fromCenterResponse: v)); $0.enhancements = e } }),
@@ -601,11 +601,16 @@ struct MotionSettingsPage: View {
         }
     }
 
-    /// Slider 0 (gentle, exponent 1.6) … 1 (quick, exponent 0.5), with
-    /// linear (1.0) a little right of the middle.
-    static func centerResponse(fromExponent e: Double) -> Double { min(max((1.6 - e) / 1.1, 0), 1) }
+    /// Slider 0 (gentlest, see SteeringResponse.curve) … 1 (quick, exponent
+    /// 0.5), with linear (1.0) a little left of the middle. Profiles saved
+    /// with a gentler exponent show at the gentle end.
+    static func centerResponse(fromExponent e: Double) -> Double {
+        let gentlest = SteeringResponse.gentlest
+        return min(max((gentlest - e) / (gentlest - 0.5), 0), 1)
+    }
     static func exponent(fromCenterResponse value: Double) -> Double {
-        let e = 1.6 - 1.1 * min(max(value, 0), 1)
+        let gentlest = SteeringResponse.gentlest
+        let e = gentlest - (gentlest - 0.5) * min(max(value, 0), 1)
         return abs(e - 1) < 0.04 ? 1 : e
     }
 

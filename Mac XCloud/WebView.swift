@@ -225,7 +225,13 @@ extension WebView.Coordinator: WKNavigationDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         browser.webContentTerminated()
-        browser.note("Web content process terminated")
+    }
+
+    /// WebKit's (private, long-standing) variant that says why the page
+    /// stopped. Where it exists WebKit calls it instead of the method above.
+    @objc(_webView:webContentProcessDidTerminateWithReason:)
+    func webView(_ webView: WKWebView, webContentProcessDidTerminateWithReason reason: Int) {
+        browser.webContentTerminated(reason: reason)
     }
 }
 

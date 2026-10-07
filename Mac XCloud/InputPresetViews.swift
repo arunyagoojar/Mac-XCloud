@@ -8,6 +8,7 @@ struct InputPresetManagerView: View {
     @State private var creating = false
     @State private var newName = ""
     @State private var deleting: InputPreset?
+    @State private var cleaningUp = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -23,6 +24,15 @@ struct InputPresetManagerView: View {
                 ForEach(Array(store.presets.enumerated()), id: \.element.id) { index, preset in
                     if index > 0 { Divider() }
                     row(preset)
+                }
+                if !copies.isEmpty {
+                    Divider()
+                    SettingsRow(copies.count == 1 ? "1 old copy isn't used by any game" : "\(copies.count) old copies aren't used by any game",
+                                note: "Left by earlier versions. Each game keeps the profile it uses.") {
+                        Button("Clean Up…") { cleaningUp = true }
+                            .controlSize(.small)
+                            .disabled(store.isBusy)
+                    }
                 }
                 Divider()
                 HStack(spacing: 8) {
@@ -64,6 +74,26 @@ struct InputPresetManagerView: View {
         } message: {
             Text("Games that used this profile return to Default.")
         }
+        .alert("Move unused copies to the Trash?", isPresented: $cleaningUp) {
+            Button("Cancel", role: .cancel) {}
+            Button("Move to Trash", role: .destructive) { store.removeRedundantCopies() }
+        } message: {
+            Text(copiesSummary + "\n\nNo game uses them. You can put them back from the Trash.")
+        }
+    }
+
+    private var copies: [InputPreset] { store.redundantCopies }
+
+    /// "Forza Horizon 6 2 (×3), Call of Duty® …"
+    private var copiesSummary: String {
+        var counts: [String: Int] = [:]
+        var order: [String] = []
+        for preset in copies {
+            if counts[preset.name] == nil { order.append(preset.name) }
+            counts[preset.name, default: 0] += 1
+        }
+        return order.map { name in counts[name, default: 0] > 1 ? "\(name) (×\(counts[name]!))" : name }
+            .joined(separator: ", ")
     }
 
     private func row(_ preset: InputPreset) -> some View {
@@ -75,7 +105,9 @@ struct InputPresetManagerView: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(preset.name).lineLimit(1)
-                Text(preset.isDefault ? "Used when a game has no profile" : "Updated \(preset.updatedAt.formatted(.relative(presentation: .named)))")
+                Text(preset.isDefault ? "Used when a game has no profile"
+                     : (copies.contains { $0.id == preset.id } ? "Not used by any game · " : "")
+                        + "Updated \(preset.updatedAt.formatted(.relative(presentation: .named)))")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()

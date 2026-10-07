@@ -99,8 +99,9 @@ final class StreamHealthMonitor: ObservableObject {
         samples.append(StreamHealthSample(time: now, pingMs: telemetry.pingMs, fps: telemetry.fps,
                                           bitrateMbps: telemetry.bitrateMbps, packetsLost: telemetry.packetLossCount,
                                           packetsReceived: telemetry.packetsReceived, framesDropped: telemetry.framesDropped,
-                                          framesReceived: telemetry.framesReceived, jitterMs: telemetry.jitterMs,
-                                          decodeMs: telemetry.decodeTimeMs))
+                                          framesReceived: telemetry.framesReceived, jitterMs: telemetry.networkJitterMs,
+                                          decodeMs: telemetry.decodeTimeMs, freezes: telemetry.freezeCount,
+                                          frameHeight: telemetry.frameHeight))
         samples.removeAll { $0.time < now - StreamHealthAnalyzer.window - 5 }
         if samples.count % 3 == 0 { refreshNetwork() }
         let next = StreamHealthAnalyzer.report(samples: samples, network: network)
@@ -127,12 +128,16 @@ final class StreamHealthMonitor: ObservableObject {
         if report != nil { report = nil }
     }
 
+    /// Only a problem the player can already see or feel, lasting about 15
+    /// seconds, interrupts the game; at most one notice every three minutes
+    /// and each kind once per game.
     private func considerNotice(_ report: StreamHealthReport?) {
-        let current = Set(report?.issues.map(\.kind) ?? [])
+        let current = Set(report?.issues.filter(\.hurtsPlay).map(\.kind) ?? [])
         persisting = persisting.filter { current.contains($0.key) }
-        for issue in report?.issues ?? [] { persisting[issue.kind, default: 0] += 1 }
-        guard noticesEnabled, let issue = report?.issues.first(where: { persisting[$0.kind, default: 0] >= 8 && !announced.contains($0.kind) }),
-              Date().timeIntervalSince(lastNoticeAt) > 90 else { return }
+        for kind in current { persisting[kind, default: 0] += 1 }
+        guard noticesEnabled,
+              let issue = report?.issues.first(where: { $0.hurtsPlay && persisting[$0.kind, default: 0] >= 15 && !announced.contains($0.kind) }),
+              Date().timeIntervalSince(lastNoticeAt) > 180 else { return }
         announced.insert(issue.kind)
         lastNoticeAt = Date()
         onNotice?(issue)
@@ -203,7 +208,7 @@ struct StreamHealthSection: View {
             }
             Divider()
             SettingsToggleRow(label: "Tell me when the connection gets worse",
-                              note: "A short notice in the game when a problem lasts.",
+                              note: "A short notice in the game, only when a problem lasts and you can see it in the stream.",
                               isOn: $monitor.noticesEnabled)
         }
         .onAppear { monitor.refreshNetwork() }

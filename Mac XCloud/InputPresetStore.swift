@@ -232,6 +232,15 @@ final class InputPresetStore: ObservableObject {
             await applyPreset(id: presets.contains(where: { $0.id == baseID }) ? baseID : InputPreset.defaultID, rememberGame: false)
             return
         }
+        // A profile already made for this game (its link was lost, or the
+        // game arrived under another ID) is used again instead of copied.
+        if let existing = existingProfile(forTitle: title, links: saved) {
+            var links = saved
+            links[key] = existing.id.uuidString
+            defaults.set(links, forKey: "inputPresets.games.v1")
+            await applyPreset(id: existing.id, rememberGame: false)
+            return
+        }
         // Snapshot the global baseline before the first game's independent copy.
         if activePresetID == baseID { await updatePreset(id: baseID) }
         guard transition == gameTransition, currentGameID == key,
@@ -249,6 +258,101 @@ final class InputPresetStore: ObservableObject {
             await applyPreset(id: game.id, rememberGame: false)
             if !key.hasPrefix("title:"), currentGameID == key { onNewGameProfile?(key, title) }
         } catch { operationMessage = "Could not remember game settings: \(error.localizedDescription)" }
+    }
+
+    // MARK: - One profile per game
+
+    /// True when `name` is what a game profile for `title` is called: the
+    /// title itself, or the title with a number added ("Forza Horizon 6 2").
+    nonisolated static func isNamed(_ name: String, forTitle title: String) -> Bool {
+        let name = name.lowercased()
+        let title = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100)).lowercased()
+        guard !title.isEmpty else { return false }
+        if name == title { return true }
+        guard name.hasPrefix(title + " ") else { return false }
+        let number = name.dropFirst(title.count + 1)
+        return !number.isEmpty && number.allSatisfy(\.isNumber)
+    }
+
+    /// The profile already made for a game called `title`: one a game uses
+    /// first, then the most recently changed.
+    private func existingProfile(forTitle title: String, links: [String: String]) -> InputPreset? {
+        let linked = Set(links.values.compactMap(UUID.init(uuidString:)))
+        return presets
+            .filter { !$0.isDefault && Self.isNamed($0.name, forTitle: title) }
+            .max { a, b in
+                let aLinked = linked.contains(a.id), bLinked = linked.contains(b.id)
+                return aLinked != bLinked ? !aLinked : a.updatedAt < b.updatedAt
+            }
+    }
+
+    /// Leftover copies of a game's profile, made by earlier versions when a
+    /// profile could not be read after an update: same name (or the same name
+    /// with a number added), used by no game and not in use. A profile a game
+    /// uses is never one of them.
+    var redundantCopies: [InputPreset] {
+        let links = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+        let linked = Set(links.values.compactMap(UUID.init(uuidString:)))
+        let names = Set(presets.map { $0.name.lowercased() })
+        // "Forza Horizon 6 2" belongs with "Forza Horizon 6" only when a
+        // profile with the plain name exists too.
+        func stem(_ name: String) -> String {
+            let lowered = name.lowercased()
+            guard let space = lowered.lastIndex(of: " ") else { return lowered }
+            let number = lowered[lowered.index(after: space)...]
+            let base = String(lowered[..<space])
+            return !number.isEmpty && number.allSatisfy(\.isNumber) && names.contains(base) ? base : lowered
+        }
+        var removable: [InputPreset] = []
+        let groups = Dictionary(grouping: presets.filter { !$0.isDefault }) { stem($0.name) }
+        for group in groups.values where group.count > 1 {
+            let kept = group.filter { linked.contains($0.id) || $0.id == activePresetID }
+            let keeper = kept.isEmpty ? group.max { $0.updatedAt < $1.updatedAt } : nil
+            removable += group.filter { !linked.contains($0.id) && $0.id != activePresetID && $0.id != keeper?.id }
+        }
+        return removable.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Moves the leftover copies to the Trash (they can be put back from
+    /// there) and keeps one profile per game.
+    func removeRedundantCopies() {
+        let copies = redundantCopies
+        guard !copies.isEmpty else { return }
+        var moved = 0
+        var failed: [String] = []
+        for preset in copies {
+            do {
+                let url = presetURL(for: preset.id)
+                try recordTombstone(id: preset.id, kind: "input-preset", revision: inputRevision(at: url) + 1)
+                if fileManager.fileExists(atPath: url.path) { try fileManager.trashItem(at: url, resultingItemURL: nil) }
+                presets.removeAll { $0.id == preset.id }
+                moved += 1
+            } catch {
+                failed.append(preset.name)
+            }
+        }
+        // "Forza Horizon 6 2" is called "Forza Horizon 6" again once the copy
+        // that held the plain name is gone.
+        let freedNames = Set(copies.map { $0.name.lowercased() })
+        for preset in presets where !preset.isDefault {
+            guard let space = preset.name.lastIndex(of: " ") else { continue }
+            let number = preset.name[preset.name.index(after: space)...]
+            let base = String(preset.name[..<space])
+            guard !number.isEmpty, number.allSatisfy(\.isNumber), freedNames.contains(base.lowercased()),
+                  !presets.contains(where: { $0.name.lowercased() == base.lowercased() }),
+                  let index = presets.firstIndex(where: { $0.id == preset.id }) else { continue }
+            var renamed = presets[index]
+            renamed.name = base
+            renamed.updatedAt = .now
+            if (try? write(renamed)) != nil { presets[index] = renamed }
+        }
+        sortPresets()
+        var message = moved > 0 ? "Moved \(moved) unused \(moved == 1 ? "copy" : "copies") to the Trash" : ""
+        if !failed.isEmpty {
+            message += (message.isEmpty ? "" : " · ") + "Could not move " + failed.joined(separator: ", ")
+        }
+        operationMessage = message
+        updateIndexAfterSave()
     }
 
     func exportPresetData(id: UUID) throws -> Data {

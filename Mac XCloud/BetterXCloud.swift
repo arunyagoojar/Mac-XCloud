@@ -1394,6 +1394,10 @@ enum BetterXCloud {
             var stats = collector.currentStats || {};
             var finite = function (value, fallback) { value = Number(value); return Number.isFinite(value) ? value : fallback; };
             var pl = stats.pl || {}, fl = stats.fl || {}, dt = stats.dt || {};
+            /* The raw video receiver figures: the network's own jitter
+               (Better xCloud's "jitter" is the playout buffer's delay),
+               picture freezes and the decoded height. */
+            var video = collector.lastVideoStat || {};
             return {
               display: Object.fromEntries(Object.entries(stats).map(([key, value]) => [key, value.toString()])),
               ping: finite(stats.ping && stats.ping.current, -1),
@@ -1406,8 +1410,10 @@ enum BetterXCloud {
                 frames: finite(fl.dropped, 0),
                 framePercent: finite(fl.dropped, 0) * 100 / Math.max(1, finite(fl.received, 0) + finite(fl.dropped, 0))
               },
-              frames: { received: finite(fl.received, 0), dropped: finite(fl.dropped, 0) },
+              frames: { received: finite(fl.received, 0), dropped: finite(fl.dropped, 0), freezes: finite(video.freezeCount, 0) },
               jitter: finite(stats.jit && stats.jit.current, 0),
+              networkJitter: finite(video.jitter, 0) * 1000,
+              height: finite(video.frameHeight, 0),
               resolution: String(stats.res && stats.res.current || ""),
               decodeTime: finite(dt.current, 0)
             };

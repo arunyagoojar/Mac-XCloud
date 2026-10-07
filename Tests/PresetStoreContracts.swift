@@ -27,6 +27,12 @@ final class IsolatedFileManager: FileManager, @unchecked Sendable {
     override func url(for directory: FileManager.SearchPathDirectory, in domain: FileManager.SearchPathDomainMask, appropriateFor url: URL?, create shouldCreate: Bool) throws -> URL {
         root
     }
+    /// The test's own Trash, never the user's.
+    override func trashItem(at url: URL, resultingItemURL outResultingURL: AutoreleasingUnsafeMutablePointer<NSURL?>?) throws {
+        let trash = root.appendingPathComponent(".Trash", isDirectory: true)
+        try createDirectory(at: trash, withIntermediateDirectories: true)
+        try moveItem(at: url, to: trash.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent))
+    }
 }
 
 @main
@@ -117,6 +123,58 @@ struct PresetStoreContracts {
         check(store.presets.count == countBeforeDisabled && store.activePresetID == InputPreset.defaultID, "Disabling game recall prevents automatic profile creation")
         await store.noteGame(id: "", playing: false)
         store.autoGameProfiles = true
+
+        // One profile per game, even when its link is lost or the game
+        // arrives under another ID.
+        await store.noteGame(id: "racer-id", title: "Racer X", playing: true)
+        let racerProfile = store.activePresetID
+        await store.noteGame(id: "", playing: false)
+        var links = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+        links["racer-id"] = nil
+        defaults.set(links, forKey: "inputPresets.games.v1")
+        let countBeforeLostLink = store.presets.count
+        await store.noteGame(id: "racer-id", title: "Racer X", playing: true)
+        check(store.activePresetID == racerProfile && store.presets.count == countBeforeLostLink,
+              "A game whose link was lost uses its existing profile instead of a new copy")
+        check((defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String])?["racer-id"] == racerProfile.uuidString,
+              "The lost link is restored")
+        await store.noteGame(id: "", playing: false)
+        await store.noteGame(id: "racer-other-id", title: "Racer X", playing: true)
+        check(store.activePresetID == racerProfile && store.presets.count == countBeforeLostLink,
+              "The same game under another ID shares its profile")
+        await store.noteGame(id: "", playing: false)
+        check(InputPresetStore.isNamed("Racer X 2", forTitle: "Racer X") && !InputPresetStore.isNamed("Racer X II", forTitle: "Racer")
+              && !InputPresetStore.isNamed("Racer XL", forTitle: "Racer X"), "Only the title, or the title with a number, names a game's profile")
+
+        // Leftover copies from older versions: unused duplicates go, the
+        // profile a game uses stays.
+        let copyA = try store.importPresetData(store.exportPresetData(id: racerProfile))
+        let copyB = try store.importPresetData(store.exportPresetData(id: racerProfile))
+        check(store.presets.first { $0.id == copyA }?.name == "Racer X 2", "An imported copy is numbered")
+        let otherGame = try store.importPresetData(store.exportPresetData(id: InputPreset.defaultID))
+        store.renamePreset(id: otherGame, name: "Racer")
+        let redundant = Set(store.redundantCopies.map(\.id))
+        check(redundant == [copyA, copyB], "Only unused copies of a game's profile count as leftovers")
+        store.removeRedundantCopies()
+        check(!store.presets.contains { $0.id == copyA || $0.id == copyB } && store.presets.contains { $0.id == racerProfile }
+              && store.presets.contains { $0.id == otherGame }, "Clean up removes the leftovers and keeps the game's profile")
+        check(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Xbox Cloud data/presets/\(copyA.uuidString.lowercased()).json").path)
+              && ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(".Trash").path))?.count ?? 0) == 2,
+              "Leftovers are moved to the Trash, not erased")
+        store.reloadFromDisk()
+        check(!store.presets.contains { $0.id == copyA } && store.presets.contains { $0.id == racerProfile }, "Removed copies stay gone after a reload")
+        // The game's profile is the numbered one: it keeps the plain name once
+        // the unused copy that held it is gone.
+        let numbered = try store.importPresetData(store.exportPresetData(id: racerProfile))
+        links = defaults.dictionary(forKey: "inputPresets.games.v1") as? [String: String] ?? [:]
+        links["racer-id"] = numbered.uuidString; links["racer-other-id"] = numbered.uuidString
+        defaults.set(links, forKey: "inputPresets.games.v1")
+        check(store.redundantCopies.map(\.id) == [racerProfile], "A copy no game uses is a leftover even when it has the plain name")
+        store.removeRedundantCopies()
+        check(store.presets.first { $0.id == numbered }?.name == "Racer X" && !store.presets.contains { $0.id == racerProfile },
+              "The profile a game uses gets the plain name back")
+        await store.deletePreset(id: otherGame)
+
         let saved = root.appendingPathComponent("Xbox Cloud data/presets/default.json")
         let data = try Data(contentsOf: saved)
         var envelope = try JSONSerialization.jsonObject(with: data) as! [String: Any]

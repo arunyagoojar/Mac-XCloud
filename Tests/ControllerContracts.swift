@@ -258,6 +258,25 @@ struct ControllerContracts {
         check(SteeringResponse.output(angle: 4 * deg, parameters: compensated) > SteeringResponse.output(angle: 4 * deg, parameters: lock) + 0.1,
               "Center boost makes small turns count more")
 
+        // Gentle: finer around center, never dead, and building up evenly.
+        var gentle = lock; gentle.exponent = SteeringResponse.gentlest
+        let gentleCurve = stride(from: 0.0, through: 40.0, by: 0.25).map { SteeringResponse.output(angle: $0 * deg, parameters: gentle) }
+        let gentleSlopes = zip(gentleCurve, gentleCurve.dropFirst()).map { $1 - $0 }
+        check(gentleSlopes.first! > 0.25 * 0.25 / 40, "Gentle still answers the first quarter degree (no dead spot at center)")
+        check(zip(gentleSlopes, gentleSlopes.dropFirst()).allSatisfy { $1 >= $0 - 1e-12 }, "Gentle sensitivity only ever rises, evenly, toward full lock")
+        check(stride(from: 1.0, through: 39.0, by: 1).allSatisfy { SteeringResponse.output(angle: $0 * deg, parameters: gentle) < SteeringResponse.output(angle: $0 * deg, parameters: lock) }
+              && gentleCurve.last == 1, "Gentle is finer than linear everywhere and still reaches full lock")
+        check(gentleSlopes.last! / gentleSlopes.first! < 6, "Gentle never goes from slow to sudden: sensitivity grows under 6× from center to full lock (the old gentle curve: 11×)")
+        for tuned in [1.1, 1.2128563, 1.3] {
+            let drift = stride(from: 0.2, through: 1.0, by: 0.05).map { SteeringResponse.curve($0, exponent: tuned) - StickShaper.curve($0, exponent: tuned) }
+            check(drift.allSatisfy { $0 < 0.01 && $0 > -0.045 },
+                  String(format: "A tuned setting (%.2f) keeps its feel beyond the first fifth: never quicker, at most 4.5%% finer", tuned))
+        }
+        check(stride(from: 0.0, through: 1.0, by: 0.05).allSatisfy { SteeringResponse.curve($0, exponent: 0.6) == StickShaper.curve($0, exponent: 0.6) },
+              "Quick steering keeps the power curve")
+        check(SteeringResponse.curve(0.5, exponent: 1.6) == SteeringResponse.curve(0.5, exponent: SteeringResponse.gentlest),
+              "Profiles saved with an older, gentler setting get the gentlest curve")
+
         // MARK: - Steering settings migration
 
         var legacySettings = ControllerEnhancements()
