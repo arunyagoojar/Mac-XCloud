@@ -417,5 +417,25 @@
 			<pubDate>Wed, 07 Oct 2026 09:13:16 +0000</pubDate>
 			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.4.1-b32/MacXcloud.zip" sparkle:edSignature="PC9/H9NW2qhkEco25JBUJxO2hRUmEFGikQrLOhiJhPPrBUQgaL+fdKMj2eYl0m3yqVV1eQ18mHzl81cjCGU0DQ==" length="7043895" type="application/octet-stream" />
 		</item>
+		<item>
+			<title>Version 1.4.2</title>
+			<sparkle:version>33</sparkle:version>
+			<sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
+			<link>https://github.com/arunyagoojar/Mac-XCloud/releases/tag/v1.4.2-b33</link>
+			<sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+			<description><![CDATA[<h2>Mac Xcloud 1.4.2</h2>
+<h3>Improved</h3>
+<ul>
+<li>Steering is smoother. The wheel advances a little every frame even when the Mac is busy, instead of moving in packets — holding a long bend, catching a slide and small corrections all arrive as one continuous motion. Quick turns are as fast as before.</li>
+<li>Holding a turn is steadier. The wheel&#x27;s smoothing no longer lets fast hand tremor through, so the cockpit wheel stops shivering and the car holds its line with a steady hand.</li>
+<li>Stereo haptics. Rumble is now decoded straight from the stream&#x27;s own channel — left and right grips and both triggers separately — so every game keeps its left/right character, including games that never rumbled before, and rumble intensity is no longer applied twice.</li>
+</ul>
+<h3>Diagnostics</h3>
+<ul>
+<li>The controller diagnostics export records the last five seconds of steering output, so any jitter that remains can be traced to its cause.</li>
+</ul>]]></description>
+			<pubDate>Wed, 07 Oct 2026 10:44:27 +0000</pubDate>
+			<enclosure url="https://github.com/arunyagoojar/Mac-XCloud/releases/download/v1.4.2-b33/MacXcloud.zip" sparkle:edSignature="G+j/1FTSyyuvnYwWBsCreT3S2Muc6wCkV1FB13u1Hbz55EETphGQwoze4GtyJbQPh1hnJSFuPyGDAHWC1q7yCg==" length="7088691" type="application/octet-stream" />
+		</item>
 	</channel>
 </rss>
