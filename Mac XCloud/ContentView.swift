@@ -275,7 +275,7 @@ private struct PlayHint: View {
         }
         .allowsHitTesting(false)
         .animation(.easeInOut(duration: 0.25), value: shown)
-        .onChange(of: hint) { next in
+        .onChangeCompat(of: hint) { next in
             hideTask?.cancel()
             shown = next
             guard next != nil else { return }

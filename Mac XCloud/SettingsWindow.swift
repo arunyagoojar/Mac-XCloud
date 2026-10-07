@@ -40,7 +40,7 @@ struct SettingsRootView: View {
             browser.isSettingsWindowOpen = true
             model.load()
         }
-        .onChange(of: model.route) { _ in scrolled = false }
+        .onChangeCompat(of: model.route) { scrolled = false }
         .onDisappear { browser.isSettingsWindowOpen = false }
     }
 

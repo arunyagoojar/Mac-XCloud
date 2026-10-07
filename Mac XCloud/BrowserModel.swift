@@ -679,7 +679,7 @@ final class BrowserModel: ObservableObject {
         if let mainWindow {
             if mainWindow.isMiniaturized { mainWindow.deminiaturize(nil) }
             mainWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: false)
+            NSApp.activateIgnoringOtherAppsCompat(false)
             DispatchQueue.main.async { [weak self] in
                 self?.synchronizeBrowserGamepadIfNeeded()
             }
@@ -823,7 +823,7 @@ final class BrowserModel: ObservableObject {
         isSettingsWindowOpen = true
         settingsModel.load()
         settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: false)
+        NSApp.activateIgnoringOtherAppsCompat(false)
     }
 
     private func pruneFileAndEditMenus() {
@@ -997,7 +997,7 @@ final class BrowserModel: ObservableObject {
             profileWindows[kind] = window
         }
         profileWindows[kind]?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: false)
+        NSApp.activateIgnoringOtherAppsCompat(false)
     }
 
     // MARK: - Actions

@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "\(title) is still running in Xbox Cloud Gaming. Quitting now ends the session."
         alert.addButton(withTitle: "Quit and End Session")
         alert.addButton(withTitle: "Stay")
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activateIgnoringOtherAppsCompat(true)
         if alert.runModal() == .alertFirstButtonReturn {
             quitConfirmed = true
             return .terminateNow

@@ -88,16 +88,20 @@ struct ResumeLastGameIntent: AppIntent {
 
 @available(macOS 13.0, *)
 struct MacXcloudShortcuts: AppShortcutsProvider {
+    /// shortTitle and systemImageName are what Spotlight and the Shortcuts
+    /// app display from macOS 14 on; providing them also avoids the
+    /// `AppShortcut` deprecation. `systemImageName` must be a literal, so the
+    /// values are written inline.
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: PlayGameIntent(), phrases: [
             "Play \(\.$game) in \(.applicationName)",
             "Start \(\.$game) in \(.applicationName)",
             "Play \(\.$game) with \(.applicationName)",
-        ])
+        ], shortTitle: "Play Game", systemImageName: "gamecontroller")
         AppShortcut(intent: ResumeLastGameIntent(), phrases: [
             "Resume my game in \(.applicationName)",
             "Continue playing in \(.applicationName)",
-        ])
+        ], shortTitle: "Resume Last Game", systemImageName: "arrow.counterclockwise.circle")
     }
 }
 

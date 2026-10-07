@@ -137,7 +137,7 @@ private struct KeyboardLayoutEditor: View {
                 }
             }
         }
-        .onChange(of: layout.id) { _ in capturing = nil }
+        .onChangeCompat(of: layout.id) { capturing = nil }
     }
 
     private var primarySections: [KeyboardControl.Section] { [.movement, .buttons, .shouldersAndTriggers] }
@@ -236,8 +236,8 @@ private struct LayoutNameField: View {
             .focused($focused)
             .onSubmit(commit)
             .onAppear { draft = layout.name }
-            .onChange(of: layout.id) { _ in draft = layout.name }
-            .onChange(of: focused) { isFocused in if !isFocused { commit() } }
+            .onChangeCompat(of: layout.id) { draft = layout.name }
+            .onChangeCompat(of: focused) { isFocused in if !isFocused { commit() } }
             .onDisappear(perform: commit)
     }
 
