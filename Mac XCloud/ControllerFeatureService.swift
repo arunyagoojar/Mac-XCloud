@@ -82,6 +82,8 @@ final class ControllerFeatureService: ObservableObject {
     private var fusion = MotionFusion()
     private var sampleClock = MotionSampleClock()
     private var steering = SteeringWheelEngine()
+    /// Recent wheel output for the diagnostics export (jitter analysis).
+    private var steeringTrace = SteeringTrace()
     private var gyroAim = GyroAimEngine()
     private var touchCamera = TouchpadCameraEngine()
     private var lastAimRate = MotionVector.zero
@@ -150,6 +152,12 @@ final class ControllerFeatureService: ObservableObject {
         steering.centerBank = 0
         defaults.removeObject(forKey: Self.steeringCenterKey)
         steeringCenterDegrees = 0
+    }
+
+    /// Recent wheel output as `[time, output]` pairs for the diagnostics
+    /// export; a short drive captures enough to analyse the jitter.
+    var steeringTraceExport: [[Double]] {
+        steeringTrace.export()
     }
 
     /// Measures the gyroscope's resting offset; the controller must be still.
@@ -675,6 +683,7 @@ final class ControllerFeatureService: ObservableObject {
         if e.gyroMode == .steering, motionFresh {
             steering.configure(e.steeringConfiguration)
             steering.update(gravity: fusion.predictedGravity(after: timestamp - lastMotionReportAt), dt: tickDT)
+            steeringTrace.record(time: timestamp, output: steering.output)
         } else {
             steering.release()
         }

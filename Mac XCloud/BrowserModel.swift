@@ -242,6 +242,7 @@ final class BrowserModel: ObservableObject {
                 "nativeMotion": controllerFeatures.gyroAvailable, "rumbleSamples": rumbleSamples,
                 "steeringAngle": controllerFeatures.liveSteeringAngle, "motionStatus": controllerFeatures.motionStatus,
                 "motionReportRateHz": controllerFeatures.motionReportRateHz,
+                "steeringTrace": controllerFeatures.steeringTraceExport,
                 "inputBridgeCalls": inputBridgeCalls, "inputBridgeAverageMs": inputBridgeTotalMs / Double(max(inputBridgeCalls, 1)),
                 "inputBridgeMaxMs": inputBridgeMaxMs]
             try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)

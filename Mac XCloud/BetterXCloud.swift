@@ -760,6 +760,22 @@ enum BetterXCloud {
       }
       __xcgKeyboard.hideStandIn();
       const now = performance.now(), n = __xcgPollInput.values;
+      // Advance a native value by the last segment's velocity for at most one
+      // segment (dead reckoning). Native samples can clump or gap on a busy
+      // main thread; reading only the newest sample made the steering wheel
+      // advance in visible packets at the game's own poll rate. Returns NaN
+      // when the key has no fresh native value.
+      const interpolate = key => {
+        if (!Number.isFinite(n[key])) return NaN;
+        const hist = __xcgPollInput.history;
+        if (!hist || hist.length < 2) return n[key];
+        const older = hist[hist.length - 2], newer = hist[hist.length - 1];
+        const previous = Number.isFinite(older.values[key]) ? older.values[key] : n[key];
+        const span = newer.t - older.t;
+        if (!(span > 0) || span > 100 || previous === n[key]) return n[key];
+        const ahead = Math.max(0, Math.min((now - newer.t) / span, 1));
+        return n[key] + (n[key] - previous) * ahead;
+      };
       // Using the controller takes over from the keyboard (or from the
       // game's own keyboard & mouse): a new press or a stick pushed out.
       if (__xcgControllerUsed(p)) __xcgKeyboard.useController();
@@ -778,15 +794,17 @@ enum BetterXCloud {
       const clamp = v => Math.max(-1, Math.min(1, v));
       if (active && !typing) {
         ["LeftThumbXAxis","LeftThumbYAxis","RightThumbXAxis","RightThumbYAxis"].forEach((k,i) => {
-          if (Number.isFinite(n[k])) axes[i] = clamp(n[k] * (i % 2 ? -1 : 1));
+          const value = interpolate(k);
+          if (Number.isFinite(value)) axes[i] = clamp(value * (i % 2 ? -1 : 1));
         });
         // Native GameController has positive Y up; the browser has positive Y down.
         const gyroBase = n.gyroAxisBase === 0 ? 0 : 2;
         const touchBase = n.touchAxisBase === 0 ? 0 : 2;
         const physicalMagnitude = base => Math.hypot(p.axes[base], p.axes[base+1]);
         if (n.touchpadAim === 1 && physicalMagnitude(touchBase) <= 0.12) {
-          axes[touchBase] = Number.isFinite(n.touchX) ? clamp(n.touchX) : 0;
-          axes[touchBase+1] = Number.isFinite(n.touchY) ? clamp(-n.touchY) : 0;
+          const tx = interpolate("touchX"), ty = interpolate("touchY");
+          axes[touchBase] = Number.isFinite(tx) ? clamp(tx) : 0;
+          axes[touchBase+1] = Number.isFinite(ty) ? clamp(-ty) : 0;
         }
         const touchOwnsGyroStick = n.touchActive === 1 &&
           n.touchpadAim === 1 && touchBase === gyroBase;
@@ -796,8 +814,8 @@ enum BetterXCloud {
           // Fade out game-dead-zone compensation continuously as physical input increases.
           const blend = Math.max(0,Math.min(1,(magnitude - 0.05) / 0.25));
           const combine = (coarse,fine) => Number.isFinite(fine) ? coarse + (fine - coarse) * blend : coarse;
-          const x = combine(n.gyroX,n.gyroFineX);
-          const y = combine(n.gyroY,n.gyroFineY);
+          const x = combine(interpolate("gyroX"), interpolate("gyroFineX"));
+          const y = combine(interpolate("gyroY"), interpolate("gyroFineY"));
           if (Number.isFinite(x)) axes[gyroBase] = clamp(axes[gyroBase] + x);
           if (Number.isFinite(y)) axes[gyroBase+1] = clamp(axes[gyroBase+1] - y);
         }
@@ -995,6 +1013,10 @@ enum BetterXCloud {
 
         window.__xcgPostNativeRumble = function (event) {
           try {
+            // The data-channel monitor owns rumble once it is live: the site's
+            // wrapper rescales the motors by Better xCloud's intensity and
+            // would play the same frame a second time.
+            if (performance.now() - __xcgChannelRumbleAt < 1000) return true;
             var pad = event && event.gamepad;
             var finite = function (value, fallback, min, max) { return __xcgFinite(value, fallback, min, max); };
             var payload = {
@@ -1027,6 +1049,59 @@ enum BetterXCloud {
           // Better xCloud from also driving the browser actuator a second time.
           return true;
         };
+
+        // Stereo haptics: the stream's input data channel carries the game's
+        // raw four-motor rumble frames (left/right grip + left/right trigger —
+        // the same reports xbox-xcloud-player and Better xCloud's device
+        // vibration feature parse). Reading them at the source keeps every
+        // game's left/right separation intact, even for titles whose
+        // playVibration wrapper never runs, and skips the site's own
+        // intensity rescaling (the native side applies its own).
+        let __xcgRumbleChannel = null, __xcgRumbleBound = null;
+        let __xcgChannelRumbleAt = -Infinity;
+        function __xcgHandleRumbleMessage(e) {
+          try {
+            if (typeof e !== "object" || !(e.data instanceof ArrayBuffer)) return;
+            const view = new DataView(e.data);
+            let offset = 0, messageType;
+            if (view.byteLength === 13) { messageType = view.getUint16(offset, true); offset += 2; }
+            else { messageType = view.getUint8(offset); offset += 1; }
+            if (!(messageType & 128)) return;
+            const vibrationType = view.getUint8(offset); offset += 1;
+            if (vibrationType !== 0) return; // 0 = FourMotorRumble
+            const gamepadIndex = view.getUint8(offset); offset += 1;
+            const left = view.getUint8(offset); offset += 1;
+            const right = view.getUint8(offset); offset += 1;
+            const leftTrigger = view.getUint8(offset); offset += 1;
+            const rightTrigger = view.getUint8(offset); offset += 1;
+            const durationMs = view.getUint16(offset, true);
+            __xcgChannelRumbleAt = performance.now();
+            const raw = { leftMotorPercent: left, rightMotorPercent: right,
+                          leftTriggerMotorPercent: leftTrigger, rightTriggerMotorPercent: rightTrigger };
+            window.webkit.messageHandlers.spikeHandler.postMessage({
+              type: "native-rumble", via: "dataChannel", gamepadIndex: gamepadIndex, raw: raw,
+              mainMotorPercents: { left: left, right: right },
+              triggerMotorPercents: { left: leftTrigger, right: rightTrigger },
+              leftMotorPercent: left, rightMotorPercent: right,
+              leftTriggerMotorPercent: leftTrigger, rightTriggerMotorPercent: rightTrigger,
+              durationMs: durationMs, duration: durationMs
+            });
+          } catch (error) {}
+        }
+        try {
+          if (typeof BxEventBus !== "undefined") {
+            BxEventBus.Stream.on("dataChannelCreated", (payload) => {
+              try {
+                const channel = payload && payload.dataChannel;
+                if (!channel || channel.label !== "input") return;
+                if (__xcgRumbleBound) { try { __xcgRumbleChannel?.removeEventListener("message", __xcgRumbleBound); } catch (e) {} }
+                __xcgRumbleChannel = channel;
+                __xcgRumbleBound = __xcgHandleRumbleMessage;
+                channel.addEventListener("message", __xcgRumbleBound);
+              } catch (e) {}
+            });
+          }
+        } catch (e) {}
 
         window.BxCBridge = {
           capabilities: __xcgBridgeCapability,
@@ -1125,6 +1200,13 @@ enum BetterXCloud {
             if (window.__xcgPollInput) {
               window.__xcgPollInput.values = __xcgNativeInput;
               window.__xcgPollInput.at = __xcgNativeInputAt;
+              // Short history so the polling adapter can advance the sticks by
+              // the last segment's velocity: native samples can clump or gap
+              // on a busy main thread, and reading only the newest value made
+              // the steering wheel advance in visible packets.
+              const hist = window.__xcgPollInput.history || (window.__xcgPollInput.history = []);
+              hist.push({ t: __xcgNativeInputAt, values: __xcgNativeInput });
+              if (hist.length > 3) hist.shift();
             }
             __xcgFlushNative();
             return window.__xcgPollInput?.installed || __xcgChannel !== null;

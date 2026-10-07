@@ -223,6 +223,24 @@ struct ControllerContracts {
         let standard = steer(simulate(6, pose: trembling)).filter { $0.t > 1.5 }
         check(shake(lightest.map(\.angle)) < 0.8 * shake(lightest.map(\.truth)) && shake(standard.map(\.angle)) < 0.65 * shake(standard.map(\.truth)),
               "Hand tremor is steadied, even with Smoothing at its lightest")
+        // The reported complaint: holding a turn with fast (9 Hz) hand tremor
+        // must not shiver the wheel. The frame-to-frame output steps stay well
+        // inside what a game's wheel graphic renders as a jump.
+        let heldTurn: (Double) -> (bank: Double, pitch: Double, yaw: Double) = { t in ((20 + 0.6 * sin(2 * .pi * 9 * t)) * deg, 35 * deg, 0) }
+        let heldRun = steer(simulate(6, pose: heldTurn)).filter { $0.t > 1.5 }.map(\.output)
+        let worstStep = zip(heldRun, heldRun.dropFirst()).map { abs($1 - $0) }.max() ?? 0
+        check(worstStep < 0.015, "A held turn with hand tremor advances smoothly (worst frame step \(worstStep))")
+        // The steadier wheel filter must not lag real turns.
+        let firm = steer(simulate(4, pose: { t in let x = min(max((t - 2) / 0.12, 0), 1); return (25 * deg * x * x * (3 - 2 * x), 35 * deg, 0) }))
+        let handStart = firm.first { abs($0.truth) > 0.9 * 25 * deg }!.t
+        let wheelStart = firm.first { abs($0.angle) > 0.9 * 25 * deg }!.t
+        check(wheelStart - handStart < 0.05, "A quick turn still arrives promptly with the steadier wheel filter")
+        var trace = SteeringTrace(window: 1)
+        trace.record(time: 0, output: 0.1)
+        trace.record(time: 0.5, output: -0.2)
+        trace.record(time: 1.4, output: 0.3)
+        trace.record(time: .nan, output: 0.5)
+        check(trace.export() == [[0.5, -0.2], [1.4, 0.3]], "Steering trace keeps a sliding window and rejects non-finite samples")
         // Rumble the app was not told about leaves no lasting pull.
         let rumbled = simulate(3, rumble: true, pose: { _ in (12 * deg, 35 * deg, 0) })
         let calm = simulate(3, pose: { _ in (12 * deg, 35 * deg, 0) }).map { Reading(t: $0.t + 3, gyro: $0.gyro, acc: $0.acc, gravity: $0.gravity) }

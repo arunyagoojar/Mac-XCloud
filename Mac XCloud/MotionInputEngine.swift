@@ -683,9 +683,12 @@ struct SteeringWheelEngine {
     private static func makeFilter(smoothing: Double) -> OneEuroFilter {
         let amount = min(max(smoothing.isFinite ? smoothing : 0.2, 0), 1)
         // Held still: 0 → 8 Hz, 0.2 → 5 Hz, 1 → 0.8 Hz. A turn raises the
-        // cutoff with its speed (beta), so only slow turns see a few ms of lag.
+        // cutoff with its speed (beta), so only slow turns see a few ms of
+        // lag. Beta stays moderate for the wheel: hand tremor while holding a
+        // turn is fast, and a steeper speed term let it re-open the cutoff,
+        // which showed up as a shivering wheel graphic.
         let cutoff = 8 * pow(0.1, amount)
-        return OneEuroFilter(minimumCutoff: cutoff, beta: 20, derivativeCutoff: 4)
+        return OneEuroFilter(minimumCutoff: cutoff, beta: 10, derivativeCutoff: 4)
     }
 
     /// Makes the current physical bank the straight-ahead position.
@@ -724,6 +727,37 @@ struct SteeringWheelEngine {
         if available || output != 0 { filter.reset() }
         angle = 0
         output = 0
+    }
+}
+
+/// Records the wheel's output over the last few seconds for the controller
+/// diagnostics export. The trace is what tells a jittery delivery apart from
+/// a jittery filter: burst-and-gap timestamps mean the page's poll loop is
+/// starved, even small frequent steps mean tremor or axis quantization.
+struct SteeringTrace {
+    struct Sample: Equatable {
+        var time: Double
+        var output: Double
+    }
+
+    private(set) var samples: [Sample] = []
+    /// How much history the export keeps, in seconds.
+    let window: Double
+
+    init(window: Double = 5) {
+        self.window = max(window.isFinite ? window : 5, 1)
+    }
+
+    mutating func record(time: Double, output: Double) {
+        guard time.isFinite, output.isFinite else { return }
+        samples.append(Sample(time: time, output: output))
+        while let first = samples.first, time - first.time > window {
+            samples.removeFirst()
+        }
+    }
+
+    func export() -> [[Double]] {
+        samples.map { [$0.time, $0.output] }
     }
 }
 

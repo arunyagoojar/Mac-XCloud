@@ -103,3 +103,20 @@ for (let percent=-100;percent<=100;percent++) {
   assert.equal(sample.A,1);assert.equal(sample.RightTrigger,.8);
 }
 console.log('PASS: all 201 steering levels survive adapter and outgoing channel without midrange amplification');
+
+// Dead reckoning: between native samples the sticks advance by the last
+// segment's velocity (capped at one segment), so a steady turn never waits
+// for the next native sample and a stopped hand never coasts.
+now=200000;
+state.values={nativeControllerCount:1,LeftThumbXAxis:.3};state.at=now;
+state.history=[{t:now-16,values:{LeftThumbXAxis:.2}},{t:now,values:{LeftThumbXAxis:.3}}];
+assert.equal(poll().axes[0],.3);
+now+=8;assert(Math.abs(poll().axes[0]-.35)<1e-9,'half a segment ahead');
+now+=8;assert(Math.abs(poll().axes[0]-.4)<1e-9,'a full segment ahead');
+now+=40;assert(Math.abs(poll().axes[0]-.4)<1e-9,'extrapolation caps at one segment');
+state.values={nativeControllerCount:1,LeftThumbXAxis:.4};state.at=now;
+state.history=[{t:now-16,values:{LeftThumbXAxis:.4}},{t:now,values:{LeftThumbXAxis:.4}}];
+assert.equal(poll().axes[0],.4,'equal samples stop the coast');
+state.history=[{t:now-400,values:{LeftThumbXAxis:.1}},{t:now,values:{LeftThumbXAxis:.4}}];
+assert.equal(poll().axes[0],.4,'a stale segment is not extrapolated');
+console.log('PASS: dead reckoning advances sticks between native samples and caps the coast');
