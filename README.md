@@ -17,6 +17,7 @@
     <a href="#app-shortcuts">Shortcuts</a> · 
     <a href="#installation--requirements">Download</a> · 
     <a href="#building-from-source">Build from Source</a>
+    
   </p>
 </div>
 
